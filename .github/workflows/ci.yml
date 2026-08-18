@@ -115,6 +115,14 @@ jobs:
       - name: Build service
         run: bun run build
 
+      - name: Assert Node runtime for gateway parity tests
+        # service/src/external-fetch-runtime.test.ts bundles the controlled-egress
+        # fetch engine the way service/Dockerfile.egress-gateway does and runs it
+        # under Node, which is what the shipped gateway image executes. It
+        # self-skips when `node` is absent, so assert the runtime here rather
+        # than letting the production-runtime coverage vanish silently.
+        run: node --version
+
       - name: Bun tests
         run: bun run test
 

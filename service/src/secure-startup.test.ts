@@ -41,6 +41,7 @@ const saved = {
   ledgerRequired: env.EGRESS_LEDGER_REQUIRED,
   fileServerUrl: env.EGRESS_GATEWAY_FILE_SERVER_URL,
   toolCallUrl: env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL,
+  externalFetchPolicyFile: env.EXTERNAL_FETCH_POLICY_FILE,
 };
 
 function restore(): void {
@@ -79,6 +80,7 @@ function restore(): void {
   env.EGRESS_LEDGER_REQUIRED = saved.ledgerRequired;
   env.EGRESS_GATEWAY_FILE_SERVER_URL = saved.fileServerUrl;
   env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL = saved.toolCallUrl;
+  env.EXTERNAL_FETCH_POLICY_FILE = saved.externalFetchPolicyFile;
 }
 
 afterEach(restore);
@@ -181,6 +183,7 @@ describe('hardened CodeAPI startup config', () => {
     env.EGRESS_LEDGER_REQUIRED = true;
     env.EGRESS_GATEWAY_FILE_SERVER_URL = 'http://file-server:3000';
     env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL = 'http://tool-call-server:3033';
+    env.EXTERNAL_FETCH_POLICY_FILE = '/run/codeapi/external-fetch-policy.json';
     process.env.REDIS_HOST = 'redis';
     process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = 'internal-token';
     process.env.CODEAPI_SYNTHETIC_ACCESS_TOKEN = 'synthetic-token-must-stay-on-api';
@@ -222,6 +225,11 @@ describe('hardened CodeAPI startup config', () => {
     env.EGRESS_GATEWAY_FILE_SERVER_URL = 'http://file-server:3000';
     env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL = '';
     expect(() => validateEgressGatewayHardenedConfig()).toThrow('EGRESS_GATEWAY_TOOL_CALL_SERVER_URL');
+    env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL = 'http://tool-call-server:3033';
+    env.EXTERNAL_FETCH_POLICY_FILE = '';
+    expect(() => validateEgressGatewayHardenedConfig()).toThrow('CODEAPI_EXTERNAL_FETCH_POLICY_FILE');
+
+    env.EXTERNAL_FETCH_POLICY_FILE = '/run/codeapi/external-fetch-policy.json';
 
     env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL = 'http://tool-call-server:3033';
     delete process.env.REDIS_HOST;

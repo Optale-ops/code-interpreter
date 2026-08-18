@@ -132,6 +132,31 @@ describe('NsJail args', () => {
       config.allowed_local_network_port = originalAllowedPort;
     }
   });
+
+  test('binds the same relay for governed fetch without enabling direct networking', () => {
+    const originalAllowedPort = config.allowed_local_network_port;
+    config.allowed_local_network_port = 3190;
+    try {
+      const args = buildArgs({
+        logPath: '/tmp/nsjail-test.log',
+        pkgdir: '/pkgs/python/3.14.4',
+        timeout: 1000,
+        memoryLimit: -1,
+        envVars: {},
+        command: ['/bin/bash', '/pkgs/python/3.14.4/run', 'main.py'],
+        identity: { slot: 0, uid: 65534, gid: 65534, perJobUid: false },
+        externalFetchGrantFile: '/tmp/nsjail-grant-random',
+      });
+
+      expect(hasArgPair(args, '-B', '/tmp/tcs.sock:/tmp/tcs.sock')).toBe(true);
+      expect(hasArgPair(args, '-R', '/tmp/nsjail-grant-random:/run/codeapi/egress-grant')).toBe(true);
+      expect(args.join('\n')).not.toContain('opaque-grant');
+      expect(args).not.toContain('--disable_clone_newnet');
+      expect(args.join('\n')).toContain('domain == AF_INET || domain == AF_INET6');
+    } finally {
+      config.allowed_local_network_port = originalAllowedPort;
+    }
+  });
 });
 
 describe('execute', () => {

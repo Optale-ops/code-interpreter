@@ -1,0 +1,260 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass localdev
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-a', 'localdev', 'ping']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  minio:
+    image: minio/minio:latest
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data
+    volumes:
+      - minio-data:/data
+
+  file-server:
+    build:
+      context: .
+      dockerfile: service/Dockerfile
+      target: production
+    environment:
+      MINIO_BUCKET: test-bucket
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: '9000'
+      MINIO_USE_SSL: 'false'
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      FILE_SERVER_PORT: '3000'
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
+      REDIS_PASSWORD: localdev
+      CODEAPI_INTERNAL_SERVICE_TOKEN: localdev-internal-service-token
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+  tool-call-server:
+    build:
+      context: .
+      dockerfile: service/Dockerfile.tool-call-server
+      target: production
+    environment:
+      TOOL_CALL_SERVER_PORT: '3033'
+      TOOL_CALL_REQUEST_TIMEOUT: '300000'
+      TOOL_CALL_SESSION_EXPIRY: '600'
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
+      REDIS_PASSWORD: localdev
+      CODEAPI_INTERNAL_SERVICE_TOKEN: localdev-internal-service-token
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  external-origin:
+    image: oven/bun:1.3.14
+    command: ['bun', 'run', '/fixtures/external-fetch-origin.ts']
+    volumes:
+      - ./tests/external-fetch-origin.ts:/fixtures/external-fetch-origin.ts:ro
+      - ./service/test-fixtures/external-fetch/key.pem:/fixtures/key.pem:ro
+      - ./service/test-fixtures/external-fetch/cert.pem:/fixtures/cert.pem:ro
+    networks:
+      default:
+        ipv4_address: 93.184.216.34
+        aliases:
+          - allowed.test
+
+  private-trap:
+    image: oven/bun:1.3.14
+    command: ['bun', 'run', '/fixtures/external-fetch-private-trap.ts']
+    volumes:
+      - ./tests/external-fetch-private-trap.ts:/fixtures/external-fetch-private-trap.ts:ro
+    networks:
+      private-test:
+        ipv4_address: 10.55.0.2
+        aliases:
+          - private.test
+
+  egress-gateway:
+    build:
+      context: .
+      dockerfile: service/Dockerfile.egress-gateway
+      target: production
+    environment:
+      SERVICE_NAME: egress-gateway
+      CODEAPI_HARDENED_SANDBOX_MODE: 'true'
+      CODEAPI_EGRESS_LEDGER_REQUIRED: 'true'
+      CODEAPI_EXTERNAL_FETCH_POLICY_FILE: /run/codeapi/external-fetch-policy.json
+      CODEAPI_EGRESS_GRANT_SECRET: localdev-egress-grant-secret-change-me-32b
+      CODEAPI_INTERNAL_SERVICE_TOKEN: localdev-internal-service-token
+      EGRESS_GATEWAY_PORT: '3190'
+      EGRESS_GATEWAY_FILE_SERVER_URL: http://file-server:3000
+      EGRESS_GATEWAY_TOOL_CALL_SERVER_URL: http://tool-call-server:3033
+      EGRESS_GATEWAY_MAX_TOOL_CALL_BYTES: '1048576'
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
+      REDIS_PASSWORD: localdev
+      NODE_EXTRA_CA_CERTS: /run/codeapi/test-ca.pem
+    volumes:
+      - ./tests/external-fetch-policy.json:/run/codeapi/external-fetch-policy.json:ro
+      - ./service/test-fixtures/external-fetch/cert.pem:/run/codeapi/test-ca.pem:ro
+    networks:
+      - default
+      - private-test
+    depends_on:
+      redis:
+        condition: service_healthy
+      file-server:
+        condition: service_started
+      tool-call-server:
+        condition: service_started
+      external-origin:
+        condition: service_started
+      private-trap:
+        condition: service_started
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:3190/ready']
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  sandbox-runner:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+      target: sandbox-api-baked-test
+    privileged: false
+    cgroup: host
+    cap_add:
+      - SYS_ADMIN
+      - SYS_CHROOT
+    security_opt:
+      - apparmor:unconfined
+      - seccomp:unconfined
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    environment:
+      KVM_ENABLED: 'false'
+      CODEAPI_HARDENED_SANDBOX_MODE: 'true'
+      EGRESS_GATEWAY_URL: http://egress-gateway:3190
+      SANDBOX_EXECUTE_BODY_LIMIT: 50mb
+      SANDBOX_PACKAGES_DIRECTORY: /pkgs
+      SANDBOX_LOG_LEVEL: INFO
+      SANDBOX_OUTPUT_MAX_SIZE: '65536'
+      SANDBOX_MAX_CONCURRENT_JOBS: '4'
+      SANDBOX_PER_JOB_UIDS: 'true'
+      SANDBOX_JOB_UID_BASE: '200000'
+      SANDBOX_JOB_GID_BASE: '200000'
+      SANDBOX_JOB_UID_COUNT: '4'
+      SANDBOX_WORKSPACE_REAPER_MAX_AGE_SECONDS: '3600'
+      SANDBOX_RUN_TIMEOUT: '300000'
+      SANDBOX_RUN_CPU_TIME: '300000'
+      SANDBOX_COMPILE_TIMEOUT: '30000'
+      SANDBOX_ALLOWED_LOCAL_NETWORK_PORT: '3190'
+      SANDBOX_FORWARD_TARGET: egress-gateway:3190
+      SANDBOX_REQUIRE_EGRESS_MANIFEST: 'true'
+      SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY: MCowBQYDK2VwAyEAeY3PRoTS3adfU6E3gQUB5hSZdrdMSw6OrKkH4UhYh0U=
+    depends_on:
+      egress-gateway:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'bun',
+          '-e',
+          "const response = await fetch('http://localhost:2000/api/v2/runtimes'); process.exit(response.ok ? 0 : 1)",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 100
+      start_period: 10s
+
+  service-worker:
+    build:
+      context: .
+      dockerfile: service/Dockerfile
+      target: worker
+    environment:
+      LOCAL_MODE: 'true'
+      CODEAPI_HARDENED_SANDBOX_MODE: 'true'
+      CODEAPI_AUTH_PROVIDER: none
+      CODEAPI_EXECUTION_MANIFEST_PRIVATE_KEY: MC4CAQAwBQYDK2VwBCIEIBoxzSJjQ5jTVyuohHtlD+uDGqv/tZ6hQS2CmxuOg2Wn
+      SANDBOX_ENDPOINT: http://sandbox-runner:2000/api/v2
+      EGRESS_GATEWAY_URL: http://egress-gateway:3190
+      CODEAPI_INTERNAL_SERVICE_TOKEN: localdev-internal-service-token
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
+      REDIS_PASSWORD: localdev
+      PYTHON_CONCURRENCY: '1'
+      OTHER_CONCURRENCY: '4'
+      WORKER_HEALTH_PORT: '3113'
+    depends_on:
+      redis:
+        condition: service_healthy
+      sandbox-runner:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: service/Dockerfile
+      target: api
+    environment:
+      LOCAL_MODE: 'true'
+      CODEAPI_HARDENED_SANDBOX_MODE: 'true'
+      CODEAPI_AUTH_PROVIDER: none
+      CODEAPI_ALLOW_AUTH_PROVIDER_NONE: 'true'
+      CODEAPI_HTTP_JSON_LIMIT: 50mb
+      SERVICE_PORT: '3112'
+      SANDBOX_ENDPOINT: http://sandbox-runner:2000/api/v2
+      EGRESS_GATEWAY_URL: http://egress-gateway:3190
+      FILE_SERVER_URL: http://file-server:3000
+      TOOL_CALL_SERVER_URL: http://tool-call-server:3033
+      CODEAPI_INTERNAL_SERVICE_TOKEN: localdev-internal-service-token
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
+      REDIS_PASSWORD: localdev
+      PTC_MODE: replay
+    depends_on:
+      redis:
+        condition: service_healthy
+      service-worker:
+        condition: service_started
+
+  e2e:
+    image: oven/bun:1.3.14
+    command: ['bun', 'run', '/tests/external-fetch-e2e.ts']
+    environment:
+      SERVICE_URL: http://api:3112
+    volumes:
+      - ./tests/external-fetch-e2e.ts:/tests/external-fetch-e2e.ts:ro
+    depends_on:
+      api:
+        condition: service_started
+      sandbox-runner:
+        condition: service_healthy
+      external-origin:
+        condition: service_started
+      private-trap:
+        condition: service_started
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 93.184.216.0/24
+  private-test:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.55.0.0/24
+
+volumes:
+  minio-data:

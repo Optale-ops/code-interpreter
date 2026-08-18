@@ -62,9 +62,36 @@ async function waitUntilReady(
   throw new Error(`tool-call socket proxy did not become ready within ${timeoutMs}ms`);
 }
 
+/**
+ * Whether this runner has a relay to start at all. Both capabilities that ride
+ * the relay socket — POST /tool-call and POST /external-fetch — need the same
+ * two settings, so the check lives here and `launch()` uses it too rather than
+ * restating the condition.
+ */
+export function toolCallSocketProxyConfigured(): boolean {
+  return config.allowed_local_network_port > 0
+    && (process.env.SANDBOX_FORWARD_TARGET?.trim() ?? '') !== '';
+}
+
+/**
+ * Whether an execution has to wait for the relay before it runs. NsJail binds
+ * the relay socket for a tool-call job and for any `run` that carries an
+ * external-fetch grant, so both paths need Node up — but only where a relay is
+ * configured, so a grant-bearing execution on a runner without one behaves as
+ * it always did. A tool-call scope still demands the relay unconditionally and
+ * surfaces the misconfiguration instead of running without its capability.
+ */
+export function relayReadinessRequired(opts: {
+  toolCallSocketEnabled: boolean;
+  externalFetchEnabled: boolean;
+}): boolean {
+  if (opts.toolCallSocketEnabled) return true;
+  return opts.externalFetchEnabled && toolCallSocketProxyConfigured();
+}
+
 async function launch(): Promise<void> {
   const rawTarget = process.env.SANDBOX_FORWARD_TARGET?.trim() ?? '';
-  if (config.allowed_local_network_port <= 0 || !rawTarget) {
+  if (!toolCallSocketProxyConfigured()) {
     throw new Error('tool-call socket proxy is not configured');
   }
 

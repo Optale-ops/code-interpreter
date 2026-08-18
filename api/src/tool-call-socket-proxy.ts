@@ -150,6 +150,50 @@ function buildForwardedHeaders(
   return out;
 }
 
+const EXTERNAL_FETCH_REQUEST_HEADERS: Record<string, true> = {
+  'content-type': true,
+  'content-length': true,
+  'x-request-id': true,
+  'x-codeapi-egress-grant': true,
+};
+
+const EXTERNAL_FETCH_RESPONSE_HEADERS: Record<string, true> = {
+  'content-type': true,
+  'content-length': true,
+  'x-request-id': true,
+  'x-codeapi-egress-host': true,
+  'x-codeapi-egress-redirects': true,
+  'trailer': true,
+};
+
+const EXTERNAL_FETCH_OUTCOMES: Record<string, true> = {
+  OK: true,
+  HOST_NOT_ALLOWED: true,
+  URL_REJECTED: true,
+  ADDRESS_NOT_GLOBAL: true,
+  REDIRECT_REJECTED: true,
+  CONTENT_TYPE_REJECTED: true,
+  RESPONSE_TOO_LARGE: true,
+  FETCH_TIMEOUT: true,
+  FETCH_BUDGET_EXCEEDED: true,
+  FETCH_FAILED: true,
+};
+
+function buildExternalFetchHeaders(
+  reqHeaders: http.IncomingHttpHeaders,
+  upstreamHost: string,
+): http.OutgoingHttpHeaders {
+  const out: http.OutgoingHttpHeaders = {};
+  for (const [key, value] of Object.entries(reqHeaders)) {
+    const lowerKey = key.toLowerCase();
+    if (EXTERNAL_FETCH_REQUEST_HEADERS[lowerKey] !== true || value == null) continue;
+    out[lowerKey] = value;
+  }
+  out.host = upstreamHost;
+  out.connection = 'close';
+  return out;
+}
+
 /* True only when the header has at least one non-empty, non-whitespace
  * character. Naive `!headers[name]` is bypassable: Node joins duplicate
  * request headers with `, ` (per RFC 7230 §3.2.2), so two empty
@@ -297,73 +341,53 @@ export async function startToolCallSocketProxy(
     socket.setTimeout(requestBodyTimeoutMs, () => destroySocket(socket));
     req.setTimeout(requestBodyTimeoutMs, () => destroySocket(socket));
     res.setHeader('Connection', 'close');
+    res.on('finish', () => socket.end());
 
-    res.on('finish', () => {
-      socket.end();
-    });
-
-    if (req.method !== 'POST' || req.url !== '/tool-call') {
+    const isToolCall = req.method === 'POST' && req.url === '/tool-call';
+    const isExternalFetch = req.method === 'POST' && req.url === '/external-fetch';
+    if (!isToolCall && !isExternalFetch) {
       req.resume();
       res.writeHead(404, { 'Content-Type': 'text/plain', Connection: 'close' });
       res.end('not found');
       return;
     }
 
-    /* PTC-header presence filter at the proxy boundary. Three reasons:
-     *
-     * (1) Route opacity. If a sandbox attacker probes /tool-call without
-     *     the SDK-supplied PTC headers, the upstream's 404 leaks Express's
-     *     framing (ETag/X-Request-ID/charset/content-length) which is
-     *     visibly different from the proxy's own 404 for unknown paths.
-     *     Filtering at the proxy means missing-header probes never reach
-     *     the upstream and the response is byte-identical to /any/unknown.
-     *
-     * (2) Cheap rejection. Don't burn an active-request slot or open an
-     *     upstream connection for a request that's going to be rejected.
-     *
-     * (3) Preserves legitimate 404s. The previous shape blanket-masked
-     *     ALL upstream 404 responses, which broke "Session not found" and
-     *     other structured upstream errors that the SDK's preamble parses
-     *     as JSON (json.loads("not found") raises). With the filter
-     *     here, only missing-header probes are masked; a genuine 404 with
-     *     a JSON body for an authenticated request still reaches the
-     *     SDK intact.
-     *
-     * The proxy only checks PRESENCE — actual cryptographic validation
-     * happens at the upstream. An attacker supplying garbage values for
-     * these headers gets forwarded and the upstream rejects with its
-     * structured response, but they've already revealed sandbox-side
-     * activity by sending non-empty headers, so route opacity isn't the
-     * goal there. */
-    if (
-      !hasPtcHeaderValue(req.headers['x-execution-id'])
-      || !hasPtcHeaderValue(req.headers['x-tool-call-id'])
-      || !hasPtcHeaderValue(req.headers['x-callback-token'])
-    ) {
+    const hasRequiredHeaders = isToolCall
+      ? hasPtcHeaderValue(req.headers['x-execution-id'])
+        && hasPtcHeaderValue(req.headers['x-tool-call-id'])
+        && hasPtcHeaderValue(req.headers['x-callback-token'])
+      : hasPtcHeaderValue(req.headers['x-codeapi-egress-grant']);
+    if (!hasRequiredHeaders) {
       req.resume();
       res.writeHead(404, { 'Content-Type': 'text/plain', Connection: 'close' });
       res.end('not found');
       return;
     }
 
-    /* Smuggling defense — block before we do anything else with the
-     * request so neither our active-request budget nor any upstream
-     * connection is consumed. */
-    if (isSmugglingShaped(req.headers)) {
+    if (isSmugglingShaped(req.headers) || (isExternalFetch && req.headers['transfer-encoding'] !== undefined)) {
       req.resume();
       res.writeHead(400, { 'Content-Type': 'text/plain', Connection: 'close' });
       res.end('ambiguous Content-Length and Transfer-Encoding');
       return;
     }
 
-    /* Content-Length precheck — if the client honestly declares a body
-     * larger than maxBodyBytes, reject BEFORE opening an upstream and
-     * BEFORE leaking any of those bytes through req.pipe(upstream). The
-     * runtime byte counter below is the second line of defense for
-     * chunked uploads and dishonest CL values, but this gate handles
-     * the common case cleanly. */
-    const declaredCL = Number(req.headers['content-length'] ?? '0');
-    if (Number.isFinite(declaredCL) && declaredCL > maxBodyBytes) {
+    const requestBodyLimit = isExternalFetch ? 16_384 : maxBodyBytes;
+    const declaredHeaderValue = req.headers['content-length'];
+    /* Content-Length is contractually required on /external-fetch (W730 §5.2 —
+     * no transfer-encoding/content-length ambiguity), so an absent header is a
+     * 411 there. /tool-call has always accepted a chunked body with no
+     * Content-Length, so absence stays legal and the equality check below is
+     * skipped rather than comparing a real body against an implied 0. */
+    const declaredCL = declaredHeaderValue === undefined && !isExternalFetch
+      ? undefined
+      : Number(declaredHeaderValue);
+    if (declaredCL !== undefined && (!Number.isSafeInteger(declaredCL) || declaredCL < 0)) {
+      req.resume();
+      res.writeHead(411, { 'Content-Type': 'text/plain', Connection: 'close' });
+      res.end('Content-Length is required');
+      return;
+    }
+    if (declaredCL !== undefined && declaredCL > requestBodyLimit) {
       req.resume();
       res.writeHead(413, { 'Content-Type': 'text/plain', Connection: 'close' });
       res.end('request body too large');
@@ -379,7 +403,9 @@ export async function startToolCallSocketProxy(
       });
       res.end(JSON.stringify({
         success: false,
-        error: 'Too many concurrent tool-call requests',
+        error: isExternalFetch
+          ? 'Too many concurrent external-fetch requests'
+          : 'Too many concurrent tool-call requests',
       }));
       return;
     }
@@ -397,16 +423,6 @@ export async function startToolCallSocketProxy(
     let bodyBytes = 0;
     let rejected = false;
     let upstreamClosed = false;
-
-    /* Absolute body-upload deadline. socket.setTimeout / req.setTimeout
-     * are idle timers and reset on every byte, so a malicious client
-     * dripping bytes just under the idle threshold (slow-loris) bypasses
-     * them. Node's `server.requestTimeout` was meant to bound this but
-     * empirically does NOT fire mid-body for unix-socket clients in
-     * Node 22 (probed; drip kept flowing past 3x the configured value).
-     * This explicit setTimeout fires unconditionally `requestBodyTimeoutMs`
-     * after the request handler runs and is cleared once the body is
-     * fully received. */
     const bodyUploadDeadline = setTimeout(() => {
       if (req.complete || rejected) return;
       destroySocket(socket);
@@ -416,23 +432,13 @@ export async function startToolCallSocketProxy(
     req.on('aborted', clearBodyUploadDeadline);
     res.on('finish', clearBodyUploadDeadline);
     res.on('close', clearBodyUploadDeadline);
+    req.on('end', () => socket.setTimeout(activeRequestTimeoutMs, () => destroySocket(socket)));
 
-    req.on('end', () => {
-      socket.setTimeout(activeRequestTimeoutMs, () => destroySocket(socket));
-    });
-
-    /* BUFFER then forward — do NOT open upstream or pipe bytes until the
-     * full body is received. Streaming would let a slow-loris that drips
-     * body bytes pin an UPSTREAM connection slot for the entire body-
-     * upload window, even though the proxy itself bounds its own socket
-     * lifetime. Tool-call payloads are small JSON (capped at maxBodyBytes,
-     * default 1 MiB), so buffering is cheap and the security property
-     * "upstream never sees a partial request" is much stronger. */
     const bodyChunks: Buffer[] = [];
     let upstream: http.ClientRequest | undefined;
     const abortUpstream = (): void => {
       if (!upstream || upstreamClosed || res.writableEnded) return;
-      upstream.destroy(new Error('tool-call client disconnected'));
+      upstream.destroy(new Error(`${isExternalFetch ? 'external-fetch' : 'tool-call'} client disconnected`));
     };
     req.on('aborted', abortUpstream);
     res.on('close', abortUpstream);
@@ -441,7 +447,7 @@ export async function startToolCallSocketProxy(
     req.on('data', chunk => {
       if (rejected) return;
       bodyBytes += chunk.length;
-      if (bodyBytes > maxBodyBytes) {
+      if (bodyBytes > requestBodyLimit) {
         rejected = true;
         res.writeHead(413, { 'Content-Type': 'text/plain', Connection: 'close' });
         res.end('request body too large');
@@ -454,62 +460,97 @@ export async function startToolCallSocketProxy(
     req.on('end', () => {
       if (rejected) return;
       const body = bodyChunks.length === 1 ? bodyChunks[0] : Buffer.concat(bodyChunks);
+      if (declaredCL !== undefined && body.length !== declaredCL) {
+        res.writeHead(400, { 'Content-Type': 'text/plain', Connection: 'close' });
+        res.end('request body length mismatch');
+        return;
+      }
+      if (isExternalFetch) {
+        if ((req.headers['content-type'] ?? '').toString().split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
+          res.writeHead(400, { 'Content-Type': 'application/json', Connection: 'close' });
+          res.end(JSON.stringify({ error: 'URL_REJECTED', message: 'External fetch URL is invalid' }));
+          return;
+        }
+        let envelope: unknown;
+        try {
+          envelope = JSON.parse(body.toString('utf8'));
+        } catch {
+          envelope = undefined;
+        }
+        if (
+          !envelope
+          || typeof envelope !== 'object'
+          || Array.isArray(envelope)
+          || Object.keys(envelope).length !== 1
+          || !('url' in envelope)
+          || typeof envelope.url !== 'string'
+        ) {
+          res.writeHead(400, { 'Content-Type': 'application/json', Connection: 'close' });
+          res.end(JSON.stringify({ error: 'URL_REJECTED', message: 'External fetch URL is invalid' }));
+          return;
+        }
+      }
 
-      /* Strip ALL hop-by-hop headers before forwarding (RFC 7230 §6.1).
-       * Previously we only stripped `proxy-connection`, which left
-       * Upgrade, TE, Trailer, and friends as a vector for protocol
-       * confusion at the upstream. */
-      const headers = buildForwardedHeaders(req.headers, target.host);
-      /* Override declared content-length with the actual buffered size
-       * — if the client lied, what we send is what we have. */
+      const headers = isExternalFetch
+        ? buildExternalFetchHeaders(req.headers, target.host)
+        : buildForwardedHeaders(req.headers, target.host);
       headers['content-length'] = body.length;
-
       upstream = transport.request({
         protocol: target.protocol,
         hostname: target.hostname,
         port: target.port || undefined,
         method: 'POST',
-        path: '/tool-call',
+        path: isExternalFetch ? '/external-fetch' : '/tool-call',
         headers,
       }, upstreamRes => {
         if (rejected) {
           upstreamRes.resume();
           return;
         }
-        /* Strip hop-by-hop on the response path. Upstream's Connection /
-         * Keep-Alive / Upgrade headers describe the proxy <-> upstream
-         * link, not what we should tell the sandbox client. */
-        const respHeaders: http.OutgoingHttpHeaders = {};
-        for (const [k, v] of Object.entries(upstreamRes.headers)) {
-          if (HOP_BY_HOP_HEADERS.has(k.toLowerCase())) continue;
-          if (v == null) continue;
-          respHeaders[k] = v;
+        const responseHeaders: http.OutgoingHttpHeaders = {};
+        for (const [key, value] of Object.entries(upstreamRes.headers)) {
+          const lowerKey = key.toLowerCase();
+          if (value == null) continue;
+          if (isExternalFetch) {
+            if (EXTERNAL_FETCH_RESPONSE_HEADERS[lowerKey] !== true) continue;
+            if (lowerKey === 'trailer' && value.toString().toLowerCase() !== 'x-codeapi-egress-outcome') continue;
+          } else if (HOP_BY_HOP_HEADERS.has(lowerKey)) {
+            continue;
+          }
+          responseHeaders[lowerKey] = value;
         }
-        respHeaders.Connection = 'close';
-        res.writeHead(upstreamRes.statusCode || 502, respHeaders);
-        upstreamRes.pipe(res);
+        responseHeaders.Connection = 'close';
+        res.writeHead(upstreamRes.statusCode || 502, responseHeaders);
+        if (!isExternalFetch) {
+          upstreamRes.pipe(res);
+          return;
+        }
+        upstreamRes.on('data', chunk => res.write(chunk));
+        upstreamRes.on('end', () => {
+          const outcome = upstreamRes.trailers['x-codeapi-egress-outcome'];
+          if (typeof outcome === 'string' && EXTERNAL_FETCH_OUTCOMES[outcome] === true) {
+            res.addTrailers({ 'X-CodeAPI-Egress-Outcome': outcome });
+          }
+          res.end();
+        });
       });
       activeUpstreams += 1;
-
       upstream.on('close', () => {
         upstreamClosed = true;
         activeUpstreams = Math.max(0, activeUpstreams - 1);
         releaseActiveRequest();
       });
-
       upstream.setTimeout(activeRequestTimeoutMs, () => {
-        upstream?.destroy(new Error('tool-call upstream timeout'));
+        upstream?.destroy(new Error(`${isExternalFetch ? 'external-fetch' : 'tool-call'} upstream timeout`));
       });
-
       upstream.on('error', error => {
         if (rejected) return;
-        log.error('tool-call socket proxy upstream error', error);
+        log.error(`${isExternalFetch ? 'external-fetch' : 'tool-call'} socket proxy upstream error`, error);
         if (!res.headersSent) {
           res.writeHead(502, { 'Content-Type': 'text/plain', Connection: 'close' });
         }
         res.end('bad gateway');
       });
-
       upstream.end(body);
     });
   });

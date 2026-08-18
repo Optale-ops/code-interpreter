@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import RedisMock from 'ioredis-mock';
 import type { Server } from 'http';
 import type { AddressInfo } from 'net';
+import path from 'path';
 import { env } from './config';
 import {
   assertEgressGrantActive,
@@ -194,6 +195,7 @@ beforeEach(() => {
   env.EGRESS_GATEWAY_MAX_PATH_LENGTH = 256;
   env.EGRESS_GATEWAY_MAX_NESTING_DEPTH = 10;
   env.EGRESS_LEDGER_REQUIRED = false;
+  env.EXTERNAL_FETCH_POLICY_FILE = path.resolve(__dirname, '../config/external-fetch-policy.json');
   process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = INTERNAL_TOKEN;
   upstreamCalls = [];
   upstreamResponse = new Response('ok', { status: 200 });
@@ -1079,6 +1081,71 @@ describe('egress gateway routes', () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: 'Malformed PTC tool-call JSON' });
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  test('keeps external-fetch opaque without a non-empty grant', async () => {
+    const opaqueHeaders: Array<Record<string, string>> = [
+      { 'Content-Type': 'application/json' },
+      { 'Content-Type': 'application/json', [EGRESS_GRANT_HEADER]: '' },
+    ];
+    for (const headers of opaqueHeaders) {
+      const response = await gatewayFetch('/external-fetch', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ url: 'https://unlisted.example/file.pdf' }),
+      });
+      expect(response.status).toBe(404);
+      expect(response.headers.get('content-type')).toStartWith('text/plain');
+      expect(await response.text()).toBe('not found');
+    }
+  });
+
+  test('rejects non-POST external-fetch methods and caller-selected envelope fields', async () => {
+    const nonPost = await gatewayFetch('/external-fetch', {
+      method: 'PUT',
+      headers: { ...grantHeader(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'https://unlisted.example/file.pdf' }),
+    });
+    expect(nonPost.status).toBe(404);
+
+    const unknownField = await gatewayFetch('/external-fetch', {
+      method: 'POST',
+      headers: { ...grantHeader(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: 'https://unlisted.example/file.pdf',
+        method: 'POST',
+      }),
+    });
+    expect(unknownField.status).toBe(400);
+    expect(await unknownField.json()).toEqual({
+      error: 'URL_REJECTED',
+      message: 'External fetch URL is invalid',
+    });
+  });
+
+  test('rejects external-fetch envelopes above 16 KiB before destination work', async () => {
+    const response = await gatewayFetch('/external-fetch', {
+      method: 'POST',
+      headers: { ...grantHeader(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: `https://${'a'.repeat(16_384)}.example/file.pdf` }),
+    });
+    expect(response.status).toBe(413);
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  test.each([
+    ['https://unlisted.example/file.pdf', 'HOST_NOT_ALLOWED'],
+    ['http://temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com/file.pdf', 'URL_REJECTED'],
+    ['https://temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com:444/file.pdf', 'URL_REJECTED'],
+  ])('fails closed before DNS for denied URL %s', async (url, code) => {
+    const response = await gatewayFetch('/external-fetch', {
+      method: 'POST',
+      headers: { ...grantHeader(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ error: code });
     expect(upstreamCalls).toHaveLength(0);
   });
 });

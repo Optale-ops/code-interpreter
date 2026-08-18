@@ -119,6 +119,45 @@ describe('tool-call socket proxy', () => {
     await upstream.close();
   });
 
+  test('preserves chunked tool-call requests without Content-Length', async () => {
+    const upstream = await startUpstream();
+    const socketPath = makeSocketPath();
+    const proxy = await startToolCallSocketProxy({
+      socketPath,
+      rawTarget: upstream.url,
+      log: { log() {}, warn() {}, error() {} },
+    });
+    handles.push(proxy);
+
+    const client = await createRawSocket(socketPath);
+    const responseChunks: Buffer[] = [];
+    const closed = Promise.withResolvers<void>();
+    client.on('data', chunk => responseChunks.push(Buffer.from(chunk)));
+    client.once('close', closed.resolve);
+    const body = '{"tool_name":"safe","input":{}}';
+    client.write([
+      'POST /tool-call HTTP/1.1',
+      'Host: local',
+      'Transfer-Encoding: chunked',
+      'X-Execution-ID: test-exec-id',
+      'X-Tool-Call-ID: test-call-001',
+      'X-Callback-Token: test-callback-token',
+      'Connection: close',
+      '',
+      body.length.toString(16),
+      body,
+      '0',
+      '',
+      '',
+    ].join('\r\n'));
+    await closed.promise;
+
+    const response = Buffer.concat(responseChunks).toString('utf8');
+    expect(response).toContain('HTTP/1.1 200 OK');
+    expect(response).toContain('tool_name');
+    await upstream.close();
+  });
+
   test('destroys idle raw connections so socket probes cannot pin FDs', async () => {
     const upstream = await startUpstream();
     const socketPath = makeSocketPath();
@@ -346,6 +385,121 @@ describe('tool-call socket proxy', () => {
     expect(response.body).toBe('request body too large');
     expect(upstreamCalls).toBe(0);
     await new Promise<void>(resolve => server.close(() => resolve()));
+  });
+
+  test('forwards only the fixed external-fetch envelope and safe response metadata', async () => {
+    const upstreamRequests: Array<{ headers: http.IncomingHttpHeaders; body: string }> = [];
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      req.on('end', () => {
+        upstreamRequests.push({ headers: req.headers, body: Buffer.concat(chunks).toString('utf8') });
+        res.writeHead(200, {
+          'Content-Type': 'application/pdf',
+          'X-Request-ID': 'request-123',
+          'X-CodeAPI-Egress-Host': 'allowed.test',
+          'X-CodeAPI-Egress-Redirects': '1',
+          'X-Unsafe-Upstream-Header': 'must-not-cross',
+        });
+        res.write('pdf');
+        res.end();
+      });
+    });
+    const listening = Promise.withResolvers<void>();
+    server.listen(0, '127.0.0.1', listening.resolve);
+    await listening.promise;
+    const address = server.address();
+    if (address == null || typeof address === 'string') throw new Error('bad address');
+    const socketPath = makeSocketPath();
+    const proxy = await startToolCallSocketProxy({
+      socketPath,
+      rawTarget: `http://127.0.0.1:${address.port}`,
+      log: { log() {}, warn() {}, error() {} },
+    });
+    handles.push(proxy);
+
+    const request = (body: string, headers: Record<string, string>) => {
+      const result = Promise.withResolvers<{
+        status: number;
+        body: string;
+        headers: http.IncomingHttpHeaders;
+        trailers: http.IncomingHttpHeaders;
+      }>();
+      const outgoing = http.request({
+        socketPath,
+        method: 'POST',
+        path: '/external-fetch',
+        headers,
+      }, response => {
+        const chunks: Buffer[] = [];
+        response.on('data', chunk => chunks.push(Buffer.from(chunk)));
+        response.on('end', () => result.resolve({
+          status: response.statusCode ?? 0,
+          body: Buffer.concat(chunks).toString('utf8'),
+          headers: response.headers,
+          trailers: response.trailers,
+        }));
+      });
+      outgoing.on('error', result.reject);
+      outgoing.end(body);
+      return result.promise;
+    };
+
+    const body = JSON.stringify({ url: 'https://allowed.test/file.pdf?secret=marker' });
+    const response = await request(body, {
+      'Content-Type': 'application/json',
+      'Content-Length': String(Buffer.byteLength(body)),
+      'X-CodeAPI-Egress-Grant': 'opaque-grant',
+      'X-Request-ID': 'request-123',
+      Authorization: 'must-not-cross',
+      Cookie: 'must-not-cross',
+      Range: 'must-not-cross',
+      'X-Caller-Header': 'must-not-cross',
+    });
+    expect(response.status).toBe(200);
+    expect(response.body).toBe('pdf');
+    expect(response.headers['content-type']).toBe('application/pdf');
+    expect(response.headers['x-request-id']).toBe('request-123');
+    expect(response.headers['x-codeapi-egress-host']).toBe('allowed.test');
+    expect(response.headers['x-codeapi-egress-redirects']).toBe('1');
+    expect(response.headers['x-unsafe-upstream-header']).toBeUndefined();
+    expect(upstreamRequests).toHaveLength(1);
+    expect(upstreamRequests[0]?.body).toBe(body);
+    expect(upstreamRequests[0]?.headers.authorization).toBeUndefined();
+    expect(upstreamRequests[0]?.headers.cookie).toBeUndefined();
+    expect(upstreamRequests[0]?.headers.range).toBeUndefined();
+    expect(upstreamRequests[0]?.headers['x-caller-header']).toBeUndefined();
+    expect(upstreamRequests[0]?.headers['x-codeapi-egress-grant']).toBe('opaque-grant');
+
+    const missingGrant = await request(body, {
+      'Content-Type': 'application/json',
+      'Content-Length': String(Buffer.byteLength(body)),
+    });
+    expect(missingGrant.status).toBe(404);
+    expect(missingGrant.body).toBe('not found');
+    expect(upstreamRequests).toHaveLength(1);
+
+    const unknownFieldBody = JSON.stringify({ url: 'https://allowed.test/file.pdf', method: 'POST' });
+    const unknownField = await request(unknownFieldBody, {
+      'Content-Type': 'application/json',
+      'Content-Length': String(Buffer.byteLength(unknownFieldBody)),
+      'X-CodeAPI-Egress-Grant': 'opaque-grant',
+    });
+    expect(unknownField.status).toBe(400);
+    expect(upstreamRequests).toHaveLength(1);
+
+    const oversizedBody = JSON.stringify({ url: `https://allowed.test/${'a'.repeat(16_384)}` });
+    const oversized = await request(oversizedBody, {
+      'Content-Type': 'application/json',
+      'Content-Length': String(Buffer.byteLength(oversizedBody)),
+      'X-CodeAPI-Egress-Grant': 'opaque-grant',
+    });
+    expect(oversized.status).toBe(413);
+    expect(upstreamRequests).toHaveLength(1);
+
+    const closed = Promise.withResolvers<void>();
+    server.close(() => closed.resolve());
+    await closed.promise;
   });
 
   /* Integration tests for the connection-rate limiter live in
