@@ -13,11 +13,17 @@ COPY service/src ./src
 COPY shared /shared
 RUN bun build ./src/egress-gateway.ts --target=node --format=cjs --outfile=./egress-gateway.cjs
 
-FROM oven/bun:1.3.14 AS production
+# The gateway runs the pre-bundled CJS artifact under Node, not Bun: the
+# /external-fetch route emits an HTTP response trailer
+# (X-CodeAPI-Egress-Outcome) and pins the connection IP through
+# https.request({ lookup }), and Bun's node:http/node:https compat layer
+# does not carry either faithfully. The production stage therefore bases on
+# the Node image directly instead of grafting a node binary (and no shared
+# library closure) into the bun image.
+FROM node:22-slim AS production
 ENV NODE_ENV=production
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
-COPY --from=node:22-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=build /app/egress-gateway.cjs ./egress-gateway.cjs
 EXPOSE 3190
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

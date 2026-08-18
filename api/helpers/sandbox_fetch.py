@@ -151,7 +151,7 @@ def _read_grant() -> str:
     try:
         with open(_GRANT_FILE, "r", encoding="utf-8") as grant_file:
             grant = grant_file.read(16_385)
-    except FileNotFoundError:
+    except OSError:
         grant = os.environ.get(_GRANT_ENV, "")
     if not grant.strip() or len(grant) > 16_384:
         raise SandboxFetchError("FETCH_FAILED")

@@ -293,4 +293,34 @@ describe('sandbox_fetch typed helper', () => {
     });
     expect(fs.readFileSync(output, 'utf8')).toBe('pdf fixture');
   });
+
+  test('maps an unreadable grant file to the stable FETCH_FAILED code', async () => {
+    const root = workspace();
+    const victim = path.join(root, 'egress-grant');
+    fs.writeFileSync(victim, 'opaque-grant', { mode: 0o000 });
+    const code = [
+      'import sandbox_fetch, sys',
+      `sandbox_fetch._GRANT_FILE = ${JSON.stringify(victim)}`,
+      `sys.argv = ["sandbox_fetch.py", "--output", ${JSON.stringify(path.join(root, 'out.pdf'))}, "--url-stdin"]`,
+      'raise SystemExit(sandbox_fetch._main())',
+    ].join(';');
+    const child = Bun.spawn(['python3', '-c', code], {
+      env: { ...process.env, PYTHONPATH: HELPER_DIR, SANDBOX_EGRESS_GRANT: undefined },
+      stdin: 'pipe',
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    child.stdin.write('https://allowed.test/success');
+    child.stdin.end();
+    const [status, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(status).toBe(1);
+    expect(stdout).toBe('');
+    expect(stderr.trim()).toBe('FETCH_FAILED');
+    expect(stderr).not.toContain('Traceback');
+    expect(relayCalls).toBe(0);
+  });
 });

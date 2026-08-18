@@ -119,6 +119,45 @@ describe('tool-call socket proxy', () => {
     await upstream.close();
   });
 
+  test('preserves chunked tool-call requests without Content-Length', async () => {
+    const upstream = await startUpstream();
+    const socketPath = makeSocketPath();
+    const proxy = await startToolCallSocketProxy({
+      socketPath,
+      rawTarget: upstream.url,
+      log: { log() {}, warn() {}, error() {} },
+    });
+    handles.push(proxy);
+
+    const client = await createRawSocket(socketPath);
+    const responseChunks: Buffer[] = [];
+    const closed = Promise.withResolvers<void>();
+    client.on('data', chunk => responseChunks.push(Buffer.from(chunk)));
+    client.once('close', closed.resolve);
+    const body = '{"tool_name":"safe","input":{}}';
+    client.write([
+      'POST /tool-call HTTP/1.1',
+      'Host: local',
+      'Transfer-Encoding: chunked',
+      'X-Execution-ID: test-exec-id',
+      'X-Tool-Call-ID: test-call-001',
+      'X-Callback-Token: test-callback-token',
+      'Connection: close',
+      '',
+      body.length.toString(16),
+      body,
+      '0',
+      '',
+      '',
+    ].join('\r\n'));
+    await closed.promise;
+
+    const response = Buffer.concat(responseChunks).toString('utf8');
+    expect(response).toContain('HTTP/1.1 200 OK');
+    expect(response).toContain('tool_name');
+    await upstream.close();
+  });
+
   test('destroys idle raw connections so socket probes cannot pin FDs', async () => {
     const upstream = await startUpstream();
     const socketPath = makeSocketPath();

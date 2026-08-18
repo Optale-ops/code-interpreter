@@ -372,14 +372,22 @@ export async function startToolCallSocketProxy(
     }
 
     const requestBodyLimit = isExternalFetch ? 16_384 : maxBodyBytes;
-    const declaredCL = Number(req.headers['content-length'] ?? (isExternalFetch ? Number.NaN : 0));
-    if (!Number.isSafeInteger(declaredCL) || declaredCL < 0) {
+    const declaredHeaderValue = req.headers['content-length'];
+    /* Content-Length is contractually required on /external-fetch (W730 §5.2 —
+     * no transfer-encoding/content-length ambiguity), so an absent header is a
+     * 411 there. /tool-call has always accepted a chunked body with no
+     * Content-Length, so absence stays legal and the equality check below is
+     * skipped rather than comparing a real body against an implied 0. */
+    const declaredCL = declaredHeaderValue === undefined && !isExternalFetch
+      ? undefined
+      : Number(declaredHeaderValue);
+    if (declaredCL !== undefined && (!Number.isSafeInteger(declaredCL) || declaredCL < 0)) {
       req.resume();
       res.writeHead(411, { 'Content-Type': 'text/plain', Connection: 'close' });
       res.end('Content-Length is required');
       return;
     }
-    if (declaredCL > requestBodyLimit) {
+    if (declaredCL !== undefined && declaredCL > requestBodyLimit) {
       req.resume();
       res.writeHead(413, { 'Content-Type': 'text/plain', Connection: 'close' });
       res.end('request body too large');
@@ -452,7 +460,7 @@ export async function startToolCallSocketProxy(
     req.on('end', () => {
       if (rejected) return;
       const body = bodyChunks.length === 1 ? bodyChunks[0] : Buffer.concat(bodyChunks);
-      if (body.length !== declaredCL) {
+      if (declaredCL !== undefined && body.length !== declaredCL) {
         res.writeHead(400, { 'Content-Type': 'text/plain', Connection: 'close' });
         res.end('request body length mismatch');
         return;

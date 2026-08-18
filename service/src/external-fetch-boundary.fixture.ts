@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
 import { Resolver } from 'node:dns/promises';
 import dgram from 'node:dgram';
 import fs from 'node:fs';
@@ -13,13 +15,14 @@ const HOST = 'allowed.test';
 const TEST_ADDRESS = '93.184.216.34';
 const certDir = process.env.EXTERNAL_FETCH_TLS_FIXTURE_DIR ?? '';
 
+/* Runtime-agnostic on purpose: this fixture runs under Bun
+ * (external-fetch-boundary.test.ts) and, bundled the way the gateway image
+ * bundles it, under the production Node runtime
+ * (external-fetch-runtime.test.ts). Neither helper may use Bun globals. */
 async function run(command: string[]): Promise<void> {
-  const process = Bun.spawn(command, { stdout: 'pipe', stderr: 'pipe' });
-  const status = await process.exited;
-  if (status !== 0)
-    throw new Error(
-      `${command[0]} failed: ${await new Response(process.stderr).text()}`,
-    );
+  const result = spawnSync(command[0] as string, command.slice(1), { encoding: 'utf8' });
+  if (result.status !== 0)
+    throw new Error(`${command[0]} failed: ${result.stderr ?? ''}`);
 }
 
 function readDnsQuestion(packet: Buffer): { name: string; end: number } {
@@ -207,12 +210,14 @@ async function main(): Promise<void> {
     assert.equal(opened.redirects, 0);
     assert.equal(opened.contentType, 'application/pdf');
     assert.equal(requests[0]?.method, 'GET');
-    assert.deepEqual(requests[0]?.headers.sort(), [
-      'accept',
-      'accept-encoding',
-      'host',
-      'user-agent',
-    ]);
+    /* `connection` is added by the HTTP client itself (agent: false, i.e. a
+     * one-shot connection) and Bun and Node differ on whether it appears on
+     * the wire. It carries no caller-controlled data, so the policy-relevant
+     * assertion is that NOTHING else reaches the origin. */
+    assert.deepEqual(
+      requests[0]?.headers.filter(header => header !== 'connection').sort(),
+      ['accept', 'accept-encoding', 'host', 'user-agent'],
+    );
 
     const disconnectOpened = await openExternalFetch({
       url: `https://${HOST}/success`,
@@ -226,7 +231,7 @@ async function main(): Promise<void> {
         () => 'unexpected-success',
         error => error instanceof ExternalFetchError ? error.code : 'unexpected-error',
       ),
-      Bun.sleep(250).then(() => 'hung'),
+      delay(250).then(() => 'hung'),
     ]);
     assert.equal(disconnectOutcome, 'FETCH_FAILED');
 
