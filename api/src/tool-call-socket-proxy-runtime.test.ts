@@ -237,6 +237,7 @@ function postToolCall(
   });
 }
 
+
 describeIfRuntime('tool-call-socket-proxy under Node runtime (production parity)', () => {
   test('forwards a normal POST /tool-call', async () => {
     const upstream = await startUpstream();
@@ -249,6 +250,73 @@ describeIfRuntime('tool-call-socket-proxy under Node runtime (production parity)
     } finally {
       await proxy.stop();
       await upstream.close();
+    }
+  });
+
+  test('forwards external-fetch trailers and strips caller headers under Node', async () => {
+    let rawRequest = '';
+    const upstream = net.createServer(socket => {
+      socket.on('data', chunk => {
+        rawRequest += chunk.toString('utf8');
+        if (!rawRequest.includes('\r\n\r\n')) return;
+        socket.end([
+          'HTTP/1.1 200 OK',
+          'Content-Type: application/pdf',
+          'X-Request-ID: request-123',
+          'X-CodeAPI-Egress-Host: allowed.test',
+          'X-CodeAPI-Egress-Redirects: 1',
+          'X-Unsafe-Upstream-Header: must-not-cross',
+          'Transfer-Encoding: chunked',
+          'Trailer: X-CodeAPI-Egress-Outcome',
+          '',
+          '3',
+          'pdf',
+          '0',
+          'X-CodeAPI-Egress-Outcome: OK',
+          '',
+          '',
+        ].join('\r\n'));
+      });
+    });
+    const listening = Promise.withResolvers<void>();
+    upstream.listen(0, '127.0.0.1', listening.resolve);
+    await listening.promise;
+    const address = upstream.address();
+    if (!address || typeof address === 'string') throw new Error('upstream listen failed');
+    const proxy = await spawnProxy({ upstreamUrl: `http://127.0.0.1:${address.port}` });
+    try {
+      const body = JSON.stringify({ url: 'https://allowed.test/file.pdf?marker=secret' });
+      const client = await rawConnect(proxy.socketPath);
+      const responseChunks: Buffer[] = [];
+      const responseClosed = Promise.withResolvers<void>();
+      client.on('data', chunk => responseChunks.push(Buffer.from(chunk)));
+      client.once('close', responseClosed.resolve);
+      client.write([
+        'POST /external-fetch HTTP/1.1',
+        'Host: local',
+        'Content-Type: application/json',
+        `Content-Length: ${Buffer.byteLength(body)}`,
+        'X-CodeAPI-Egress-Grant: opaque-grant',
+        'Authorization: must-not-cross',
+        'Connection: close',
+        '',
+        body,
+      ].join('\r\n'));
+      await responseClosed.promise;
+      const rawResponse = Buffer.concat(responseChunks).toString('utf8');
+      expect(rawResponse).toContain('HTTP/1.1 200 OK');
+      expect(rawResponse.toLowerCase()).toContain('content-type: application/pdf');
+      expect(rawResponse.toLowerCase()).toContain('x-codeapi-egress-host: allowed.test');
+      expect(rawResponse.toLowerCase()).not.toContain('x-unsafe-upstream-header:');
+      expect(rawResponse).toContain('X-CodeAPI-Egress-Outcome: OK');
+      expect(rawRequest).toContain('POST /external-fetch HTTP/1.1');
+      expect(rawRequest.toLowerCase()).not.toContain('authorization:');
+      expect(rawRequest.toLowerCase()).toContain('x-codeapi-egress-grant: opaque-grant');
+    } finally {
+      await proxy.stop();
+      const closed = Promise.withResolvers<void>();
+      upstream.close(() => closed.resolve());
+      await closed.promise;
     }
   });
 

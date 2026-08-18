@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "limits": {
+    "maxRedirects": 3,
+    "maxResponseBytes": 26214400,
+    "maxAggregateBytesPerGrant": 52428800,
+    "maxFetchesPerGrant": 8,
+    "connectTimeoutMs": 3000,
+    "headersTimeoutMs": 5000,
+    "totalTimeoutMs": 15000
+  },
+  "hosts": {
+    "allowed.test": {
+      "contentTypes": ["application/pdf"]
+    },
+    "private.test": {
+      "contentTypes": ["application/pdf"]
+    }
+  }
+}

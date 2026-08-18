@@ -12,6 +12,7 @@ import {
   inputsLiveUnder,
   mapWithConcurrency,
   mimeTypeFor,
+  filterExtraEnvVars,
 } from './job';
 import type { Runtime } from './runtime';
 import type { TFile } from './job';
@@ -40,6 +41,15 @@ function makeRuntime(overrides: Partial<Runtime> & { language: string; pkgdir: s
     ...overrides,
   };
 }
+
+describe('governed fetch environment', () => {
+  it('prevents caller code from overriding the per-execution fetch grant', () => {
+    expect(filterExtraEnvVars({
+      SANDBOX_EGRESS_GRANT: 'attacker-value',
+      SAFE_USER_VALUE: 'kept',
+    })).toEqual({ SAFE_USER_VALUE: 'kept' });
+  });
+});
 
 describe('resolveOriginalName', () => {
   function responseWithHeader(value?: string): Response {

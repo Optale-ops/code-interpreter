@@ -5,7 +5,9 @@ import * as path from 'path';
 import { config } from './config';
 import {
   ensureToolCallSocketProxyReady,
+  relayReadinessRequired,
   stopToolCallSocketProxy,
+  toolCallSocketProxyConfigured,
 } from './tool-call-socket-process';
 
 const originalPort = config.allowed_local_network_port;
@@ -87,6 +89,52 @@ describe('lazy tool-call socket process', () => {
     config.allowed_local_network_port = 0;
     process.env.SANDBOX_FORWARD_TARGET = '';
     await expect(ensureToolCallSocketProxyReady()).rejects.toThrow('not configured');
+  });
+
+  /* The egress route asks for relay readiness whenever a job carries an
+   * external-fetch grant, but only where a relay actually exists — otherwise a
+   * grant-bearing execution on a deployment without the relay would start
+   * failing at the route. This predicate is what gates that call, and it must
+   * agree with the launch path's own configuration check. */
+  test('reports whether a relay is configured at all', async () => {
+    config.allowed_local_network_port = 0;
+    process.env.SANDBOX_FORWARD_TARGET = '';
+    expect(toolCallSocketProxyConfigured()).toBe(false);
+
+    config.allowed_local_network_port = 443;
+    expect(toolCallSocketProxyConfigured()).toBe(false);
+
+    process.env.SANDBOX_FORWARD_TARGET = '   ';
+    expect(toolCallSocketProxyConfigured()).toBe(false);
+
+    process.env.SANDBOX_FORWARD_TARGET = 'https://gateway.example';
+    expect(toolCallSocketProxyConfigured()).toBe(true);
+
+    config.allowed_local_network_port = 0;
+    expect(toolCallSocketProxyConfigured()).toBe(false);
+    await expect(ensureToolCallSocketProxyReady()).rejects.toThrow('not configured');
+  });
+
+  /* Which executions have to wait for the relay. NsJail bind-mounts the relay
+   * socket for a tool-call job OR any run carrying an external-fetch grant, so
+   * both must request readiness — and neither may fail an execution on a runner
+   * that has no relay configured at all. */
+  test('requires relay readiness for tool-call and external-fetch executions', () => {
+    config.allowed_local_network_port = 443;
+    process.env.SANDBOX_FORWARD_TARGET = 'https://gateway.example';
+
+    expect(relayReadinessRequired({ toolCallSocketEnabled: true, externalFetchEnabled: false })).toBe(true);
+    expect(relayReadinessRequired({ toolCallSocketEnabled: false, externalFetchEnabled: true })).toBe(true);
+    expect(relayReadinessRequired({ toolCallSocketEnabled: true, externalFetchEnabled: true })).toBe(true);
+    expect(relayReadinessRequired({ toolCallSocketEnabled: false, externalFetchEnabled: false })).toBe(false);
+
+    /* No relay configured: an external-fetch grant must not make the route
+     * demand a proxy that cannot exist, or ordinary grant-bearing executions
+     * would start failing. A tool-call scope still demands it and fails loudly,
+     * exactly as it did before. */
+    process.env.SANDBOX_FORWARD_TARGET = '';
+    expect(relayReadinessRequired({ toolCallSocketEnabled: false, externalFetchEnabled: true })).toBe(false);
+    expect(relayReadinessRequired({ toolCallSocketEnabled: true, externalFetchEnabled: true })).toBe(true);
   });
 
   test('reports a spawn failure without crashing and permits a later retry', async () => {

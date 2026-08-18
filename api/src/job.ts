@@ -492,6 +492,7 @@ export const RESERVED_ENV_KEYS: ReadonlySet<string> = new Set([
   'HOME',
   'PATH',
   'TOOL_CALL_SOCKET',
+  'SANDBOX_EGRESS_GRANT',
   'PYTHONPATH',
   'PYTHONSTARTUP',
   'PYTHONHOME',
@@ -771,6 +772,14 @@ export class Job {
     this.egressGrantToken = opts.egress_grant;
     this.toolCallSocketEnabled = opts.tool_call_socket_enabled === true;
     this.isSynthetic = opts.is_synthetic === true;
+  }
+
+  /** Whether this job's `run` script will receive the external-fetch grant, and
+   * with it the relay-socket bind-mount that `sandbox_fetch` needs. Mirrors the
+   * derivation in `safeCall` so the route and the jail cannot disagree about
+   * whether the relay has to be up. */
+  get externalFetchEnabled(): boolean {
+    return this.egressGrantToken !== undefined && this.egressGrantToken !== '';
   }
 
   /** Marks a persistent workspace unusable after a post-prime failure. Returns
@@ -1503,6 +1512,15 @@ export class Job {
       SANDBOX_LANGUAGE: this.runtime.language,
       HOME: '/mnt/data',
     };
+    const externalFetchGrant = script === 'run' && this.egressGrantToken
+      ? this.egressGrantToken
+      : undefined;
+    if (externalFetchGrant) {
+      const helperPath = '/usr/local/lib/sandbox-fetch';
+      envVars.PYTHONPATH = envVars.PYTHONPATH
+        ? `${helperPath}:${envVars.PYTHONPATH}`
+        : helperPath;
+    }
 
     let extraPkgdirs: string[] | undefined;
     if (this.runtime.language === 'bash') {
@@ -1523,6 +1541,7 @@ export class Job {
       extraPkgdirs,
       identity: this.sandboxIdentity(),
       enableToolCallSocket: this.toolCallSocketEnabled && script === 'run',
+      externalFetchGrant,
       suppressSuccessLogs: this.isSynthetic,
     });
   }

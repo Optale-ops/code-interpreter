@@ -1,0 +1,11 @@
+{{- if .Values.egressGateway.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "codeapi.fullname" . }}-external-fetch-policy
+  labels:
+    {{- include "codeapi.egressGateway.labels" . | nindent 4 }}
+data:
+  external-fetch-policy.json: |-
+    {{- toPrettyJson .Values.egressGateway.config.externalFetchPolicy | nindent 4 }}
+{{- end }}

@@ -412,6 +412,31 @@ egressGateway:
 
   config:
     maxToolCallBytes: 1048576
+    externalFetchPolicy:
+      version: 1
+      limits:
+        maxRedirects: 3
+        maxResponseBytes: 26214400
+        maxAggregateBytesPerGrant: 52428800
+        maxFetchesPerGrant: 8
+        connectTimeoutMs: 3000
+        headersTimeoutMs: 5000
+        totalTimeoutMs: 15000
+      hosts:
+        temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com:
+          contentTypes:
+            - application/pdf
+      # W730 §3 PENDING rows — do NOT widen this policy by inference. Each row
+      # needs PRIMARY's rev-B journey evidence before it becomes a config entry:
+      #   1. image attachment MIME on this host      — PENDING
+      #   2. Office (OOXML) attachment MIME          — PENDING
+      #   3. PDF redirect chain (hosts per hop)      — PENDING (engine already
+      #      re-validates every hop against this same exact-host policy)
+      #   4. PDF declared/observed size              — PENDING (global 25 MiB
+      #      response cap stays frozen meanwhile)
+      #   5. Repeated-use and expiry behaviour       — PENDING (URL is treated
+      #      as opaque and time-limited; no caching contract)
+      # Widening is a config rollout of this block only — there is no admin API.
 
 # =============================================================================
 # REDIS (Job queue and state store)

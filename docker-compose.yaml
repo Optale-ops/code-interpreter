@@ -93,11 +93,19 @@ services:
             - EGRESS_GATEWAY_FILE_SERVER_URL=http://file_server:3000
             - EGRESS_GATEWAY_TOOL_CALL_SERVER_URL=http://tool_call_server:3033
             - EGRESS_GATEWAY_MAX_TOOL_CALL_BYTES=1048576
+            - CODEAPI_EXTERNAL_FETCH_POLICY_FILE=/run/codeapi/external-fetch-policy.json
             - CODEAPI_EGRESS_GRANT_SECRET=${CODEAPI_EGRESS_GRANT_SECRET:-localdev-egress-grant-secret-change-me-32b}
             - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:-localdev-internal-service-token}
             - REDIS_HOST=redis
             - REDIS_PORT=6379
             - REDIS_PASSWORD=localdev
+        volumes:
+            # Exact-host policy, deny-by-default. W730 §3 PENDING rows (image MIME,
+            # Office MIME, redirect-chain hosts, declared size, reuse/expiry) stay
+            # absent until PRIMARY supplies journey evidence — see the enumerated
+            # list in helm/codeapi/values.yaml (egressGateway.config.externalFetchPolicy).
+            # Widening is a config rollout of that block; there is no admin API.
+            - ./service/config/external-fetch-policy.json:/run/codeapi/external-fetch-policy.json:ro
         depends_on:
             - file_server
             - tool_call_server

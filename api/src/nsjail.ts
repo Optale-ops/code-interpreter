@@ -226,6 +226,7 @@ interface ExecuteOptions {
   extraPkgdirs?: string[];
   identity: SandboxJobIdentity;
   enableToolCallSocket?: boolean;
+  externalFetchGrant?: string;
   suppressSuccessLogs?: boolean;
 }
 
@@ -242,13 +243,30 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
     extraPkgdirs,
     identity,
     enableToolCallSocket,
+    externalFetchGrant,
     suppressSuccessLogs,
   } = opts;
   const logId = nanoid();
   const logPath = `/tmp/nsjail-${logId}.log`;
   const cfgPath = `/tmp/nsjail-${logId}.cfg`;
+  const externalFetchGrantFile = externalFetchGrant ? `/tmp/nsjail-${logId}.egress-grant` : undefined;
+  const cleanupTemporaryFiles = (): void => {
+    for (const temporaryPath of [logPath, cfgPath, externalFetchGrantFile]) {
+      if (!temporaryPath) continue;
+      try { fs.unlinkSync(temporaryPath); } catch { /* absent temporary file */ }
+    }
+  };
 
-  fs.writeFileSync(cfgPath, readBaseConfig() + renderJobConfigOverlay(submissionDir), { mode: 0o600 });
+  try {
+    fs.writeFileSync(cfgPath, readBaseConfig() + renderJobConfigOverlay(submissionDir), { mode: 0o600 });
+    if (externalFetchGrantFile) {
+      fs.writeFileSync(externalFetchGrantFile, externalFetchGrant ?? '', { mode: 0o400 });
+      fs.chownSync(externalFetchGrantFile, identity.uid, identity.gid);
+    }
+  } catch (error) {
+    cleanupTemporaryFiles();
+    throw error;
+  }
 
   const nsjailArgs = buildArgs({
     logPath,
@@ -261,6 +279,7 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
     extraPkgdirs,
     identity,
     enableToolCallSocket,
+    externalFetchGrantFile,
   });
 
   const startTime = Date.now();
@@ -427,8 +446,7 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
       return child;
     }, childDiedSignal.signal));
   } catch (err) {
-    try { fs.unlinkSync(logPath); } catch { /* ignore */ }
-    try { fs.unlinkSync(cfgPath); } catch { /* ignore */ }
+    cleanupTemporaryFiles();
     throw new Error(`Failed to spawn nsjail: ${(err as Error).message}`);
   }
   /* Short-circuit BEFORE the drain wait AND BEFORE the watchdog-warn
@@ -437,8 +455,7 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
    * fired" warning + metric increment. Cleanup mirrors the
    * synchronous-spawn-failure catch above. */
   if (spawnError) {
-    try { fs.unlinkSync(logPath); } catch { /* ignore */ }
-    try { fs.unlinkSync(cfgPath); } catch { /* ignore */ }
+    cleanupTemporaryFiles();
     const errno: NodeJS.ErrnoException = spawnError;
     throw new Error(`Failed to spawn nsjail: ${errno.code ?? 'UNKNOWN'}: ${errno.message}`);
   }
@@ -476,8 +493,7 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
      * normally throws before we reach here, but the gate's abort race
      * could theoretically leave us in a state where spawnError fires
      * BETWEEN the pre-drain check and now. Same throw shape. */
-    try { fs.unlinkSync(logPath); } catch { /* ignore */ }
-    try { fs.unlinkSync(cfgPath); } catch { /* ignore */ }
+    cleanupTemporaryFiles();
     const errno: NodeJS.ErrnoException = spawnError;
     throw new Error(`Failed to spawn nsjail: ${errno.code ?? 'UNKNOWN'}: ${errno.message}`);
   }
@@ -580,8 +596,7 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
       logger.error({ logPath }, 'nsjail exit 255 - no log file found');
     }
   } catch { /* log file may not exist */ } finally {
-    try { fs.unlinkSync(logPath); } catch { /* ignore */ }
-    try { fs.unlinkSync(cfgPath); } catch { /* ignore */ }
+    cleanupTemporaryFiles();
   }
 
   let code: number | null = exitCode;
@@ -638,6 +653,7 @@ interface BuildArgsOptions {
   extraPkgdirs?: string[];
   identity: SandboxJobIdentity;
   enableToolCallSocket?: boolean;
+  externalFetchGrantFile?: string;
 }
 
 export function buildArgs(opts: BuildArgsOptions): string[] {
@@ -652,6 +668,7 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
     extraPkgdirs,
     identity,
     enableToolCallSocket,
+    externalFetchGrantFile,
   } = opts;
 
   const timeoutSecs = Math.max(1, Math.ceil(timeout / 1000));
@@ -704,9 +721,12 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
     args.push('--cgroup_mem_max', String(memoryLimit));
   }
 
-  if (config.allowed_local_network_port > 0 && enableToolCallSocket === true) {
+  if (config.allowed_local_network_port > 0 && (enableToolCallSocket === true || externalFetchGrantFile !== undefined)) {
     const socketPath = '/tmp/tcs.sock';
     args.push('-B', `${socketPath}:${socketPath}`);
+  }
+  if (externalFetchGrantFile) {
+    args.push('-R', `${externalFetchGrantFile}:/run/codeapi/egress-grant`);
   }
 
   for (const [key, value] of Object.entries(envVars)) {
