@@ -1,7 +1,13 @@
 import { expect, test } from 'bun:test';
 import path from 'node:path';
+import { privateNetnsAvailable } from './external-fetch-netns';
 
-test('crosses real DNS, TLS, pinned-IP, redirect, header, timeout, and oversize boundaries', async () => {
+const NETNS = privateNetnsAvailable();
+if (!NETNS) {
+  console.warn('[external-fetch-boundary] skipping: this host denies unprivileged `unshare --user --net`');
+}
+
+(NETNS ? test : test.skip)('crosses real DNS, TLS, pinned-IP, redirect, header, timeout, and oversize boundaries', async () => {
   const fixture = path.resolve(__dirname, 'external-fetch-boundary.fixture.ts');
   const fixtureDir = path.resolve(__dirname, '../test-fixtures/external-fetch');
   const child = Bun.spawn(

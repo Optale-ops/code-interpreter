@@ -23,6 +23,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { privateNetnsAvailable } from './external-fetch-netns';
 
 const NODE_AVAILABLE = (() => {
   try {
@@ -31,7 +32,12 @@ const NODE_AVAILABLE = (() => {
     return false;
   }
 })();
-const SHOULD_RUN = NODE_AVAILABLE && process.platform === 'linux';
+const SHOULD_RUN = NODE_AVAILABLE && process.platform === 'linux' && privateNetnsAvailable();
+if (!SHOULD_RUN) {
+  console.warn(
+    '[external-fetch-runtime] skipping: needs Linux, `node` on PATH, and unprivileged `unshare --user --net`',
+  );
+}
 const testIfRuntime = SHOULD_RUN ? test : test.skip;
 
 const workdir = fs.mkdtempSync(

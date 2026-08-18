@@ -139,7 +139,10 @@ afterEach(async () => {
 });
 
 function workspace(): string {
-  const created = fs.mkdtempSync('/mnt/data/sandbox-fetch-helper-');
+  /* os.tmpdir(), not a hardcoded /mnt/data: the helper takes the output path as
+   * an argument and never assumes the sandbox mount, so the test must not
+   * either — /mnt/data does not exist on a CI runner. */
+  const created = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-fetch-helper-'));
   workspaces.push(created);
   return created;
 }
