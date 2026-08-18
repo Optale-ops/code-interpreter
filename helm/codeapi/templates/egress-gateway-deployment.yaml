@@ -48,6 +48,8 @@ spec:
               value: "http://{{ include "codeapi.fullname" . }}-file-server:{{ .Values.fileServer.service.port }}"
             - name: EGRESS_GATEWAY_TOOL_CALL_SERVER_URL
               value: "http://{{ include "codeapi.fullname" . }}-tool-call-server:{{ .Values.toolCallServer.service.port }}"
+            - name: CODEAPI_EXTERNAL_FETCH_POLICY_FILE
+              value: /run/codeapi/external-fetch-policy.json
             - name: EGRESS_GATEWAY_MAX_TOOL_CALL_BYTES
               value: {{ printf "%.0f" (.Values.egressGateway.config.maxToolCallBytes | float64) | quote }}
             - name: CODEAPI_EGRESS_GRANT_SECRET
@@ -69,6 +71,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "codeapi.fullname" . }}-secrets
                   key: redis-password
+          volumeMounts:
+            - name: external-fetch-policy
+              mountPath: /run/codeapi/external-fetch-policy.json
+              subPath: external-fetch-policy.json
+              readOnly: true
           livenessProbe:
             httpGet:
               path: /live
@@ -83,6 +90,11 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.egressGateway.resources | nindent 12 }}
+      volumes:
+        - name: external-fetch-policy
+          configMap:
+            name: {{ include "codeapi.fullname" . }}-external-fetch-policy
+
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

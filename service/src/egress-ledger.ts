@@ -5,6 +5,7 @@ import { env } from './config';
 import type { EgressGrantClaims } from './egress-grant';
 import { EgressGrantError } from './egress-grant';
 import logger from './logger';
+import { ExternalFetchError } from './external-fetch-errors';
 import { redisKeepAliveOptions } from './redis-options';
 
 type LedgerStatus = 'active' | 'revoked';
@@ -27,6 +28,8 @@ export interface EgressLedgerRecord {
   upload_count: number;
   tool_call_count: number;
   uploaded_bytes: number;
+  fetch_count: number;
+  fetched_bytes: number;
   output_file_ids: string[];
 }
 
@@ -168,6 +171,8 @@ function recordFromGrant(grant: EgressGrantClaims): EgressLedgerRecord {
     read_count: 0,
     upload_count: 0,
     tool_call_count: 0,
+    fetch_count: 0,
+    fetched_bytes: 0,
     uploaded_bytes: 0,
     output_file_ids: [],
   };
@@ -200,12 +205,18 @@ export async function ensureEgressLedger(grant: EgressGrantClaims): Promise<void
   );
 }
 
+function normalizeRecord(record: EgressLedgerRecord): EgressLedgerRecord {
+  if (!Number.isSafeInteger(record.fetch_count) || record.fetch_count < 0) record.fetch_count = 0;
+  if (!Number.isSafeInteger(record.fetched_bytes) || record.fetched_bytes < 0) record.fetched_bytes = 0;
+  return record;
+}
+
 async function loadRecord(grantId: string): Promise<EgressLedgerRecord> {
   const raw = await redisConnection().get(ledgerKey(grantId));
   if (!raw) {
     throw new EgressGrantError('scope_mismatch', 'Egress grant ledger record is missing');
   }
-  return JSON.parse(raw) as EgressLedgerRecord;
+  return normalizeRecord(JSON.parse(raw) as EgressLedgerRecord);
 }
 
 function assertActive(record: EgressLedgerRecord, grant: Pick<EgressGrantClaims, 'grant_id' | 'exec_id'>): void {
@@ -238,7 +249,7 @@ async function mutateRecord(
         if (!raw) {
           throw new EgressGrantError('scope_mismatch', 'Egress grant ledger record is missing');
         }
-        record = JSON.parse(raw) as EgressLedgerRecord;
+        record = normalizeRecord(JSON.parse(raw) as EgressLedgerRecord);
         assertActive(record, grant);
         mutate(record);
         if (record.request_count > record.max_requests) {
@@ -330,12 +341,74 @@ export async function recordEgressToolCall(grantId: string | undefined, executio
   });
 }
 
+export async function consumeEgressFetchAttempt(args: {
+  grant: EgressGrantClaims;
+  maxFetches: number;
+}): Promise<EgressLedgerRecord> {
+  return mutateRecord(args.grant, record => {
+    if (!Number.isSafeInteger(args.maxFetches) || args.maxFetches < 1 || record.fetch_count >= args.maxFetches) {
+      throw new ExternalFetchError('FETCH_BUDGET_EXCEEDED');
+    }
+    record.request_count += 1;
+    record.fetch_count += 1;
+  });
+}
+
+export async function reserveEgressFetchBytes(args: {
+  grant: EgressGrantClaims;
+  maxBytes: number;
+  maxAggregateBytes: number;
+}): Promise<number> {
+  let reservedBytes = 0;
+  await mutateRecord(args.grant, record => {
+    if (
+      !Number.isSafeInteger(args.maxBytes)
+      || args.maxBytes < 1
+      || !Number.isSafeInteger(args.maxAggregateBytes)
+      || args.maxAggregateBytes < 1
+    ) {
+      throw new ExternalFetchError('FETCH_BUDGET_EXCEEDED');
+    }
+    const remaining = args.maxAggregateBytes - record.fetched_bytes;
+    if (remaining < 1) throw new ExternalFetchError('FETCH_BUDGET_EXCEEDED');
+    reservedBytes = Math.min(args.maxBytes, remaining);
+    record.fetched_bytes += reservedBytes;
+  });
+  return reservedBytes;
+}
+
+export async function commitEgressFetchBytes(args: {
+  grant: EgressGrantClaims;
+  reservedBytes: number;
+  responseBytes: number;
+}): Promise<void> {
+  if (
+    !Number.isSafeInteger(args.reservedBytes)
+    || args.reservedBytes < 0
+    || !Number.isSafeInteger(args.responseBytes)
+    || args.responseBytes < 0
+    || args.responseBytes > args.reservedBytes
+  ) {
+    throw new ExternalFetchError('FETCH_FAILED');
+  }
+  await mutateRecord(args.grant, record => {
+    record.fetched_bytes = Math.max(0, record.fetched_bytes - (args.reservedBytes - args.responseBytes));
+  });
+}
+
+export async function releaseEgressFetchBytes(args: {
+  grant: EgressGrantClaims;
+  reservedBytes: number;
+}): Promise<void> {
+  await commitEgressFetchBytes({ ...args, responseBytes: 0 });
+}
+
 export async function revokeEgressLedger(grantId: string, reason: string): Promise<void> {
   if (!env.EGRESS_LEDGER_REQUIRED) return;
   const key = ledgerKey(grantId);
   const raw = await redisConnection().get(key);
   if (!raw) return;
-  const record = JSON.parse(raw) as EgressLedgerRecord;
+  const record = normalizeRecord(JSON.parse(raw) as EgressLedgerRecord);
   record.status = 'revoked';
   record.revoked_at = Math.floor(Date.now() / 1000);
   record.revoke_reason = reason;

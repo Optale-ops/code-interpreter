@@ -412,6 +412,21 @@ egressGateway:
 
   config:
     maxToolCallBytes: 1048576
+    externalFetchPolicy:
+      version: 1
+      limits:
+        maxRedirects: 3
+        maxResponseBytes: 26214400
+        maxAggregateBytesPerGrant: 52428800
+        maxFetchesPerGrant: 8
+        connectTimeoutMs: 3000
+        headersTimeoutMs: 5000
+        totalTimeoutMs: 15000
+      hosts:
+        temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com:
+          contentTypes:
+            - application/pdf
+      # PENDING: image MIME, Office MIME, and redirect hosts require PRIMARY's journey evidence.
 
 # =============================================================================
 # REDIS (Job queue and state store)

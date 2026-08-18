@@ -142,6 +142,16 @@ spec:
         - protocol: TCP
           port: {{ .Values.toolCallServer.service.port }}
     {{- include "codeapi.redisEgress" . | nindent 4 }}
+    # The trusted gateway needs HTTPS egress; exact-host, DNS, address, method,
+    # redirect, and byte enforcement remains inside the typed gateway route.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+        - ipBlock:
+            cidr: ::/0
+      ports:
+        - protocol: TCP
+          port: 443
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

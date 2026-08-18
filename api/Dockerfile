@@ -128,6 +128,11 @@ COPY api/tsconfig.json ./
 COPY api/src ./src
 COPY shared /shared
 COPY api/config ./config
+COPY api/helpers /usr/local/lib/sandbox-fetch
+RUN chmod 0444 /usr/local/lib/sandbox-fetch/sandbox_fetch.py \
+    && ln -s /usr/local/lib/sandbox-fetch/sandbox_fetch.py /usr/local/bin/sandbox-fetch \
+    && chmod 0555 /usr/local/bin/sandbox-fetch
+RUN mkdir -p /run/codeapi && touch /run/codeapi/egress-grant && chmod 0000 /run/codeapi/egress-grant
 
 RUN bun run build
 
@@ -147,6 +152,12 @@ RUN rm -f /usr/bin/nsenter /usr/bin/unshare /usr/bin/chroot /usr/sbin/chroot \
 
 COPY api/src/entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
+
+# Real-boundary test target: run the built API and NsJail directly while
+# retaining the same baked runtimes. Production launcher targets are unchanged.
+FROM sandbox-build AS sandbox-api-baked-test
+COPY --from=package-builder /pkgs /pkgs
+ENTRYPOINT ["/sandbox_api/entrypoint.sh"]
 
 # ============================================================================
 # Stage 2b: AWS Lambda MicroVM container base image
@@ -247,6 +258,7 @@ ENV LAUNCHER_ROOT_DISK=/sandbox-rootfs.img \
     LAUNCHER_ROOT_DEVICE=/dev/vda \
     LAUNCHER_ROOT_FSTYPE=ext4 \
     LAUNCHER_ROOT_OPTIONS=ro
+
 
 FROM sandbox-runner-base AS sandbox-runner
 

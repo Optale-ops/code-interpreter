@@ -492,6 +492,7 @@ export const RESERVED_ENV_KEYS: ReadonlySet<string> = new Set([
   'HOME',
   'PATH',
   'TOOL_CALL_SOCKET',
+  'SANDBOX_EGRESS_GRANT',
   'PYTHONPATH',
   'PYTHONSTARTUP',
   'PYTHONHOME',
@@ -1503,6 +1504,15 @@ export class Job {
       SANDBOX_LANGUAGE: this.runtime.language,
       HOME: '/mnt/data',
     };
+    const externalFetchGrant = script === 'run' && this.egressGrantToken
+      ? this.egressGrantToken
+      : undefined;
+    if (externalFetchGrant) {
+      const helperPath = '/usr/local/lib/sandbox-fetch';
+      envVars.PYTHONPATH = envVars.PYTHONPATH
+        ? `${helperPath}:${envVars.PYTHONPATH}`
+        : helperPath;
+    }
 
     let extraPkgdirs: string[] | undefined;
     if (this.runtime.language === 'bash') {
@@ -1523,6 +1533,7 @@ export class Job {
       extraPkgdirs,
       identity: this.sandboxIdentity(),
       enableToolCallSocket: this.toolCallSocketEnabled && script === 'run',
+      externalFetchGrant,
       suppressSuccessLogs: this.isSynthetic,
     });
   }
