@@ -3,7 +3,7 @@ import { Resolver } from 'node:dns/promises';
 import dgram from 'node:dgram';
 import fs from 'node:fs';
 import https from 'node:https';
-import { Writable } from 'node:stream';
+import { PassThrough, Writable } from 'node:stream';
 import type { RemoteInfo } from 'node:dgram';
 import { openExternalFetch, pipeExternalFetchBody } from './external-fetch';
 import { ExternalFetchError } from './external-fetch-errors';
@@ -213,6 +213,22 @@ async function main(): Promise<void> {
       'host',
       'user-agent',
     ]);
+
+    const disconnectOpened = await openExternalFetch({
+      url: `https://${HOST}/success`,
+      policy: policy(),
+      resolver: dns.resolver,
+    });
+    const disconnectedDestination = new PassThrough({ highWaterMark: 1 });
+    setTimeout(() => disconnectedDestination.destroy(), 10);
+    const disconnectOutcome = await Promise.race([
+      pipeExternalFetchBody(disconnectOpened, disconnectedDestination).then(
+        () => 'unexpected-success',
+        error => error instanceof ExternalFetchError ? error.code : 'unexpected-error',
+      ),
+      Bun.sleep(250).then(() => 'hung'),
+    ]);
+    assert.equal(disconnectOutcome, 'FETCH_FAILED');
 
     const redirected = await openExternalFetch({
       url: `https://${HOST}/redirect`,

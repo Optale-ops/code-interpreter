@@ -281,6 +281,34 @@ export async function openExternalFetch(
   }
 }
 
+function waitForDrainOrClose(destination: Writable): Promise<void> {
+  if (destination.destroyed || destination.writableEnded) {
+    return Promise.reject(new ExternalFetchError('FETCH_FAILED'));
+  }
+  const result = Promise.withResolvers<void>();
+  const cleanup = (): void => {
+    destination.off('drain', onDrain);
+    destination.off('close', onClose);
+    destination.off('error', onError);
+  };
+  const onDrain = (): void => {
+    cleanup();
+    result.resolve();
+  };
+  const onClose = (): void => {
+    cleanup();
+    result.reject(new ExternalFetchError('FETCH_FAILED'));
+  };
+  const onError = (): void => {
+    cleanup();
+    result.reject(new ExternalFetchError('FETCH_FAILED'));
+  };
+  destination.once('drain', onDrain);
+  destination.once('close', onClose);
+  destination.once('error', onError);
+  return result.promise;
+}
+
 export async function pipeExternalFetchBody(
   opened: OpenExternalFetchResponse,
   destination: Writable,
@@ -298,7 +326,10 @@ export async function pipeExternalFetchBody(
             : 'RESPONSE_TOO_LARGE',
         );
       }
-      if (!destination.write(bytes)) await once(destination, 'drain');
+      if (destination.destroyed || destination.writableEnded) {
+        throw new ExternalFetchError('FETCH_FAILED');
+      }
+      if (!destination.write(bytes)) await waitForDrainOrClose(destination);
     }
     if (
       opened.declaredBytes !== undefined &&

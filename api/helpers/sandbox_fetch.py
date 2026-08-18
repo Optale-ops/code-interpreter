@@ -31,6 +31,9 @@ _ALLOWED_ERRORS = {
     "FETCH_FAILED",
 }
 _HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
+_CONTENT_TYPE_RE = re.compile(
+    r"^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,127}$"
+)
 _RENAME_NOREPLACE = 1
 
 
@@ -190,7 +193,11 @@ def sandbox_fetch(url: str, output_path: str) -> SandboxFetchResult:
         host = response.getheader("X-CodeAPI-Egress-Host", "")
         content_type = response.getheader("Content-Type", "").split(";", 1)[0].strip().lower()
         raw_redirects = response.getheader("X-CodeAPI-Egress-Redirects", "")
-        if not _HOST_RE.fullmatch(host) or content_type != "application/pdf" or not raw_redirects.isdigit():
+        if (
+            not _HOST_RE.fullmatch(host)
+            or not _CONTENT_TYPE_RE.fullmatch(content_type)
+            or not raw_redirects.isdigit()
+        ):
             raise SandboxFetchError("FETCH_FAILED")
         redirects = int(raw_redirects)
         if redirects < 0 or redirects > 3:

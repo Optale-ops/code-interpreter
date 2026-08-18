@@ -939,6 +939,7 @@ app.post('/external-fetch', async (req, res) => {
       const responseBytes = Math.min(opened?.responseBytes ?? 0, reservedBytes);
       try {
         await commitEgressFetchBytes({ grant, reservedBytes, responseBytes });
+        reservedBytes = 0;
       } catch {
         logger.error('Failed to settle external fetch byte reservation', {
           grantHash: hashLabel(grant.grant_id),
@@ -948,7 +949,6 @@ app.post('/external-fetch', async (req, res) => {
       const fields = auditFields(res);
       fields.responseBytes = responseBytes;
       res.locals.egressAuditFields = fields;
-      reservedBytes = 0;
     }
     if (res.headersSent) {
       const code = error instanceof ExternalFetchError ? error.code : 'FETCH_FAILED';

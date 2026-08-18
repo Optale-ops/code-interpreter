@@ -44,11 +44,16 @@ function responseForBody(body: string): Buffer {
     );
   }
   const outcome = body.includes('/oversize') ? 'RESPONSE_TOO_LARGE' : 'OK';
-  const fixture = body.includes('/oversize') ? 'partial' : 'pdf fixture';
+  const fixture = body.includes('/oversize')
+    ? 'partial'
+    : body.includes('/image')
+      ? 'image fixture'
+      : 'pdf fixture';
+  const contentType = body.includes('/image') ? 'image/png' : 'application/pdf';
   return Buffer.from(
     [
       'HTTP/1.1 200 OK',
-      'Content-Type: application/pdf',
+      `Content-Type: ${contentType}`,
       'X-CodeAPI-Egress-Host: allowed.test',
       'X-CodeAPI-Egress-Redirects: 1',
       'Transfer-Encoding: chunked',
@@ -166,6 +171,23 @@ describe('sandbox_fetch typed helper', () => {
     expect(fs.readFileSync(output, 'utf8')).toBe('pdf fixture');
     expect(fs.statSync(output).mode & 0o777).toBe(0o600);
     expect(fs.readdirSync(root)).toEqual(['download.pdf']);
+  });
+
+  test('accepts any safe content type already validated by gateway policy', async () => {
+    const root = workspace();
+    const output = path.join(root, 'image.png');
+    const result = await runPython([
+      'import json',
+      'from sandbox_fetch import sandbox_fetch',
+      `print(json.dumps(sandbox_fetch("https://allowed.test/image", ${JSON.stringify(output)})))`,
+    ].join(';'));
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      content_type: 'image/png',
+      bytes: 13,
+    });
+    expect(fs.readFileSync(output, 'utf8')).toBe('image fixture');
   });
 
   test.each([
