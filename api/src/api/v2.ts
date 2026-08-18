@@ -25,7 +25,10 @@ import {
   parseSessionBindingFromHeader,
 } from '../session-workspace';
 import { streamSessionCheckpoint, restoreSessionCheckpoint } from '../session-checkpoint';
-import { ensureToolCallSocketProxyReady } from '../tool-call-socket-process';
+import {
+  ensureToolCallSocketProxyReady,
+  relayReadinessRequired,
+} from '../tool-call-socket-process';
 import {
   SESSION_INPUT_CACHE_MAX_OBJECTS,
   hasCachedInput,
@@ -499,7 +502,14 @@ router.post('/execute', express.json({ limit: config.execute_body_limit }), asyn
     }
 
     try {
-      if (toolCallSocketEnabled) {
+      /* The sandbox reaches the gateway's POST /external-fetch through the very
+       * same relay socket, and NsJail bind-mounts that socket for any run that
+       * carries an egress grant — so readiness must be requested on that path
+       * too, not only for tool calls, now that Node starts lazily post-restore. */
+      if (relayReadinessRequired({
+        toolCallSocketEnabled,
+        externalFetchEnabled: job.externalFetchEnabled,
+      })) {
         await ensureToolCallSocketProxyReady();
       }
       await withSpan('codeapi.sandbox.prime', {

@@ -774,6 +774,14 @@ export class Job {
     this.isSynthetic = opts.is_synthetic === true;
   }
 
+  /** Whether this job's `run` script will receive the external-fetch grant, and
+   * with it the relay-socket bind-mount that `sandbox_fetch` needs. Mirrors the
+   * derivation in `safeCall` so the route and the jail cannot disagree about
+   * whether the relay has to be up. */
+  get externalFetchEnabled(): boolean {
+    return this.egressGrantToken !== undefined && this.egressGrantToken !== '';
+  }
+
   /** Marks a persistent workspace unusable after a post-prime failure. Returns
    * false for stateless jobs so the route can retain its ordinary error shape. */
   markSessionDirty(reason: string): boolean {
