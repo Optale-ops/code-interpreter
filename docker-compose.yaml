@@ -100,7 +100,11 @@ services:
             - REDIS_PORT=6379
             - REDIS_PASSWORD=localdev
         volumes:
-            # PENDING: image, Office, and redirect-host rows stay absent until PRIMARY supplies journey evidence.
+            # Exact-host policy, deny-by-default. W730 §3 PENDING rows (image MIME,
+            # Office MIME, redirect-chain hosts, declared size, reuse/expiry) stay
+            # absent until PRIMARY supplies journey evidence — see the enumerated
+            # list in helm/codeapi/values.yaml (egressGateway.config.externalFetchPolicy).
+            # Widening is a config rollout of that block; there is no admin API.
             - ./service/config/external-fetch-policy.json:/run/codeapi/external-fetch-policy.json:ro
         depends_on:
             - file_server
