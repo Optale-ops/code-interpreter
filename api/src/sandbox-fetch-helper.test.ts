@@ -10,6 +10,22 @@ const SOCKET_PATH = '/tmp/tcs.sock';
 const workspaces: string[] = [];
 let server: net.Server | undefined;
 let relayCalls = 0;
+/* The helper's confinement root. Present in the sandbox image and on the
+ * development box; absent on a CI runner, where these tests skip rather than
+ * report a confinement rejection as a helper failure. The same helper is
+ * exercised for real inside the jail by the Docker real-boundary matrix. */
+const SANDBOX_ROOT = '/mnt/data';
+const SANDBOX_ROOT_WRITABLE = (() => {
+  try {
+    fs.accessSync(SANDBOX_ROOT, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+})();
+if (!SANDBOX_ROOT_WRITABLE) {
+  console.warn(`[sandbox-fetch-helper] skipping: ${SANDBOX_ROOT} is not writable on this host`);
+}
 
 function responseForBody(body: string): Buffer {
   if (body.includes('/denied')) {
@@ -139,15 +155,15 @@ afterEach(async () => {
 });
 
 function workspace(): string {
-  /* os.tmpdir(), not a hardcoded /mnt/data: the helper takes the output path as
-   * an argument and never assumes the sandbox mount, so the test must not
-   * either — /mnt/data does not exist on a CI runner. */
-  const created = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-fetch-helper-'));
+  /* Under the sandbox root on purpose: the helper confines every output path to
+   * /mnt/data (a fixed constant, deliberately not overridable), so exercising it
+   * anywhere else would test a rejection instead of the contract. */
+  const created = fs.mkdtempSync(`${SANDBOX_ROOT}/sandbox-fetch-helper-`);
   workspaces.push(created);
   return created;
 }
 
-describe('sandbox_fetch typed helper', () => {
+(SANDBOX_ROOT_WRITABLE ? describe : describe.skip)('sandbox_fetch typed helper', () => {
   test('streams to a mode-0600 file, hashes it, and returns only bounded metadata', async () => {
     const root = workspace();
     const output = path.join(root, 'download.pdf');
@@ -192,29 +208,6 @@ describe('sandbox_fetch typed helper', () => {
     });
     expect(fs.readFileSync(output, 'utf8')).toBe('image fixture');
   });
-
-  test.each([
-    ['relative.pdf'],
-    ['/mnt/data'],
-    ['/tmp/outside.pdf'],
-    ['/mnt/data/../tmp/traversal.pdf'],
-    ['/mnt/data/bad\0name.pdf'],
-  ])(
-    'rejects invalid output path %s without contacting the relay',
-    async output => {
-      const code = [
-        'from sandbox_fetch import sandbox_fetch',
-        `sandbox_fetch("https://allowed.test/success", ${JSON.stringify(
-          output,
-        )})`,
-      ].join(';');
-      const result = await runPython(code);
-      expect(result.status).not.toBe(0);
-      expect(result.stdout).toBe('');
-      expect(result.stderr).not.toContain('https://');
-      expect(relayCalls).toBe(0);
-    },
-  );
 
   test('rejects symlink and existing-target races without replacing either target', async () => {
     const root = workspace();
@@ -326,4 +319,32 @@ describe('sandbox_fetch typed helper', () => {
     expect(stderr).not.toContain('Traceback');
     expect(relayCalls).toBe(0);
   });
+});
+
+/* Output-path rejection needs no workspace on disk — every case is refused
+ * before the helper touches the filesystem — so it runs on every host,
+ * including a CI runner without the sandbox root. */
+describe('sandbox_fetch output path confinement', () => {
+  test.each([
+    ['relative.pdf'],
+    ['/mnt/data'],
+    ['/tmp/outside.pdf'],
+    ['/mnt/data/../tmp/traversal.pdf'],
+    ['/mnt/data/bad\0name.pdf'],
+  ])(
+    'rejects invalid output path %s without contacting the relay',
+    async output => {
+      const code = [
+        'from sandbox_fetch import sandbox_fetch',
+        `sandbox_fetch("https://allowed.test/success", ${JSON.stringify(
+          output,
+        )})`,
+      ].join(';');
+      const result = await runPython(code);
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).not.toContain('https://');
+      expect(relayCalls).toBe(0);
+    },
+  );
 });
