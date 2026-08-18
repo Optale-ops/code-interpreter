@@ -245,6 +245,19 @@ grant = open("/run/codeapi/egress-grant").read()
 body = json.dumps({"url":"https://allowed.test/success","headers":{"Authorization":"bad"}}).encode()
 request = b"POST /external-fetch HTTP/1.1\\r\\nHost: local\\r\\nContent-Type: application/json\\r\\nContent-Length: " + str(len(body)).encode() + b"\\r\\nX-CodeAPI-Egress-Grant: " + grant.encode() + b"\\r\\nConnection: close\\r\\n\\r\\n" + body
 assert b"400" in raw(request)
+# The production gateway runs the bundled artifact under Node because Bun's
+# node:http compat layer does not emit HTTP response trailers. Prove the real
+# outcome trailer reaches the sandbox on the wire, through the real relay.
+ok_body = json.dumps({"url":"https://allowed.test/success"}).encode()
+ok_request = b"POST /external-fetch HTTP/1.1\\r\\nHost: local\\r\\nContent-Type: application/json\\r\\nContent-Length: " + str(len(ok_body)).encode() + b"\\r\\nX-CodeAPI-Egress-Grant: " + grant.encode() + b"\\r\\nConnection: close\\r\\n\\r\\n" + ok_body
+ok_response = raw(ok_request)
+ok_headers = ok_response.split(b"\\r\\n\\r\\n", 1)[0].lower()
+assert b"200 ok" in ok_headers, ok_response[:120]
+assert b"transfer-encoding: chunked" in ok_headers, ok_response[:200]
+assert b"trailer: x-codeapi-egress-outcome" in ok_headers, ok_response[:400]
+assert b"x-codeapi-egress-host: allowed.test" in ok_headers, ok_response[:400]
+assert ok_response.rstrip().endswith(b"X-CodeAPI-Egress-Outcome: OK"), ok_response[-200:]
+assert b"W733_QUERY_MARKER" not in ok_response
 print("W733_SUCCESS_RELAY_OK")
 `;
 
