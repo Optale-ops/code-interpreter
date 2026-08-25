@@ -8,6 +8,7 @@ import type { Writable } from 'node:stream';
 import { ExternalFetchError } from './external-fetch-errors';
 import {
   validateExternalFetchUrl,
+  validateHttpsPassthroughUrl,
   validateResolvedAddresses,
 } from './external-fetch-policy';
 import type {
@@ -18,6 +19,18 @@ import type {
 } from './external-fetch-policy';
 
 const USER_AGENT = 'Optale-CodeAPI-External-Fetch/1';
+const STATIC_HOP_BY_HOP_HEADERS: ReadonlySet<string> = new Set([
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'proxy-connection',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+  'host',
+]);
 const PROCESS_TRUSTED_CA = process.env.NODE_EXTRA_CA_CERTS
   ? fs.readFileSync(process.env.NODE_EXTRA_CA_CERTS)
   : undefined;
@@ -278,6 +291,173 @@ export async function openExternalFetch(
       hop.close();
       throw error;
     }
+  }
+}
+
+export interface OpenHttpsPassthroughArgs {
+  url: string;
+  policy: ExternalFetchPolicy;
+  method: string;
+  headers: Record<string, string>;
+  body: Buffer;
+  resolver?: ExternalFetchResolver;
+  fetchCount?: number;
+}
+
+export interface OpenHttpsPassthroughResponse {
+  response: IncomingMessage;
+  target: ValidatedExternalFetchUrl;
+  responseBytes: number;
+  timedOut: () => boolean;
+  close: () => void;
+}
+
+function passthroughRequestHeaders(
+  input: Record<string, string>,
+  bodyBytes: number,
+): Record<string, string> {
+  const connectionTokens = new Set(
+    (input.connection ?? '')
+      .split(',')
+      .map(value => value.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(input)) {
+    const lower = name.toLowerCase();
+    if (
+      STATIC_HOP_BY_HOP_HEADERS.has(lower)
+      || connectionTokens.has(lower)
+      || lower.startsWith('x-codeapi-egress-')
+      || lower === 'content-length'
+    ) {
+      continue;
+    }
+    headers[lower] = value;
+  }
+  headers['content-length'] = String(bodyBytes);
+  headers.connection = 'close';
+  return headers;
+}
+
+async function requestPinnedPassthrough(
+  target: ValidatedExternalFetchUrl,
+  selected: ResolvedExternalAddress,
+  args: Pick<OpenHttpsPassthroughArgs, 'method' | 'headers' | 'body'>,
+): Promise<OpenHttpsPassthroughResponse> {
+  const result = Promise.withResolvers<IncomingMessage>();
+  let timedOut = false;
+  let settled = false;
+  let connectTimer: NodeJS.Timeout | undefined;
+  let headersTimer: NodeJS.Timeout | undefined;
+  const deadlineAt = Date.now()
+    + (target.policy.httpsPassthroughTotalTimeoutMs
+      ?? target.policy.limits.totalTimeoutMs);
+  const request = https.request({
+    protocol: 'https:',
+    hostname: target.host,
+    servername: target.host,
+    port: 443,
+    method: args.method,
+    path: `${target.url.pathname}${target.url.search}`,
+    headers: passthroughRequestHeaders(args.headers, args.body.length),
+    agent: false,
+    ...(PROCESS_TRUSTED_CA ? { ca: PROCESS_TRUSTED_CA } : {}),
+    lookup: (_hostname, options, callback) => {
+      if (options.all) {
+        callback(null, [{ address: selected.address, family: selected.family }]);
+        return;
+      }
+      callback(null, selected.address, selected.family);
+    },
+  });
+  const totalTimer = setTimeout(() => {
+    timedOut = true;
+    request.destroy(new Error('HTTPS passthrough total timeout'));
+  }, Math.max(1, deadlineAt - Date.now()));
+  const clearPreResponseTimers = (): void => {
+    clearTimeout(connectTimer);
+    clearTimeout(headersTimer);
+  };
+  request.once('socket', socket => {
+    connectTimer = setTimeout(() => {
+      timedOut = true;
+      request.destroy(new Error('HTTPS passthrough connect timeout'));
+    }, target.policy.limits.connectTimeoutMs);
+    socket.once('secureConnect', () => {
+      clearTimeout(connectTimer);
+      headersTimer = setTimeout(() => {
+        timedOut = true;
+        request.destroy(new Error('HTTPS passthrough headers timeout'));
+      }, target.policy.limits.headersTimeoutMs);
+    });
+  });
+  request.once('response', response => {
+    settled = true;
+    clearPreResponseTimers();
+    result.resolve(response);
+  });
+  request.once('error', () => {
+    clearPreResponseTimers();
+    if (!settled) {
+      clearTimeout(totalTimer);
+      result.reject(new ExternalFetchError(timedOut ? 'FETCH_TIMEOUT' : 'FETCH_FAILED'));
+    }
+  });
+  request.end(args.body);
+
+  const response = await result.promise;
+  return {
+    response,
+    target,
+    responseBytes: 0,
+    timedOut: () => timedOut,
+    close: () => {
+      clearPreResponseTimers();
+      clearTimeout(totalTimer);
+      if (!response.complete) response.destroy();
+    },
+  };
+}
+
+export async function openHttpsPassthrough(
+  args: OpenHttpsPassthroughArgs,
+): Promise<OpenHttpsPassthroughResponse> {
+  const target = validateHttpsPassthroughUrl(args.url, args.policy);
+  const addresses = await resolveExternalFetchAddresses(target.host, args.resolver);
+  const selected = addresses[Math.max(0, (args.fetchCount ?? 1) - 1) % addresses.length];
+  if (!selected) throw new ExternalFetchError('FETCH_FAILED');
+  return requestPinnedPassthrough(target, selected, args);
+}
+
+export async function pipeHttpsPassthroughBody(
+  opened: OpenHttpsPassthroughResponse,
+  destination: Writable,
+  maxBytes = opened.target.policy.limits.maxResponseBytes,
+): Promise<number> {
+  opened.responseBytes = 0;
+  try {
+    for await (const chunk of opened.response) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      opened.responseBytes += bytes.length;
+      if (opened.responseBytes > maxBytes) {
+        throw new ExternalFetchError(
+          maxBytes < opened.target.policy.limits.maxResponseBytes
+            ? 'FETCH_BUDGET_EXCEEDED'
+            : 'RESPONSE_TOO_LARGE',
+        );
+      }
+      if (destination.destroyed || destination.writableEnded) {
+        throw new ExternalFetchError('FETCH_FAILED');
+      }
+      if (!destination.write(bytes)) await waitForDrainOrClose(destination);
+    }
+    return opened.responseBytes;
+  } catch (error) {
+    if (error instanceof ExternalFetchError) throw error;
+    throw new ExternalFetchError(opened.timedOut() ? 'FETCH_TIMEOUT' : 'FETCH_FAILED');
+  } finally {
+    opened.close();
   }
 }
 

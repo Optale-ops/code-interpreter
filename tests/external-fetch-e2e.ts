@@ -25,13 +25,14 @@ async function execute(
   surface: Surface,
   code: string,
   sentinel: string,
+  language = 'python',
 ): Promise<void> {
   const body =
     surface === 'exec'
-      ? { code, lang: 'python', user_id: 'w733-boundary' }
+      ? { code, lang: language, user_id: 'w733-boundary' }
       : {
           code,
-          language: 'python',
+          language,
           tools: [
             {
               name: 'unused_boundary_tool',
@@ -261,6 +262,43 @@ assert b"W733_QUERY_MARKER" not in ok_response
 print("W733_SUCCESS_RELAY_OK")
 `;
 
+const httpsPassthrough = `
+node <<'NODE'
+const allowed = await fetch('https://allowed.test/passthrough', {
+  method: 'POST',
+  headers: {
+    Authorization: 'Bearer presence-only-test-token',
+    'Content-Type': 'application/json',
+    'X-Client-Marker': 'kept',
+  },
+  body: JSON.stringify({ action: 'record_search' }),
+});
+if (allowed.status !== 201) throw new Error('allowed status ' + allowed.status + ': ' + await allowed.text());
+if (allowed.headers.get('x-upstream-marker') !== 'preserved') throw new Error('response header stripped');
+if (allowed.headers.get('x-codeapi-egress-outcome') !== null) throw new Error('origin control header escaped');
+const allowedBody = await allowed.json();
+if (allowedBody.accepted !== true) throw new Error('allowed body changed');
+const redirectDenied = await fetch('https://allowed.test/redirect', {
+  headers: { Authorization: 'Bearer presence-only-test-token' },
+});
+const redirectDeniedBody = await redirectDenied.json();
+if (redirectDenied.status !== 403 || redirectDeniedBody.error !== 'REDIRECT_REJECTED') {
+  throw new Error('unexpected redirect denial ' + redirectDenied.status + ': ' + JSON.stringify(redirectDeniedBody));
+}
+const denied = await fetch('https://unlisted.test/passthrough');
+const deniedBody = await denied.json();
+if (denied.status !== 403 || deniedBody.error !== 'HOST_NOT_ALLOWED') {
+  throw new Error('unexpected host denial ' + denied.status + ': ' + JSON.stringify(deniedBody));
+}
+const httpDenied = await fetch('http://allowed.test/passthrough');
+const httpDeniedBody = await httpDenied.json();
+if (httpDenied.status !== 403 || httpDeniedBody.error !== 'URL_REJECTED') {
+  throw new Error('unexpected HTTP denial ' + httpDenied.status + ': ' + JSON.stringify(httpDeniedBody));
+}
+console.log('W799_HTTPS_PASSTHROUGH_OK');
+NODE
+`;
+
 const urlDenies = `
 import os
 from sandbox_fetch import sandbox_fetch
@@ -439,6 +477,7 @@ await verifyGrantDenials();
 
 for (const surface of ['exec', 'exec/programmatic'] as const) {
   await execute(surface, successAndRelay, 'W733_SUCCESS_RELAY_OK');
+  await execute(surface, httpsPassthrough, 'W799_HTTPS_PASSTHROUGH_OK', 'bash');
   await execute(surface, urlDenies, 'W733_URL_DENIES_OK');
   await execute(surface, redirectDenies, 'W733_REDIRECT_DENIES_OK');
   await execute(surface, oversizeDenies, 'W733_OVERSIZE_DENIES_OK');
@@ -452,3 +491,4 @@ for (const surface of ['exec', 'exec/programmatic'] as const) {
 }
 
 console.log('W733_DUAL_ROUTE_BOUNDARY_OK');
+console.log('W799_HTTPS_PASSTHROUGH_BOUNDARY_OK');

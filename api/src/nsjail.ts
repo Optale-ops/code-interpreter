@@ -732,6 +732,12 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
   for (const [key, value] of Object.entries(envVars)) {
     args.push('-E', `${key}=${value}`);
   }
+  if (externalFetchGrantFile) {
+    args.push(
+      '-E',
+      'NODE_OPTIONS=--require=/usr/local/lib/sandbox-fetch/https_passthrough_preload.cjs',
+    );
+  }
 
   /* TOOL_CALL_SOCKET is intentionally NOT exported: the path is fixed at
    * /tmp/tcs.sock and the blocking-mode runtime preamble references it

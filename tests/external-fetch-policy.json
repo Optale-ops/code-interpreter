@@ -11,10 +11,15 @@
   },
   "hosts": {
     "allowed.test": {
-      "contentTypes": ["application/pdf"]
+      "contentTypes": [
+        "application/pdf"
+      ],
+      "httpsPassthrough": true
     },
     "private.test": {
-      "contentTypes": ["application/pdf"]
+      "contentTypes": [
+        "application/pdf"
+      ]
     }
   }
 }

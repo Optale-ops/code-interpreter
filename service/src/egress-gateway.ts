@@ -5,8 +5,16 @@ import path from 'path';
 import { Readable } from 'stream';
 import { env } from './config';
 import { ExternalFetchError, type ExternalFetchErrorCode } from './external-fetch-errors';
-import { openExternalFetch, pipeExternalFetchBody } from './external-fetch';
-import type { OpenExternalFetchResponse } from './external-fetch';
+import {
+  openExternalFetch,
+  openHttpsPassthrough,
+  pipeExternalFetchBody,
+  pipeHttpsPassthroughBody,
+} from './external-fetch';
+import type {
+  OpenExternalFetchResponse,
+  OpenHttpsPassthroughResponse,
+} from './external-fetch';
 import { loadExternalFetchPolicy, validateExternalFetchUrl } from './external-fetch-policy';
 import type { ExternalFetchPolicy } from './external-fetch-policy';
 import {
@@ -116,6 +124,7 @@ function routeFamily(req: Request): string {
   if (req.path.startsWith('/internal/')) return 'internal';
   if (req.path === '/tool-call') return 'ptc-tool-call';
   if (req.path === '/external-fetch') return 'external-fetch';
+  if (req.path === '/https-passthrough') return 'https-passthrough';
   if (req.path.startsWith('/sessions/')) {
     if (req.method === 'PUT') return 'file-upload';
     if (req.method === 'GET' && req.path.includes('/objects/')) return 'file-download';
@@ -123,6 +132,11 @@ function routeFamily(req: Request): string {
     return 'file-unknown';
   }
   return 'unknown';
+}
+
+function controlledEgressRoute(req: Request): boolean {
+  const route = routeFamily(req);
+  return route === 'external-fetch' || route === 'https-passthrough';
 }
 
 function requestId(res: Response): string | undefined {
@@ -189,10 +203,10 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   res.on('finish', () => {
     if (req.path === '/live' || req.path === '/health' || req.path === '/ready' || req.path === '/metrics') return;
     if (res.statusCode < 400 && isSyntheticEgressRequest(res)) return;
-    if (routeFamily(req) === 'external-fetch') {
+    if (controlledEgressRoute(req)) {
       logger.info('Egress gateway request completed', {
         requestId: id,
-        route: 'external-fetch',
+        route: routeFamily(req),
         statusCode: res.statusCode,
         durationMs: Date.now() - started,
         ...externalFetchAuditFields(res),
@@ -235,20 +249,20 @@ function sendEgressError(req: Request, res: Response, error: unknown): Response 
     const fields = auditFields(res);
     fields.outcome = error.code;
     res.locals.egressAuditFields = fields;
-    logger.warn('Rejected external fetch request', {
+    logger.warn('Rejected controlled egress request', {
       requestId: requestId(res),
-      route: 'external-fetch',
+      route: routeFamily(req),
       statusCode,
       outcome: error.code,
       ...externalFetchAuditFields(res),
     });
     return res.status(statusCode).json({ error: error.code, message: error.message });
   }
-  if (routeFamily(req) === 'external-fetch' && error instanceof EgressGrantError) {
+  if (controlledEgressRoute(req) && error instanceof EgressGrantError) {
     const statusCode = errorStatus(error);
-    logger.warn('Rejected external fetch grant', {
+    logger.warn('Rejected controlled egress grant', {
       requestId: requestId(res),
-      route: 'external-fetch',
+      route: routeFamily(req),
       statusCode,
       outcome: 'grant_rejected',
       ...externalFetchAuditFields(res),
@@ -267,10 +281,10 @@ function sendEgressError(req: Request, res: Response, error: unknown): Response 
     });
     return res.status(statusCode).json({ error: error.message });
   }
-  if (routeFamily(req) === 'external-fetch') {
-    logger.error('External fetch request failed', {
+  if (controlledEgressRoute(req)) {
+    logger.error('Controlled egress request failed', {
       requestId: requestId(res),
-      route: 'external-fetch',
+      route: routeFamily(req),
       outcome: 'FETCH_FAILED',
       ...externalFetchAuditFields(res),
     });
@@ -459,6 +473,47 @@ function pipeFetchResponse(fetchResponse: globalThis.Response, res: Response): v
   Readable.fromWeb(fetchResponse.body as unknown as import('stream/web').ReadableStream).pipe(res);
 }
 
+function setPassthroughResponseHeaders(
+  headers: Record<string, string | string[] | undefined>,
+  res: Response,
+): void {
+  const connectionTokens = new Set(
+    (Array.isArray(headers.connection) ? headers.connection.join(',') : headers.connection ?? '')
+      .split(',')
+      .map(value => value.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const blocked = new Set([
+    'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+    'content-length', 'proxy-connection', 'te', 'trailer',
+    'transfer-encoding', 'upgrade',
+  ]);
+  for (const [name, value] of Object.entries(headers)) {
+    const lower = name.toLowerCase();
+    if (
+      value === undefined
+      || blocked.has(lower)
+      || connectionTokens.has(lower)
+      || lower === 'x-request-id'
+      || lower.startsWith('x-codeapi-egress-')
+    ) {
+      continue;
+    }
+    res.setHeader(name, value);
+  }
+}
+
+function declaredPassthroughBytes(opened: OpenHttpsPassthroughResponse): number | undefined {
+  const raw = opened.response.headers['content-length'];
+  if (Array.isArray(raw) || raw === undefined || !/^(0|[1-9][0-9]*)$/.test(raw)) return undefined;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed)) throw new ExternalFetchError('RESPONSE_TOO_LARGE');
+  if (parsed > opened.target.policy.limits.maxResponseBytes) {
+    throw new ExternalFetchError('RESPONSE_TOO_LARGE');
+  }
+  return parsed;
+}
+
 class ExternalFetchEnvelopeError extends ExternalFetchError {
   readonly statusCode: 400 | 411 | 413;
 
@@ -511,6 +566,97 @@ async function readExternalFetchEnvelope(req: Request): Promise<string> {
     throw new ExternalFetchEnvelopeError();
   }
   return parsed.url;
+}
+
+const HTTPS_PASSTHROUGH_MAX_BODY_BYTES = 1_048_576;
+const HTTPS_PASSTHROUGH_MAX_ENVELOPE_BYTES = 1_500_000;
+const HTTPS_PASSTHROUGH_MAX_HEADER_BYTES = 65_536;
+const HTTPS_PASSTHROUGH_MAX_HEADERS = 64;
+const HTTP_TOKEN_RE = /^[!#$%&'*+\-.^_\`|~0-9A-Za-z]+$/;
+
+type HttpsPassthroughEnvelope = {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body: Buffer;
+};
+
+async function readHttpsPassthroughEnvelope(req: Request): Promise<HttpsPassthroughEnvelope> {
+  if (req.headers['transfer-encoding'] !== undefined) throw new ExternalFetchEnvelopeError();
+  if ((req.header('content-type') ?? '').split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
+    throw new ExternalFetchEnvelopeError();
+  }
+  const parsedLength = parseBoundedContentLength(
+    req.header('content-length'),
+    HTTPS_PASSTHROUGH_MAX_ENVELOPE_BYTES,
+    'HTTPS passthrough envelope exceeds limit',
+  );
+  if (!parsedLength.ok) throw new ExternalFetchEnvelopeError(parsedLength.status);
+  const body = await readRequestBody(req);
+  if (body.length !== parsedLength.length) throw new ExternalFetchEnvelopeError();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.toString('utf8'));
+  } catch {
+    throw new ExternalFetchEnvelopeError();
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new ExternalFetchEnvelopeError();
+  }
+  const raw = parsed as Record<string, unknown>;
+  const keys = Object.keys(raw).sort();
+  if (keys.join(',') !== 'bodyBase64,headers,method,url') {
+    throw new ExternalFetchEnvelopeError();
+  }
+  if (
+    typeof raw.url !== 'string'
+    || typeof raw.method !== 'string'
+    || raw.method.length < 1
+    || raw.method.length > 32
+    || !HTTP_TOKEN_RE.test(raw.method)
+    || !raw.headers
+    || typeof raw.headers !== 'object'
+    || Array.isArray(raw.headers)
+    || typeof raw.bodyBase64 !== 'string'
+  ) {
+    throw new ExternalFetchEnvelopeError();
+  }
+  const rawHeaders = raw.headers as Record<string, unknown>;
+  if (Object.keys(rawHeaders).length > HTTPS_PASSTHROUGH_MAX_HEADERS) {
+    throw new ExternalFetchEnvelopeError(413);
+  }
+  const headers: Record<string, string> = {};
+  let headerBytes = 0;
+  for (const [name, value] of Object.entries(rawHeaders)) {
+    const lower = name.toLowerCase();
+    if (
+      typeof value !== 'string'
+      || !HTTP_TOKEN_RE.test(name)
+      || headers[lower] !== undefined
+      || /[\u0000-\u0008\u000a-\u001f\u007f]/.test(value)
+    ) {
+      throw new ExternalFetchEnvelopeError();
+    }
+    headerBytes += Buffer.byteLength(name) + Buffer.byteLength(value);
+    if (headerBytes > HTTPS_PASSTHROUGH_MAX_HEADER_BYTES) {
+      throw new ExternalFetchEnvelopeError(413);
+    }
+    headers[lower] = value;
+  }
+  if (
+    raw.bodyBase64.length > Math.ceil(HTTPS_PASSTHROUGH_MAX_BODY_BYTES / 3) * 4
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(raw.bodyBase64)
+  ) {
+    throw new ExternalFetchEnvelopeError(413);
+  }
+  const decodedBody = Buffer.from(raw.bodyBase64, 'base64');
+  if (
+    decodedBody.length > HTTPS_PASSTHROUGH_MAX_BODY_BYTES
+    || decodedBody.toString('base64') !== raw.bodyBase64
+  ) {
+    throw new ExternalFetchEnvelopeError(413);
+  }
+  return { url: raw.url, method: raw.method, headers, body: decodedBody };
 }
 
 async function readRequestBody(req: Request): Promise<Buffer> {
@@ -860,6 +1006,130 @@ app.put('/sessions/:sessionHandle/objects/:fileId', async (req, res) => {
     }
     return sendEgressError(req, res, error);
   }
+});
+
+app.post('/https-passthrough', async (req, res) => {
+  if (!hasOpaqueGrant(req.header(EGRESS_GRANT_HEADER))) {
+    req.resume();
+    res.setHeader('Connection', 'close');
+    return res.status(404).type('text/plain').send('not found');
+  }
+
+  let grant: EgressGrantClaims | undefined;
+  let reservedBytes = 0;
+  let opened: OpenHttpsPassthroughResponse | undefined;
+  try {
+    let envelope: HttpsPassthroughEnvelope;
+    try {
+      envelope = await readHttpsPassthroughEnvelope(req);
+    } catch (error) {
+      if (error instanceof ExternalFetchEnvelopeError) {
+        return res.status(error.statusCode).json({ error: error.code, message: error.message });
+      }
+      throw error;
+    }
+    grant = await getGrant(req, res);
+    const policy = configuredExternalFetchPolicy();
+    const ledger = await consumeEgressFetchAttempt({
+      grant,
+      maxFetches: policy.limits.maxFetchesPerGrant,
+    });
+    opened = await openHttpsPassthrough({
+      ...envelope,
+      policy,
+      fetchCount: ledger.fetch_count,
+    });
+    const fields = auditFields(res);
+    fields.destinationHost = opened.target.host;
+    fields.pathHash = opened.target.pathHash;
+    fields.queryPresent = opened.target.queryPresent;
+    fields.contentType = Array.isArray(opened.response.headers['content-type'])
+      ? opened.response.headers['content-type'][0]
+      : opened.response.headers['content-type'];
+    res.locals.egressAuditFields = fields;
+
+    const contentEncoding = opened.response.headers['content-encoding'];
+    if (
+      contentEncoding !== undefined
+      && (Array.isArray(contentEncoding) || contentEncoding.toLowerCase() !== 'identity')
+    ) {
+      opened.close();
+      throw new ExternalFetchError('CONTENT_TYPE_REJECTED');
+    }
+    const statusCode = opened.response.statusCode ?? 502;
+    if (statusCode >= 300 && statusCode < 400) {
+      opened.close();
+      throw new ExternalFetchError('REDIRECT_REJECTED');
+    }
+    const declaredBytes = declaredPassthroughBytes(opened);
+    reservedBytes = await reserveEgressFetchBytes({
+      grant,
+      maxBytes: declaredBytes && declaredBytes > 0
+        ? declaredBytes
+        : opened.target.policy.limits.maxResponseBytes,
+      maxAggregateBytes: opened.target.policy.limits.maxAggregateBytesPerGrant,
+    });
+    if (declaredBytes !== undefined && declaredBytes > reservedBytes) {
+      opened.close();
+      throw new ExternalFetchError('FETCH_BUDGET_EXCEEDED');
+    }
+
+    res.status(statusCode);
+    setPassthroughResponseHeaders(opened.response.headers, res);
+    res.setHeader('Trailer', 'X-CodeAPI-Egress-Outcome');
+    res.setHeader('Transfer-Encoding', 'chunked');
+    const responseBytes = await pipeHttpsPassthroughBody(opened, res, reservedBytes);
+    await commitEgressFetchBytes({ grant, reservedBytes, responseBytes });
+    reservedBytes = 0;
+    fields.responseBytes = responseBytes;
+    fields.outcome = 'success';
+    res.addTrailers({ 'X-CodeAPI-Egress-Outcome': 'OK' });
+    res.end();
+    return res;
+  } catch (error) {
+    if (grant && reservedBytes > 0) {
+      const responseBytes = Math.min(opened?.responseBytes ?? 0, reservedBytes);
+      try {
+        await commitEgressFetchBytes({ grant, reservedBytes, responseBytes });
+        reservedBytes = 0;
+      } catch {
+        logger.error('Failed to settle HTTPS passthrough byte reservation', {
+          grantHash: hashLabel(grant.grant_id),
+          outcome: 'ledger_commit_failed',
+        });
+      }
+      const fields = auditFields(res);
+      fields.responseBytes = responseBytes;
+      res.locals.egressAuditFields = fields;
+    }
+    if (res.headersSent) {
+      const outcome = error instanceof ExternalFetchError ? error.code : 'FETCH_FAILED';
+      const fields = auditFields(res);
+      fields.outcome = outcome;
+      res.locals.egressAuditFields = fields;
+      res.addTrailers({ 'X-CodeAPI-Egress-Outcome': outcome });
+      res.end();
+      return res;
+    }
+    return sendEgressError(req, res, error);
+  } finally {
+    if (grant && reservedBytes > 0) {
+      try {
+        await releaseEgressFetchBytes({ grant, reservedBytes });
+      } catch {
+        logger.error('Failed to release HTTPS passthrough byte reservation', {
+          grantHash: hashLabel(grant.grant_id),
+          outcome: 'ledger_release_failed',
+        });
+      }
+    }
+  }
+});
+
+app.all('/https-passthrough', (req, res) => {
+  req.resume();
+  res.setHeader('Connection', 'close');
+  return res.status(404).type('text/plain').send('not found');
 });
 
 app.post('/external-fetch', async (req, res) => {

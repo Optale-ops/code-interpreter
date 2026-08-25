@@ -15,6 +15,8 @@ export interface ExternalFetchLimits {
 
 export interface ExternalFetchHostPolicy {
   contentTypes: Set<string>;
+  httpsPassthrough: boolean;
+  httpsPassthroughTotalTimeoutMs?: number;
   limits: ExternalFetchLimits;
 }
 
@@ -36,6 +38,8 @@ export interface ResolvedExternalAddress {
   address: string;
   family: 4 | 6;
 }
+
+export const HARD_HTTPS_PASSTHROUGH_TOTAL_TIMEOUT_MS = 300_000;
 
 export const HARD_EXTERNAL_FETCH_LIMITS: Readonly<ExternalFetchLimits> =
   Object.freeze({
@@ -218,17 +222,43 @@ export function parseExternalFetchPolicy(value: unknown): ExternalFetchPolicy {
     const rawHost = objectValue(hostValue, `External fetch host ${host}`);
     assertOnlyKeys(
       rawHost,
-      ['contentTypes', 'limits'],
+      [
+        'contentTypes',
+        'httpsPassthrough',
+        'httpsPassthroughTotalTimeoutMs',
+        'limits',
+      ],
       `External fetch host ${host}`,
     );
-    if (
-      !Array.isArray(rawHost.contentTypes) ||
-      rawHost.contentTypes.length < 1
-    ) {
-      throw new Error(`External fetch host ${host} must declare contentTypes`);
+    const httpsPassthrough = rawHost.httpsPassthrough === undefined
+      ? false
+      : rawHost.httpsPassthrough === true;
+    if (rawHost.httpsPassthrough !== undefined && !httpsPassthrough) {
+      throw new Error(`External fetch host ${host} has invalid httpsPassthrough`);
+    }
+    if (rawHost.httpsPassthroughTotalTimeoutMs !== undefined && !httpsPassthrough) {
+      throw new Error(
+        `External fetch host ${host} cannot set httpsPassthroughTotalTimeoutMs without HTTPS passthrough`,
+      );
+    }
+    const httpsPassthroughTotalTimeoutMs = httpsPassthrough
+      ? rawHost.httpsPassthroughTotalTimeoutMs === undefined
+        ? HARD_HTTPS_PASSTHROUGH_TOTAL_TIMEOUT_MS
+        : positiveInteger(
+            rawHost.httpsPassthroughTotalTimeoutMs,
+            `External fetch host ${host}.httpsPassthroughTotalTimeoutMs`,
+            HARD_HTTPS_PASSTHROUGH_TOTAL_TIMEOUT_MS,
+          )
+      : undefined;
+    if (rawHost.contentTypes !== undefined && !Array.isArray(rawHost.contentTypes)) {
+      throw new Error(`External fetch host ${host} contentTypes must be an array`);
+    }
+    const rawContentTypes = rawHost.contentTypes as unknown[] | undefined;
+    if ((rawContentTypes?.length ?? 0) < 1 && !httpsPassthrough) {
+      throw new Error(`External fetch host ${host} must enable at least one egress scope`);
     }
     const contentTypes = new Set<string>();
-    for (const contentType of rawHost.contentTypes) {
+    for (const contentType of rawContentTypes ?? []) {
       if (
         typeof contentType !== 'string' ||
         ALLOWED_CONTENT_TYPES[contentType] !== true ||
@@ -242,6 +272,10 @@ export function parseExternalFetchPolicy(value: unknown): ExternalFetchPolicy {
     }
     hosts.set(host, {
       contentTypes,
+      httpsPassthrough,
+      ...(httpsPassthroughTotalTimeoutMs === undefined
+        ? {}
+        : { httpsPassthroughTotalTimeoutMs }),
       limits:
         rawHost.limits === undefined
           ? { ...limits }
@@ -273,7 +307,7 @@ function malformedPercentEncoding(raw: string): boolean {
   return false;
 }
 
-export function validateExternalFetchUrl(
+function validatePolicyUrl(
   raw: string,
   policy: ExternalFetchPolicy,
 ): ValidatedExternalFetchUrl {
@@ -329,6 +363,29 @@ export function validateExternalFetchUrl(
     queryPresent: url.search.length > 0,
     policy: hostPolicy,
   };
+}
+
+
+export function validateExternalFetchUrl(
+  raw: string,
+  policy: ExternalFetchPolicy,
+): ValidatedExternalFetchUrl {
+  const validated = validatePolicyUrl(raw, policy);
+  if (validated.policy.contentTypes.size === 0) {
+    throw new ExternalFetchError('HOST_NOT_ALLOWED');
+  }
+  return validated;
+}
+
+export function validateHttpsPassthroughUrl(
+  raw: string,
+  policy: ExternalFetchPolicy,
+): ValidatedExternalFetchUrl {
+  const validated = validatePolicyUrl(raw, policy);
+  if (!validated.policy.httpsPassthrough) {
+    throw new ExternalFetchError('HOST_NOT_ALLOWED');
+  }
+  return validated;
 }
 
 export function validateResolvedAddresses(
