@@ -7,7 +7,11 @@ import fs from 'node:fs';
 import https from 'node:https';
 import { PassThrough, Writable } from 'node:stream';
 import type { RemoteInfo } from 'node:dgram';
-import { openExternalFetch, pipeExternalFetchBody } from './external-fetch';
+import {
+  openExternalFetch,
+  openHttpsPassthrough,
+  pipeExternalFetchBody,
+} from './external-fetch';
 import { ExternalFetchError } from './external-fetch-errors';
 import { parseExternalFetchPolicy } from './external-fetch-policy';
 
@@ -101,7 +105,12 @@ function policy(timeoutOverrides: Record<string, number> = {}) {
       totalTimeoutMs: 15_000,
       ...timeoutOverrides,
     },
-    hosts: { [HOST]: { contentTypes: ['application/pdf'] } },
+    hosts: {
+      [HOST]: {
+        contentTypes: ['application/pdf'],
+        httpsPassthrough: true,
+      },
+    },
   });
 }
 
@@ -126,18 +135,37 @@ async function main(): Promise<void> {
     path: string;
     method?: string;
     headers: string[];
+    authorization?: string;
+    clientMarker?: string | string[];
+    body?: string;
   }> = [];
   const server = https.createServer(
     {
       key: fs.readFileSync(`${certDir}/key.pem`),
       cert: fs.readFileSync(`${certDir}/cert.pem`),
     },
-    (request, response) => {
-      requests.push({
+    async (request, response) => {
+      const observed = {
         path: request.url ?? '',
         method: request.method,
         headers: Object.keys(request.headers),
-      });
+        authorization: request.headers.authorization,
+        clientMarker: request.headers['x-client-marker'],
+        body: undefined as string | undefined,
+      };
+      requests.push(observed);
+      if (request.url === '/passthrough') {
+        const chunks: Buffer[] = [];
+        for await (const chunk of request)
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        observed.body = Buffer.concat(chunks).toString('utf8');
+        response.writeHead(201, {
+          'Content-Type': 'application/json',
+          'X-Upstream-Marker': 'preserved',
+        });
+        response.end(JSON.stringify({ accepted: true }));
+        return;
+      }
       if (request.url === '/redirect') {
         response.writeHead(302, { Location: '/success' });
         return response.end();
@@ -218,6 +246,49 @@ async function main(): Promise<void> {
       requests[0]?.headers.filter(header => header !== 'connection').sort(),
       ['accept', 'accept-encoding', 'host', 'user-agent'],
     );
+
+    const passthroughRequestCount = requests.length;
+    const passthrough = await openHttpsPassthrough({
+      url: `https://${HOST}/passthrough`,
+      policy: policy(),
+      resolver: dns.resolver,
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer presence-only',
+        'Content-Type': 'application/json',
+        'X-Client-Marker': 'kept',
+      },
+      body: Buffer.from(JSON.stringify({ action: 'record_search' })),
+    });
+    const passthroughChunks: Buffer[] = [];
+    for await (const chunk of passthrough.response)
+      passthroughChunks.push(Buffer.from(chunk));
+    passthrough.close();
+    assert.equal(passthrough.response.statusCode, 201);
+    assert.equal(passthrough.response.headers['x-upstream-marker'], 'preserved');
+    assert.deepEqual(JSON.parse(Buffer.concat(passthroughChunks).toString('utf8')), {
+      accepted: true,
+    });
+    assert.deepEqual(requests[passthroughRequestCount], {
+      path: '/passthrough',
+      method: 'POST',
+      headers: requests[passthroughRequestCount]?.headers,
+      authorization: 'Bearer presence-only',
+      clientMarker: 'kept',
+      body: JSON.stringify({ action: 'record_search' }),
+    });
+    await expectCode(
+      () => openHttpsPassthrough({
+        url: 'https://unlisted.test/passthrough',
+        policy: policy(),
+        resolver: dns.resolver,
+        method: 'GET',
+        headers: {},
+        body: Buffer.alloc(0),
+      }),
+      'HOST_NOT_ALLOWED',
+    );
+    assert.equal(requests.length, passthroughRequestCount + 1);
 
     const disconnectOpened = await openExternalFetch({
       url: `https://${HOST}/success`,

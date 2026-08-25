@@ -1101,6 +1101,30 @@ describe('egress gateway routes', () => {
     }
   });
 
+  test('keeps HTTPS passthrough opaque without a grant and denies an unlisted host', async () => {
+    const body = JSON.stringify({
+      url: 'https://unlisted.example/api/optale/mcp',
+      method: 'GET',
+      headers: { authorization: 'Bearer presence-only' },
+      bodyBase64: '',
+    });
+    const opaque = await gatewayFetch('/https-passthrough', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    expect(opaque.status).toBe(404);
+    expect(await opaque.text()).toBe('not found');
+
+    const denied = await gatewayFetch('/https-passthrough', {
+      method: 'POST',
+      headers: { ...grantHeader(), 'Content-Type': 'application/json' },
+      body,
+    });
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toMatchObject({ error: 'HOST_NOT_ALLOWED' });
+  });
+
   test('rejects non-POST external-fetch methods and caller-selected envelope fields', async () => {
     const nonPost = await gatewayFetch('/external-fetch', {
       method: 'PUT',

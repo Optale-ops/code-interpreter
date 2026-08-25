@@ -488,6 +488,14 @@ describe('tool-call socket proxy', () => {
     expect(unknownField.status).toBe(400);
     expect(upstreamRequests).toHaveLength(1);
 
+    const nullEnvelope = await request('null', {
+      'Content-Type': 'application/json',
+      'Content-Length': '4',
+      'X-CodeAPI-Egress-Grant': 'opaque-grant',
+    });
+    expect(nullEnvelope.status).toBe(400);
+    expect(upstreamRequests).toHaveLength(1);
+
     const oversizedBody = JSON.stringify({ url: `https://allowed.test/${'a'.repeat(16_384)}` });
     const oversized = await request(oversizedBody, {
       'Content-Type': 'application/json',
@@ -500,6 +508,100 @@ describe('tool-call socket proxy', () => {
     const closed = Promise.withResolvers<void>();
     server.close(() => closed.resolve());
     await closed.promise;
+  });
+
+  test('forwards the bounded HTTPS passthrough envelope without exposing outer caller headers', async () => {
+    const upstreamRequests: Array<{ path: string; headers: http.IncomingHttpHeaders; body: string }> = [];
+    const server = net.createServer(socket => {
+      let rawRequest = Buffer.alloc(0);
+      socket.on('data', chunk => {
+        rawRequest = Buffer.concat([rawRequest, Buffer.from(chunk)]);
+        const headerEnd = rawRequest.indexOf('\r\n\r\n');
+        if (headerEnd < 0) return;
+        const headerText = rawRequest.subarray(0, headerEnd).toString('utf8');
+        const declared = Number(headerText.match(/\r\ncontent-length: (\d+)/i)?.[1] ?? 0);
+        const body = rawRequest.subarray(headerEnd + 4);
+        if (body.length < declared) return;
+        const requestLine = headerText.split('\r\n')[0] ?? '';
+        const headerEntries = headerText.split('\r\n').slice(1).map(line => {
+          const colon = line.indexOf(':');
+          return [line.slice(0, colon).toLowerCase(), line.slice(colon + 1).trim()];
+        });
+        upstreamRequests.push({
+          path: requestLine.split(' ')[1] ?? '',
+          headers: Object.fromEntries(headerEntries),
+          body: body.subarray(0, declared).toString('utf8'),
+        });
+        const responseBody = '{"accepted":true}';
+        socket.end([
+          'HTTP/1.1 201 Created',
+          'Content-Type: application/json',
+          'Content-Length: ' + responseBody.length,
+          'X-Upstream-Marker: preserved',
+          'Connection: close',
+          '',
+          responseBody,
+        ].join('\r\n'));
+      });
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address == null || typeof address === 'string') throw new Error('bad address');
+    const socketPath = makeSocketPath();
+    const proxy = await startToolCallSocketProxy({
+      socketPath,
+      rawTarget: `http://127.0.0.1:${address.port}`,
+      log: { log() {}, warn() {}, error() {} },
+    });
+    handles.push(proxy);
+    const body = JSON.stringify({
+      url: 'https://console-staging.optale.com/api/optale/mcp',
+      method: 'POST',
+      headers: { authorization: 'Bearer inside-envelope' },
+      bodyBase64: '',
+    });
+    const result = await new Promise<{
+      status: number;
+      headers: http.IncomingHttpHeaders;
+      trailers: http.IncomingHttpHeaders;
+      body: string;
+    }>((resolve, reject) => {
+      const request = http.request({
+        socketPath,
+        method: 'POST',
+        path: '/https-passthrough',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': String(Buffer.byteLength(body)),
+          'X-CodeAPI-Egress-Grant': 'opaque-grant',
+          Authorization: 'must-not-cross-outer-relay',
+        },
+      }, response => {
+        const chunks: Buffer[] = [];
+        response.on('data', chunk => chunks.push(Buffer.from(chunk)));
+        response.on('end', () => resolve({
+          status: response.statusCode ?? 0,
+          headers: response.headers,
+          trailers: response.trailers,
+          body: Buffer.concat(chunks).toString('utf8'),
+        }));
+      });
+      request.on('error', reject);
+      request.end(body);
+    });
+
+    expect(result.status).toBe(201);
+    expect(result.body).toBe('{"accepted":true}');
+    expect(result.headers['x-codeapi-egress-outcome']).toBeUndefined();
+    expect(result.trailers['x-codeapi-egress-outcome']).toBeUndefined();
+    expect(result.headers['x-upstream-marker']).toBe('preserved');
+    expect(upstreamRequests).toHaveLength(1);
+    expect(upstreamRequests[0]?.path).toBe('/https-passthrough');
+    expect(upstreamRequests[0]?.body).toBe(body);
+    expect(upstreamRequests[0]?.headers['x-codeapi-egress-grant']).toBe('opaque-grant');
+    expect(upstreamRequests[0]?.headers.authorization).toBeUndefined();
+
+    await new Promise<void>(resolve => server.close(() => resolve()));
   });
 
   /* Integration tests for the connection-rate limiter live in

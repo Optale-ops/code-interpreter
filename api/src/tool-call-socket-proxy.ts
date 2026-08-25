@@ -50,6 +50,8 @@ const DEFAULT_IDLE_SOCKET_TIMEOUT_MS = 2_000;
 const DEFAULT_REQUEST_BODY_TIMEOUT_MS = 5_000;
 const DEFAULT_ACTIVE_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BODY_BYTES = 1_048_576;
+const HTTPS_PASSTHROUGH_MAX_ENVELOPE_BYTES = 1_500_000;
+const HTTPS_PASSTHROUGH_MAX_BODY_BYTES = 1_048_576;
 const DEFAULT_LISTEN_BACKLOG = 16;
 const MAX_DEFAULT_CONNECTIONS = 256;
 const MAX_DEFAULT_ACTIVE_REQUESTS = 64;
@@ -345,7 +347,9 @@ export async function startToolCallSocketProxy(
 
     const isToolCall = req.method === 'POST' && req.url === '/tool-call';
     const isExternalFetch = req.method === 'POST' && req.url === '/external-fetch';
-    if (!isToolCall && !isExternalFetch) {
+    const isHttpsPassthrough = req.method === 'POST' && req.url === '/https-passthrough';
+    const isControlledFetch = isExternalFetch || isHttpsPassthrough;
+    if (!isToolCall && !isControlledFetch) {
       req.resume();
       res.writeHead(404, { 'Content-Type': 'text/plain', Connection: 'close' });
       res.end('not found');
@@ -364,21 +368,25 @@ export async function startToolCallSocketProxy(
       return;
     }
 
-    if (isSmugglingShaped(req.headers) || (isExternalFetch && req.headers['transfer-encoding'] !== undefined)) {
+    if (isSmugglingShaped(req.headers) || (isControlledFetch && req.headers['transfer-encoding'] !== undefined)) {
       req.resume();
       res.writeHead(400, { 'Content-Type': 'text/plain', Connection: 'close' });
       res.end('ambiguous Content-Length and Transfer-Encoding');
       return;
     }
 
-    const requestBodyLimit = isExternalFetch ? 16_384 : maxBodyBytes;
+    const requestBodyLimit = isExternalFetch
+      ? 16_384
+      : isHttpsPassthrough
+        ? HTTPS_PASSTHROUGH_MAX_ENVELOPE_BYTES
+        : maxBodyBytes;
     const declaredHeaderValue = req.headers['content-length'];
     /* Content-Length is contractually required on /external-fetch (W730 §5.2 —
      * no transfer-encoding/content-length ambiguity), so an absent header is a
      * 411 there. /tool-call has always accepted a chunked body with no
      * Content-Length, so absence stays legal and the equality check below is
      * skipped rather than comparing a real body against an implied 0. */
-    const declaredCL = declaredHeaderValue === undefined && !isExternalFetch
+    const declaredCL = declaredHeaderValue === undefined && !isControlledFetch
       ? undefined
       : Number(declaredHeaderValue);
     if (declaredCL !== undefined && (!Number.isSafeInteger(declaredCL) || declaredCL < 0)) {
@@ -403,8 +411,8 @@ export async function startToolCallSocketProxy(
       });
       res.end(JSON.stringify({
         success: false,
-        error: isExternalFetch
-          ? 'Too many concurrent external-fetch requests'
+        error: isControlledFetch
+          ? 'Too many concurrent controlled-egress requests'
           : 'Too many concurrent tool-call requests',
       }));
       return;
@@ -438,7 +446,7 @@ export async function startToolCallSocketProxy(
     let upstream: http.ClientRequest | undefined;
     const abortUpstream = (): void => {
       if (!upstream || upstreamClosed || res.writableEnded) return;
-      upstream.destroy(new Error(`${isExternalFetch ? 'external-fetch' : 'tool-call'} client disconnected`));
+      upstream.destroy(new Error(`${isControlledFetch ? 'controlled-egress' : 'tool-call'} client disconnected`));
     };
     req.on('aborted', abortUpstream);
     res.on('close', abortUpstream);
@@ -465,7 +473,7 @@ export async function startToolCallSocketProxy(
         res.end('request body length mismatch');
         return;
       }
-      if (isExternalFetch) {
+      if (isControlledFetch) {
         if ((req.headers['content-type'] ?? '').toString().split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
           res.writeHead(400, { 'Content-Type': 'application/json', Connection: 'close' });
           res.end(JSON.stringify({ error: 'URL_REJECTED', message: 'External fetch URL is invalid' }));
@@ -477,21 +485,45 @@ export async function startToolCallSocketProxy(
         } catch {
           envelope = undefined;
         }
-        if (
-          !envelope
-          || typeof envelope !== 'object'
-          || Array.isArray(envelope)
-          || Object.keys(envelope).length !== 1
-          || !('url' in envelope)
-          || typeof envelope.url !== 'string'
-        ) {
+        const isObjectEnvelope = envelope !== null
+          && typeof envelope === 'object'
+          && !Array.isArray(envelope);
+        const objectEnvelope = isObjectEnvelope
+          ? envelope as Record<string, unknown>
+          : {};
+        const validExternalFetch = isExternalFetch
+          && isObjectEnvelope
+          && Object.keys(objectEnvelope).length === 1
+          && typeof objectEnvelope.url === 'string';
+        const passthroughEnvelope = objectEnvelope as {
+          url?: unknown;
+          method?: unknown;
+          headers?: unknown;
+          bodyBase64?: unknown;
+        };
+        const encodedBody = typeof passthroughEnvelope.bodyBase64 === 'string'
+          ? passthroughEnvelope.bodyBase64
+          : '';
+        const validPassthrough = isHttpsPassthrough
+          && isObjectEnvelope
+          && Object.keys(objectEnvelope).sort().join(',') === 'bodyBase64,headers,method,url'
+          && typeof passthroughEnvelope.url === 'string'
+          && typeof passthroughEnvelope.method === 'string'
+          && passthroughEnvelope.headers !== null
+          && typeof passthroughEnvelope.headers === 'object'
+          && !Array.isArray(passthroughEnvelope.headers)
+          && typeof passthroughEnvelope.bodyBase64 === 'string'
+          && encodedBody.length <= Math.ceil(HTTPS_PASSTHROUGH_MAX_BODY_BYTES / 3) * 4
+          && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encodedBody)
+          && Buffer.from(encodedBody, 'base64').length <= HTTPS_PASSTHROUGH_MAX_BODY_BYTES;
+        if (!validExternalFetch && !validPassthrough) {
           res.writeHead(400, { 'Content-Type': 'application/json', Connection: 'close' });
           res.end(JSON.stringify({ error: 'URL_REJECTED', message: 'External fetch URL is invalid' }));
           return;
         }
       }
 
-      const headers = isExternalFetch
+      const headers = isControlledFetch
         ? buildExternalFetchHeaders(req.headers, target.host)
         : buildForwardedHeaders(req.headers, target.host);
       headers['content-length'] = body.length;
@@ -500,7 +532,11 @@ export async function startToolCallSocketProxy(
         hostname: target.hostname,
         port: target.port || undefined,
         method: 'POST',
-        path: isExternalFetch ? '/external-fetch' : '/tool-call',
+        path: isExternalFetch
+          ? '/external-fetch'
+          : isHttpsPassthrough
+            ? '/https-passthrough'
+            : '/tool-call',
         headers,
       }, upstreamRes => {
         if (rejected) {
@@ -514,14 +550,27 @@ export async function startToolCallSocketProxy(
           if (isExternalFetch) {
             if (EXTERNAL_FETCH_RESPONSE_HEADERS[lowerKey] !== true) continue;
             if (lowerKey === 'trailer' && value.toString().toLowerCase() !== 'x-codeapi-egress-outcome') continue;
+          } else if (isHttpsPassthrough) {
+            if (
+              lowerKey === 'trailer'
+              && value.toString().toLowerCase() === 'x-codeapi-egress-outcome'
+            ) {
+              responseHeaders[lowerKey] = value;
+              continue;
+            }
+            if (HOP_BY_HOP_HEADERS.has(lowerKey)) continue;
           } else if (HOP_BY_HOP_HEADERS.has(lowerKey)) {
             continue;
           }
           responseHeaders[lowerKey] = value;
         }
+        if (isControlledFetch && responseHeaders.trailer !== undefined) {
+          delete responseHeaders['content-length'];
+          responseHeaders['transfer-encoding'] = 'chunked';
+        }
         responseHeaders.Connection = 'close';
         res.writeHead(upstreamRes.statusCode || 502, responseHeaders);
-        if (!isExternalFetch) {
+        if (!isControlledFetch) {
           upstreamRes.pipe(res);
           return;
         }
@@ -541,11 +590,11 @@ export async function startToolCallSocketProxy(
         releaseActiveRequest();
       });
       upstream.setTimeout(activeRequestTimeoutMs, () => {
-        upstream?.destroy(new Error(`${isExternalFetch ? 'external-fetch' : 'tool-call'} upstream timeout`));
+        upstream?.destroy(new Error(`${isControlledFetch ? 'controlled-egress' : 'tool-call'} upstream timeout`));
       });
       upstream.on('error', error => {
         if (rejected) return;
-        log.error(`${isExternalFetch ? 'external-fetch' : 'tool-call'} socket proxy upstream error`, error);
+        log.error(`${isControlledFetch ? 'controlled-egress' : 'tool-call'} socket proxy upstream error`, error);
         if (!res.headersSent) {
           res.writeHead(502, { 'Content-Type': 'text/plain', Connection: 'close' });
         }
