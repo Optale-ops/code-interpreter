@@ -523,7 +523,7 @@ export function buildPinnedRequestOptions(
 ): RequestOptions {
   const pinnedAddresses = addresses.toSorted((left, right) => left.family - right.family);
   const selected = pinnedAddresses[0];
-  if (!selected) throw new ExternalFetchError('FETCH_FAILED');
+  if (selected === undefined) throw new ExternalFetchError('FETCH_FAILED');
   return {
     protocol: 'https:',
     hostname: target.host,
@@ -540,7 +540,7 @@ export function buildPinnedRequestOptions(
     autoSelectFamily: pinnedAddresses.length > 1,
     ...(PROCESS_TRUSTED_CA ? { ca: PROCESS_TRUSTED_CA } : {}),
     lookup: (_hostname, options, callback): void => {
-      if (options.all) {
+      if (options.all === true) {
         callback(null, pinnedAddresses);
         return;
       }

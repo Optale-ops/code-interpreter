@@ -96,7 +96,7 @@ async function main(): Promise<void> {
 
     const subsequent = await fetch(`${baseUrl}/live`);
     assert.equal(subsequent.status, 200);
-    console.log('EGRESS_GATEWAY_SOCKET_FAILURE_SURVIVED');
+    process.stdout.write('EGRESS_GATEWAY_SOCKET_FAILURE_SURVIVED\n');
   } finally {
     server.close();
     await once(server, 'close');
