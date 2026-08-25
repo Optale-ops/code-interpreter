@@ -127,6 +127,7 @@ export interface RequestBody {
   code: string;
   lang: string;
   args?: string[];
+  env_vars?: Record<string, string>;
   user_id?: string;
   files?: RequestFile[];
   /**
