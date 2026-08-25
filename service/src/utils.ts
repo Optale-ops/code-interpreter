@@ -109,6 +109,13 @@ export function sandboxErrorMessageFromAxios(error: AxiosError): string {
 export function publicExecutionFailure(error: unknown): { status: number; body: { error: string; message: string } } | null {
   const message = error instanceof Error ? error.message : '';
 
+  if (/^env_vars exceeds maximum (?:count of \d+|total size of \d+ bytes)$/.test(message)) {
+    return {
+      status: 400,
+      body: { error: 'bad_request', message },
+    };
+  }
+
   /* The worker normally publishes a typed deadline failure before this wait
    * expires. If cleanup itself consumes the bounded completion grace, BullMQ
    * supplies its own timeout string; keep both internal shapes sanitized and

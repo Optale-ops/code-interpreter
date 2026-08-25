@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import type * as t from './types';
 import { planLimits, languageConfig, resolveLanguage } from './config';
+import { sanitizeEnvVars } from '../../shared/env-vars.js';
 
 export const templateCode = fs.readFileSync(path.join(__dirname, 'matplotlib.py'), 'utf8');
 
@@ -10,7 +11,7 @@ export function createPayload({
   isPyPlot,
   session_id,
 }: t.CreatePayload): t.PayloadBody {
-  const { lang: rawLang, code: userCode, args, files } = req.body as t.RequestBody;
+  const { lang: rawLang, code: userCode, args, files, env_vars } = req.body as t.RequestBody;
   const language = resolveLanguage(rawLang);
   if (language === undefined) {
     throw new Error(`Unsupported language: ${rawLang}`);
@@ -50,6 +51,11 @@ export function createPayload({
 
   if (args) {
     payload.args = args;
+  }
+
+  const sanitizedEnvVars = sanitizeEnvVars(env_vars);
+  if (sanitizedEnvVars) {
+    payload.env_vars = sanitizedEnvVars;
   }
 
   if (files && files.length > 0) {
