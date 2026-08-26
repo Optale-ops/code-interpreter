@@ -26,7 +26,7 @@ async function execute(
   code: string,
   sentinel: string,
   language = 'python',
-): Promise<void> {
+): Promise<unknown> {
   const body =
     surface === 'exec'
       ? { code, lang: language, user_id: 'w733-boundary' }
@@ -60,11 +60,59 @@ async function execute(
   if (text.includes(QUERY_MARKER)) {
     throw new Error(`${surface} response leaked the query marker`);
   }
+    return payload;
 }
 
 const GATEWAY_URL = 'http://egress-gateway:3190';
 const INTERNAL_TOKEN = 'localdev-internal-service-token';
 const GRANT_SECRET = 'localdev-egress-grant-secret-change-me-32b';
+
+const POLICY_LIMITS = {
+    maxRedirects: 3,
+    maxResponseBytes: 26_214_400,
+    maxAggregateBytesPerGrant: 52_428_800,
+    maxFetchesPerGrant: 8,
+    connectTimeoutMs: 3_000,
+    headersTimeoutMs: 5_000,
+    totalTimeoutMs: 15_000,
+};
+const NETWORK_POLICY = {
+    version: 1,
+    limits: POLICY_LIMITS,
+    hosts: {
+        'allowed.test': {
+            contentTypes: ['application/pdf'],
+            httpsPassthrough: true,
+            httpsPassthroughTotalTimeoutMs: 300_000,
+            packageTransport: true,
+            limits: POLICY_LIMITS,
+        },
+        'private.test': {
+            contentTypes: ['application/pdf'],
+            limits: POLICY_LIMITS,
+        },
+    },
+};
+function canonicalJson(value: unknown): string {
+    if (
+        value === null ||
+        typeof value === 'string' ||
+        typeof value === 'boolean' ||
+        typeof value === 'number'
+    ) {
+        return JSON.stringify(value);
+    }
+    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+    const object = value as Record<string, unknown>;
+    return `{${Object.keys(object)
+        .sort()
+        .map(key => `${JSON.stringify(key)}:${canonicalJson(object[key])}`)
+        .join(',')}}`;
+}
+const NETWORK_POLICY_DIGEST = crypto
+    .createHash('sha256')
+    .update(canonicalJson(NETWORK_POLICY), 'utf8')
+    .digest('base64url');
 
 function grantClaims(execId: string, exp: number): Record<string, unknown> {
   const now = Math.floor(Date.now() / 1000);
@@ -83,11 +131,16 @@ function grantClaims(execId: string, exp: number): Record<string, unknown> {
     iat: now - 10,
     exp,
     principal_source: 'none',
+        network_policy: NETWORK_POLICY,
+        network_policy_digest: NETWORK_POLICY_DIGEST,
   };
 }
 
 function sealGrant(claims: Record<string, unknown>): string {
-  const key = crypto.createHash('sha256').update(GRANT_SECRET, 'utf8').digest();
+    const key = crypto
+        .createHash('sha256')
+        .update(GRANT_SECRET, 'utf8')
+        .digest();
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
   cipher.setAAD(Buffer.from('codeapi-egress-grant:v1', 'utf8'));
@@ -125,7 +178,9 @@ async function verifyGrantDenials(): Promise<void> {
     throw new Error('expired grant reached policy');
 
   const claims = grantClaims('active-exec', now + 300);
-  const createResponse = await fetch(`${GATEWAY_URL}/internal/egress-grants`, {
+    const createResponse = await fetch(
+        `${GATEWAY_URL}/internal/egress-grants`,
+        {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -140,7 +195,8 @@ async function verifyGrantDenials(): Promise<void> {
       },
       claims,
     }),
-  });
+        },
+    );
   if (createResponse.status !== 201)
     throw new Error(`grant create failed: ${await createResponse.text()}`);
   const created: unknown = await createResponse.json();
@@ -200,6 +256,122 @@ async function waitForService(): Promise<void> {
   }
   throw new Error('CodeAPI service did not become ready');
 }
+
+function packageSummaries(payload: unknown): Array<Record<string, unknown>> {
+    if (!payload || typeof payload !== 'object') return [];
+    if ('package_setup' in payload && Array.isArray(payload.package_setup)) {
+        return payload.package_setup as Array<Record<string, unknown>>;
+    }
+    if (!('run' in payload)) return [];
+    const run = payload.run;
+    if (!run || typeof run !== 'object' || !('package_setup' in run)) return [];
+    return Array.isArray(run.package_setup)
+        ? (run.package_setup as Array<Record<string, unknown>>)
+        : [];
+}
+
+function assertPackageSummary(
+    payload: unknown,
+    manager: 'pip' | 'npm' | 'bun',
+    requestedSpec: string,
+): void {
+    const summaries = packageSummaries(payload);
+    const summary = summaries.find(
+        item =>
+            item.manager === manager && item.requestedSpec === requestedSpec,
+    );
+    if (!summary)
+        throw new Error(
+            `missing ${manager} setup summary: ${JSON.stringify(payload)}`,
+        );
+    if (
+        summary.requestedSpec !== requestedSpec ||
+        summary.installedVersion !== '1.0.0'
+    ) {
+        throw new Error(
+            `unexpected ${manager} summary: ${JSON.stringify(summary)}`,
+        );
+    }
+    if (
+        typeof summary.gatewayRequestCount !== 'number' ||
+        summary.gatewayRequestCount < 2 ||
+        typeof summary.gatewayResponseBytes !== 'number' ||
+        summary.gatewayResponseBytes < 1 ||
+        summary.policyDigest !== NETWORK_POLICY_DIGEST ||
+        summary.outcome !== 'success'
+    ) {
+        throw new Error(
+            `incomplete ${manager} summary: ${JSON.stringify(summary)}`,
+        );
+    }
+    const serialized = JSON.stringify(summary);
+    for (const forbidden of [
+        'https://',
+        'Authorization',
+        'Cookie',
+        'stdout',
+        'stderr',
+        'lockfile',
+    ]) {
+        if (serialized.includes(forbidden))
+            throw new Error(`summary leaked ${forbidden}`);
+    }
+}
+
+const pipInstall = `
+import os, subprocess, sys
+subprocess.run([
+    sys.executable, '-m', 'pip', 'install', '--no-deps',
+    '--index-url', 'https://allowed.test/simple',
+    'optale-fixture-py==1.0.0',
+    'optale-fixture-source==1.0.0',
+], check=True)
+check = subprocess.run([
+    sys.executable, '-c',
+    'import optale_fixture_py as p; assert p.__version__ == "1.0.0"; assert p.MARKER == "OPTALE_PY_FIXTURE_OK"; print(p.MARKER)',
+], check=True, capture_output=True, text=True)
+assert 'OPTALE_PY_FIXTURE_OK' in check.stdout
+source_check = subprocess.run([
+    sys.executable, '-c',
+    'import optale_fixture_source as p; assert p.__version__ == "1.0.0"; assert p.MARKER == "OPTALE_PIP_SOURCE_FIXTURE_OK"; print(p.MARKER)',
+], check=True, capture_output=True, text=True)
+assert 'OPTALE_PIP_SOURCE_FIXTURE_OK' in source_check.stdout
+assert open('/mnt/data/pip-source-build-marker.txt').read() == 'OPTALE_PIP_SOURCE_BUILD_OK'
+assert not os.path.exists('/run/codeapi/package-ca-key.pem')
+print('W822_PIP_INSTALL_OK')
+`;
+
+const npmInstall = `
+npm install optale-fixture-npm@1.0.0 --registry=https://allowed.test
+node -e "const p=require('optale-fixture-npm'); if(p.version!=='1.0.0'||p.marker!=='OPTALE_NPM_FIXTURE_OK')process.exit(1)"
+test "$(cat /mnt/data/npm-lifecycle-marker.txt)" = OPTALE_NPM_LIFECYCLE_OK
+printf '%s\n' W822_NPM_INSTALL_OK
+`;
+
+const bunInstall = `
+set -e
+bun add optale-fixture-npm@1.0.0 --registry=https://allowed.test
+cd /mnt/data/.optale-packages/bun
+bun -e "const p=require('optale-fixture-npm'); if(p.version!=='1.0.0'||p.marker!=='OPTALE_NPM_FIXTURE_OK')process.exit(1)"
+printf '%s\n' W822_BUN_INSTALL_OK
+`;
+
+const packageProxyDenies = `
+import socket
+
+def raw(request):
+    client = socket.create_connection(('127.0.0.1', 3129), timeout=2)
+    client.sendall(request)
+    response = b''
+    while True:
+        chunk = client.recv(4096)
+        if not chunk: break
+        response += chunk
+    return response
+assert b'403' in raw(b'CONNECT allowed.test:444 HTTP/1.1\\r\\nHost: allowed.test:444\\r\\n\\r\\n')
+assert b'403' in raw(b'CONNECT allowed.test:443 HTTP/1.1\\r\\nHost: allowed.test:443\\r\\n\\r\\nopaque-connect-bytes')
+print('W822_PACKAGE_PROXY_DENIES_OK')
+`;
 
 const successAndRelay = `
 import json, os, socket
@@ -473,22 +645,96 @@ print("W733_CONFINEMENT_DENIES_OK")
 `;
 
 await waitForService();
-await verifyGrantDenials();
+if (process.env.E2E_MODE !== 'packages') {
+    await verifyGrantDenials();
 
-for (const surface of ['exec', 'exec/programmatic'] as const) {
-  await execute(surface, successAndRelay, 'W733_SUCCESS_RELAY_OK');
-  await execute(surface, httpsPassthrough, 'W799_HTTPS_PASSTHROUGH_OK', 'bash');
-  await execute(surface, urlDenies, 'W733_URL_DENIES_OK');
-  await execute(surface, redirectDenies, 'W733_REDIRECT_DENIES_OK');
-  await execute(surface, oversizeDenies, 'W733_OVERSIZE_DENIES_OK');
-  await execute(surface, responseDenies, 'W733_RESPONSE_DENIES_OK');
-  await execute(surface, authorityDenies, 'W733_AUTHORITY_DENIES_OK');
-  await execute(surface, dnsDenies, 'W733_DNS_DENIES_OK');
-  await execute(surface, fetchBudgetDenies, 'W733_FETCH_BUDGET_OK');
-  await execute(surface, aggregateBudgetDenies, 'W733_AGGREGATE_BUDGET_OK');
-  await execute(surface, timeoutDenies, 'W733_TIMEOUT_DENIES_OK');
-  await execute(surface, confinementDenies, 'W733_CONFINEMENT_DENIES_OK');
+    for (const surface of ['exec', 'exec/programmatic'] as const) {
+        await execute(surface, successAndRelay, 'W733_SUCCESS_RELAY_OK');
+        await execute(
+            surface,
+            httpsPassthrough,
+            'W799_HTTPS_PASSTHROUGH_OK',
+            'bash',
+        );
+        await execute(surface, urlDenies, 'W733_URL_DENIES_OK');
+        await execute(surface, redirectDenies, 'W733_REDIRECT_DENIES_OK');
+        await execute(surface, oversizeDenies, 'W733_OVERSIZE_DENIES_OK');
+        await execute(surface, responseDenies, 'W733_RESPONSE_DENIES_OK');
+        await execute(surface, authorityDenies, 'W733_AUTHORITY_DENIES_OK');
+        await execute(surface, dnsDenies, 'W733_DNS_DENIES_OK');
+        await execute(surface, fetchBudgetDenies, 'W733_FETCH_BUDGET_OK');
+        await execute(
+            surface,
+            aggregateBudgetDenies,
+            'W733_AGGREGATE_BUDGET_OK',
+        );
+        await execute(surface, timeoutDenies, 'W733_TIMEOUT_DENIES_OK');
+        await execute(surface, confinementDenies, 'W733_CONFINEMENT_DENIES_OK');
+    }
 }
+
+const pipResult = await execute('exec', pipInstall, 'W822_PIP_INSTALL_OK');
+assertPackageSummary(pipResult, 'pip', 'optale-fixture-py==1.0.0');
+assertPackageSummary(pipResult, 'pip', 'optale-fixture-source==1.0.0');
+const npmResult = await execute(
+    'exec',
+    npmInstall,
+    'W822_NPM_INSTALL_OK',
+    'bash',
+);
+assertPackageSummary(npmResult, 'npm', 'optale-fixture-npm@1.0.0');
+const bunResult = await execute(
+    'exec',
+    bunInstall,
+    'W822_BUN_INSTALL_OK',
+    'bash',
+);
+assertPackageSummary(bunResult, 'bun', 'optale-fixture-npm@1.0.0');
+await execute('exec', packageProxyDenies, 'W822_PACKAGE_PROXY_DENIES_OK');
+
+const observationsResponse = await fetch(
+    'https://allowed.test/package-observations',
+);
+if (!observationsResponse.ok)
+    throw new Error('package observations unavailable');
+const observations = (await observationsResponse.json()) as Array<{
+    method: string;
+    path: string;
+    credentialHeaders: boolean;
+}>;
+const expectedPackagePaths = new Set([
+    '/simple/optale-fixture-py/',
+    '/simple/optale-fixture-source/',
+    '/packages/optale_fixture_py-1.0.0-py3-none-any.whl',
+    '/packages/optale-fixture-source-1.0.0.tar.gz',
+    '/optale-fixture-npm',
+    '/npm/optale-fixture-npm-1.0.0.tgz',
+]);
+for (const observation of observations) {
+    if (!expectedPackagePaths.has(observation.path)) {
+        throw new Error(
+            `unexpected package request ${JSON.stringify(observation)}`,
+        );
+    }
+    if (
+        (observation.method !== 'GET' && observation.method !== 'HEAD') ||
+        observation.credentialHeaders
+    ) {
+        throw new Error(
+            `unsafe package request ${JSON.stringify(observation)}`,
+        );
+    }
+}
+for (const expected of expectedPackagePaths) {
+    if (!observations.some(observation => observation.path === expected)) {
+        throw new Error(
+            `missing package request ${expected}: ${JSON.stringify(
+                observations,
+            )}`,
+        );
+    }
+}
+console.log('W822_NATIVE_PACKAGE_BOUNDARY_OK');
 
 console.log('W733_DUAL_ROUTE_BOUNDARY_OK');
 console.log('W799_HTTPS_PASSTHROUGH_BOUNDARY_OK');

@@ -8,6 +8,7 @@ import { ExternalFetchError } from './external-fetch-errors';
 import {
   validateExternalFetchUrl,
   validateHttpsPassthroughUrl,
+    validatePackageTransportUrl,
   validateResolvedAddresses,
 } from './external-fetch-policy';
 import type {
@@ -153,7 +154,9 @@ async function requestPinnedHop(
       settled = true;
       clearTimeout(totalTimer);
       result.reject(
-        new ExternalFetchError(timedOut ? 'FETCH_TIMEOUT' : 'FETCH_FAILED'),
+                new ExternalFetchError(
+                    timedOut ? 'FETCH_TIMEOUT' : 'FETCH_FAILED',
+                ),
       );
     }
   };
@@ -216,7 +219,8 @@ export async function openExternalFetch(
     try {
       target = validateExternalFetchUrl(rawUrl, args.policy);
     } catch (error) {
-      if (redirects > 0) throw new ExternalFetchError('REDIRECT_REJECTED');
+            if (redirects > 0)
+                throw new ExternalFetchError('REDIRECT_REJECTED');
       throw error;
     }
     let addresses: ResolvedExternalAddress[];
@@ -232,11 +236,13 @@ export async function openExternalFetch(
         args.resolver,
       );
     } catch (error) {
-      if (redirects > 0) throw new ExternalFetchError('REDIRECT_REJECTED');
+            if (redirects > 0)
+                throw new ExternalFetchError('REDIRECT_REJECTED');
       throw error;
     }
     const deadlineAt = startedAt + target.policy.limits.totalTimeoutMs;
-    if (Date.now() >= deadlineAt) throw new ExternalFetchError('FETCH_TIMEOUT');
+        if (Date.now() >= deadlineAt)
+            throw new ExternalFetchError('FETCH_TIMEOUT');
     const hop = await requestPinnedHop(target, addresses, deadlineAt);
     const status = hop.response.statusCode ?? 0;
     if ([301, 302, 303, 307, 308].includes(status)) {
@@ -328,10 +334,10 @@ function passthroughRequestHeaders(
   for (const [name, value] of Object.entries(input)) {
     const lower = name.toLowerCase();
     if (
-      STATIC_HOP_BY_HOP_HEADERS.has(lower)
-      || connectionTokens.has(lower)
-      || lower.startsWith('x-codeapi-egress-')
-      || lower === 'content-length'
+            STATIC_HOP_BY_HOP_HEADERS.has(lower) ||
+            connectionTokens.has(lower) ||
+            lower.startsWith('x-codeapi-egress-') ||
+            lower === 'content-length'
     ) {
       continue;
     }
@@ -352,18 +358,22 @@ async function requestPinnedPassthrough(
   let settled = false;
   let connectTimer: NodeJS.Timeout | undefined;
   let headersTimer: NodeJS.Timeout | undefined;
-  const deadlineAt = Date.now()
-    + (target.policy.httpsPassthroughTotalTimeoutMs
-      ?? target.policy.limits.totalTimeoutMs);
+    const deadlineAt =
+        Date.now() +
+        (target.policy.httpsPassthroughTotalTimeoutMs ??
+            target.policy.limits.totalTimeoutMs);
   const request = https.request({
     ...buildPinnedRequestOptions(target, addresses),
     method: args.method,
     headers: passthroughRequestHeaders(args.headers, args.body.length),
   });
-  const totalTimer = setTimeout(() => {
+    const totalTimer = setTimeout(
+        () => {
     timedOut = true;
     request.destroy(new Error('HTTPS passthrough total timeout'));
-  }, Math.max(1, deadlineAt - Date.now()));
+        },
+        Math.max(1, deadlineAt - Date.now()),
+    );
   const clearPreResponseTimers = (): void => {
     clearTimeout(connectTimer);
     clearTimeout(headersTimer);
@@ -373,7 +383,11 @@ async function requestPinnedPassthrough(
     if (!settled) {
       settled = true;
       clearTimeout(totalTimer);
-      result.reject(new ExternalFetchError(timedOut ? 'FETCH_TIMEOUT' : 'FETCH_FAILED'));
+            result.reject(
+                new ExternalFetchError(
+                    timedOut ? 'FETCH_TIMEOUT' : 'FETCH_FAILED',
+                ),
+            );
     }
   };
   request.once('socket', socket => {
@@ -416,8 +430,259 @@ export async function openHttpsPassthrough(
   args: OpenHttpsPassthroughArgs,
 ): Promise<OpenHttpsPassthroughResponse> {
   const target = validateHttpsPassthroughUrl(args.url, args.policy);
-  const addresses = await resolveExternalFetchAddresses(target.host, args.resolver);
+    const addresses = await resolveExternalFetchAddresses(
+        target.host,
+        args.resolver,
+    );
   return requestPinnedPassthrough(target, addresses, args);
+}
+
+const PACKAGE_REQUEST_HEADERS: Record<string, true> = {
+    accept: true,
+    'if-modified-since': true,
+    'if-none-match': true,
+    range: true,
+    'user-agent': true,
+};
+
+export function validatePackageTransportMethod(method: string): 'GET' | 'HEAD' {
+    const normalized = method.toUpperCase();
+    if (normalized !== 'GET' && normalized !== 'HEAD') {
+        throw new ExternalFetchError('URL_REJECTED');
+    }
+    return normalized;
+}
+
+export function packageTransportRequestHeaders(
+    input: Record<string, string>,
+): Record<string, string> {
+    const connectionTokens = new Set(
+        (input.connection ?? '')
+            .split(',')
+            .map(value => value.trim().toLowerCase())
+            .filter(Boolean),
+    );
+    const headers: Record<string, string> = {};
+    for (const [name, value] of Object.entries(input)) {
+        const lower = name.toLowerCase();
+        if (
+            PACKAGE_REQUEST_HEADERS[lower] !== true ||
+            STATIC_HOP_BY_HOP_HEADERS.has(lower) ||
+            connectionTokens.has(lower)
+        ) {
+            continue;
+        }
+        headers[lower] = value;
+    }
+    headers['accept-encoding'] = 'identity';
+    headers.connection = 'close';
+    return headers;
+}
+
+export function validatePackageTransportResponseHeaders(
+    headers:
+        | IncomingHttpHeaders
+        | Record<string, string | string[] | undefined>,
+    maxResponseBytes: number,
+): { declaredBytes?: number } {
+    const contentEncoding = singleHeader(headers, 'content-encoding');
+    if (
+        contentEncoding &&
+        contentEncoding.trim().toLowerCase() !== 'identity'
+    ) {
+        throw new ExternalFetchError('CONTENT_TYPE_REJECTED');
+    }
+    const rawLength = singleHeader(headers, 'content-length');
+    if (rawLength === undefined) return {};
+    if (!/^\d+$/.test(rawLength)) throw new ExternalFetchError('FETCH_FAILED');
+    const declaredBytes = Number(rawLength);
+    if (!Number.isSafeInteger(declaredBytes))
+        throw new ExternalFetchError('FETCH_FAILED');
+    if (declaredBytes > maxResponseBytes)
+        throw new ExternalFetchError('RESPONSE_TOO_LARGE');
+    return { declaredBytes };
+}
+
+export interface OpenPackageTransportArgs {
+    url: string;
+    policy: ExternalFetchPolicy;
+    method: string;
+    headers: Record<string, string>;
+    resolver?: ExternalFetchResolver;
+    fetchCount?: number;
+}
+
+export interface OpenPackageTransportResponse {
+    response: IncomingMessage;
+    target: ValidatedExternalFetchUrl;
+    declaredBytes?: number;
+    responseBytes: number;
+    redirects: number;
+    timedOut: () => boolean;
+    close: () => void;
+}
+
+async function requestPinnedPackageHop(
+    target: ValidatedExternalFetchUrl,
+    addresses: ResolvedExternalAddress[],
+    method: 'GET' | 'HEAD',
+    headers: Record<string, string>,
+    deadlineAt: number,
+): Promise<PinnedHop> {
+    const result = Promise.withResolvers<IncomingMessage>();
+    let timedOut = false;
+    let settled = false;
+    let connectTimer: NodeJS.Timeout | undefined;
+    let headersTimer: NodeJS.Timeout | undefined;
+    const request = https.request({
+        ...buildPinnedRequestOptions(target, addresses),
+        method,
+        headers: packageTransportRequestHeaders(headers),
+    });
+    const totalTimer = setTimeout(
+        () => {
+            timedOut = true;
+            request.destroy(new Error('package transport total timeout'));
+        },
+        Math.max(1, deadlineAt - Date.now()),
+    );
+    const clearPreResponseTimers = (): void => {
+        clearTimeout(connectTimer);
+        clearTimeout(headersTimer);
+    };
+    const handleError = (): void => {
+        clearPreResponseTimers();
+        if (settled) return;
+        settled = true;
+        clearTimeout(totalTimer);
+        result.reject(
+            new ExternalFetchError(timedOut ? 'FETCH_TIMEOUT' : 'FETCH_FAILED'),
+        );
+    };
+    request.once('socket', socket => {
+        socket.on('error', handleError);
+        connectTimer = setTimeout(() => {
+            timedOut = true;
+            request.destroy(new Error('package transport connect timeout'));
+        }, target.policy.limits.connectTimeoutMs);
+        socket.once('secureConnect', () => {
+            clearTimeout(connectTimer);
+            headersTimer = setTimeout(() => {
+                timedOut = true;
+                request.destroy(new Error('package transport headers timeout'));
+            }, target.policy.limits.headersTimeoutMs);
+        });
+    });
+    request.once('response', response => {
+        settled = true;
+        clearPreResponseTimers();
+        result.resolve(response);
+    });
+    request.on('error', handleError);
+    request.end();
+    const response = await result.promise;
+    return {
+        response,
+        timedOut: () => timedOut,
+        close: () => {
+            clearPreResponseTimers();
+            clearTimeout(totalTimer);
+            if (!response.complete) response.destroy();
+        },
+    };
+}
+
+export async function openPackageTransport(
+    args: OpenPackageTransportArgs,
+): Promise<OpenPackageTransportResponse> {
+    const startedAt = Date.now();
+    const method = validatePackageTransportMethod(args.method);
+    let rawUrl = args.url;
+    let redirects = 0;
+    for (;;) {
+        let target: ValidatedExternalFetchUrl;
+        try {
+            target = validatePackageTransportUrl(rawUrl, args.policy);
+        } catch (error) {
+            if (redirects > 0)
+                throw new ExternalFetchError('REDIRECT_REJECTED');
+            throw error;
+        }
+        if (
+            args.fetchCount !== undefined &&
+            args.fetchCount > target.policy.limits.maxFetchesPerGrant
+        ) {
+            throw new ExternalFetchError('FETCH_BUDGET_EXCEEDED');
+        }
+        let addresses: ResolvedExternalAddress[];
+        try {
+            addresses = await resolveExternalFetchAddresses(
+                target.host,
+                args.resolver,
+            );
+        } catch (error) {
+            if (redirects > 0)
+                throw new ExternalFetchError('REDIRECT_REJECTED');
+            throw error;
+        }
+        const deadlineAt = startedAt + target.policy.limits.totalTimeoutMs;
+        if (Date.now() >= deadlineAt)
+            throw new ExternalFetchError('FETCH_TIMEOUT');
+        const hop = await requestPinnedPackageHop(
+            target,
+            addresses,
+            method,
+            args.headers,
+            deadlineAt,
+        );
+        const status = hop.response.statusCode ?? 0;
+        if ([301, 302, 303, 307, 308].includes(status)) {
+            let location: string | undefined;
+            try {
+                location = redirectLocation(hop.response);
+            } catch {
+                hop.close();
+                throw new ExternalFetchError('REDIRECT_REJECTED');
+            }
+            if (!location || redirects >= target.policy.limits.maxRedirects) {
+                hop.close();
+                throw new ExternalFetchError('REDIRECT_REJECTED');
+            }
+            let redirected: URL;
+            try {
+                redirected = new URL(location, target.url);
+            } catch {
+                hop.close();
+                throw new ExternalFetchError('REDIRECT_REJECTED');
+            }
+            hop.close();
+            rawUrl = redirected.href;
+            redirects += 1;
+            continue;
+        }
+        if (status < 100 || status > 599) {
+            hop.close();
+            throw new ExternalFetchError('FETCH_FAILED');
+        }
+        try {
+            const validated = validatePackageTransportResponseHeaders(
+                hop.response.headers,
+                target.policy.limits.maxResponseBytes,
+            );
+            return {
+                response: hop.response,
+                target,
+                declaredBytes: validated.declaredBytes,
+                responseBytes: 0,
+                redirects,
+                timedOut: hop.timedOut,
+                close: hop.close,
+            };
+        } catch (error) {
+            hop.close();
+            throw error;
+        }
+    }
 }
 
 export async function pipeHttpsPassthroughBody(
@@ -440,12 +705,15 @@ export async function pipeHttpsPassthroughBody(
       if (destination.destroyed || destination.writableEnded) {
         throw new ExternalFetchError('FETCH_FAILED');
       }
-      if (!destination.write(bytes)) await waitForDrainOrClose(destination);
+            if (!destination.write(bytes))
+                await waitForDrainOrClose(destination);
     }
     return opened.responseBytes;
   } catch (error) {
     if (error instanceof ExternalFetchError) throw error;
-    throw new ExternalFetchError(opened.timedOut() ? 'FETCH_TIMEOUT' : 'FETCH_FAILED');
+        throw new ExternalFetchError(
+            opened.timedOut() ? 'FETCH_TIMEOUT' : 'FETCH_FAILED',
+        );
   } finally {
     opened.close();
   }
@@ -499,7 +767,8 @@ export async function pipeExternalFetchBody(
       if (destination.destroyed || destination.writableEnded) {
         throw new ExternalFetchError('FETCH_FAILED');
       }
-      if (!destination.write(bytes)) await waitForDrainOrClose(destination);
+            if (!destination.write(bytes))
+                await waitForDrainOrClose(destination);
     }
     if (
       opened.declaredBytes !== undefined &&
@@ -521,7 +790,9 @@ export function buildPinnedRequestOptions(
   target: ValidatedExternalFetchUrl,
   addresses: ResolvedExternalAddress[],
 ): RequestOptions {
-  const pinnedAddresses = addresses.toSorted((left, right) => left.family - right.family);
+    const pinnedAddresses = addresses.toSorted(
+        (left, right) => left.family - right.family,
+    );
   const selected = pinnedAddresses[0];
   if (selected === undefined) throw new ExternalFetchError('FETCH_FAILED');
   return {
@@ -550,7 +821,9 @@ export function buildPinnedRequestOptions(
 }
 
 function singleHeader(
-  headers: IncomingHttpHeaders | Record<string, string | string[] | undefined>,
+    headers:
+        | IncomingHttpHeaders
+        | Record<string, string | string[] | undefined>,
   name: string,
 ): string | undefined {
   const value = headers[name];
@@ -559,7 +832,9 @@ function singleHeader(
 }
 
 export function validateExternalFetchResponseHeaders(
-  headers: IncomingHttpHeaders | Record<string, string | string[] | undefined>,
+    headers:
+        | IncomingHttpHeaders
+        | Record<string, string | string[] | undefined>,
   hostPolicy: ExternalFetchHostPolicy,
 ): { contentType: string; declaredBytes?: number } {
   const rawType = singleHeader(headers, 'content-type');
@@ -570,7 +845,10 @@ export function validateExternalFetchResponseHeaders(
   }
 
   const contentEncoding = singleHeader(headers, 'content-encoding');
-  if (contentEncoding && contentEncoding.trim().toLowerCase() !== 'identity') {
+    if (
+        contentEncoding &&
+        contentEncoding.trim().toLowerCase() !== 'identity'
+    ) {
     throw new ExternalFetchError('CONTENT_TYPE_REJECTED');
   }
 

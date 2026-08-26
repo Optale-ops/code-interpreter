@@ -42,7 +42,10 @@ function createRawSocket(socketPath: string): Promise<net.Socket> {
   });
 }
 
-async function startUpstream(): Promise<{ url: string; close: () => Promise<void> }> {
+async function startUpstream(): Promise<{
+    url: string;
+    close: () => Promise<void>;
+}> {
   const server = http.createServer((req, res) => {
     if (req.method !== 'POST' || req.url !== '/tool-call') {
       res.writeHead(404).end();
@@ -52,10 +55,12 @@ async function startUpstream(): Promise<{ url: string; close: () => Promise<void
     req.on('data', chunk => chunks.push(Buffer.from(chunk)));
     req.on('end', () => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
+            res.end(
+                JSON.stringify({
         success: true,
         body: Buffer.concat(chunks).toString('utf8'),
-      }));
+                }),
+            );
     });
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -65,7 +70,8 @@ async function startUpstream(): Promise<{ url: string; close: () => Promise<void
   }
   return {
     url: `http://127.0.0.1:${address.port}`,
-    close: () => new Promise<void>(resolve => server.close(() => resolve())),
+        close: () =>
+            new Promise<void>(resolve => server.close(() => resolve())),
   };
 }
 
@@ -90,8 +96,13 @@ describe('tool-call socket proxy', () => {
     });
     handles.push(proxy);
 
-    const response = await new Promise<{ status: number; body: string; closeHeader: unknown }>((resolve, reject) => {
-      const req = http.request({
+        const response = await new Promise<{
+            status: number;
+            body: string;
+            closeHeader: unknown;
+        }>((resolve, reject) => {
+            const req = http.request(
+                {
         socketPath,
         method: 'POST',
         path: '/tool-call',
@@ -100,22 +111,28 @@ describe('tool-call socket proxy', () => {
           Connection: 'keep-alive',
           ...PTC_HEADERS,
         },
-      }, res => {
+                },
+                res => {
         const chunks: Buffer[] = [];
         res.on('data', chunk => chunks.push(Buffer.from(chunk)));
-        res.on('end', () => resolve({
+                    res.on('end', () =>
+                        resolve({
           status: res.statusCode ?? 0,
           body: Buffer.concat(chunks).toString('utf8'),
           closeHeader: res.headers.connection,
-        }));
-      });
+                        }),
+                    );
+                },
+            );
       req.on('error', reject);
       req.end('{"tool_name":"safe","input":{}}');
     });
 
     expect(response.status).toBe(200);
     expect(response.closeHeader).toBe('close');
-    expect(JSON.parse(response.body).body).toBe('{"tool_name":"safe","input":{}}');
+        expect(JSON.parse(response.body).body).toBe(
+            '{"tool_name":"safe","input":{}}',
+        );
     await upstream.close();
   });
 
@@ -135,7 +152,8 @@ describe('tool-call socket proxy', () => {
     client.on('data', chunk => responseChunks.push(Buffer.from(chunk)));
     client.once('close', closed.resolve);
     const body = '{"tool_name":"safe","input":{}}';
-    client.write([
+        client.write(
+            [
       'POST /tool-call HTTP/1.1',
       'Host: local',
       'Transfer-Encoding: chunked',
@@ -149,7 +167,8 @@ describe('tool-call socket proxy', () => {
       '0',
       '',
       '',
-    ].join('\r\n'));
+            ].join('\r\n'),
+        );
     await closed.promise;
 
     const response = Buffer.concat(responseChunks).toString('utf8');
@@ -214,7 +233,9 @@ describe('tool-call socket proxy', () => {
 
     await wait(50);
 
-    expect(sockets.filter(result => result.status === 'fulfilled').length).toBeGreaterThanOrEqual(2);
+        expect(
+            sockets.filter(result => result.status === 'fulfilled').length,
+        ).toBeGreaterThanOrEqual(2);
     expect(proxy.activeConnections()).toBeLessThanOrEqual(2);
     for (const result of sockets) {
       if (result.status === 'fulfilled') result.value.destroy();
@@ -236,9 +257,12 @@ describe('tool-call socket proxy', () => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true }));
     });
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+        await new Promise<void>(resolve =>
+            server.listen(0, '127.0.0.1', resolve),
+        );
     const address = server.address();
-    if (address == null || typeof address === 'string') throw new Error('bad address');
+        if (address == null || typeof address === 'string')
+            throw new Error('bad address');
 
     const socketPath = makeSocketPath();
     const proxy = await startToolCallSocketProxy({
@@ -251,10 +275,18 @@ describe('tool-call socket proxy', () => {
     handles.push(proxy);
 
     const first = new Promise<number>((resolve, reject) => {
-      const req = http.request({ socketPath, method: 'POST', path: '/tool-call', headers: PTC_HEADERS }, res => {
+            const req = http.request(
+                {
+                    socketPath,
+                    method: 'POST',
+                    path: '/tool-call',
+                    headers: PTC_HEADERS,
+                },
+                res => {
         res.on('end', () => resolve(res.statusCode ?? 0));
         res.resume();
-      });
+                },
+            );
       req.on('error', reject);
       req.end('{"tool_name":"slow","input":{}}');
     });
@@ -263,16 +295,30 @@ describe('tool-call socket proxy', () => {
       await wait(5);
     }
 
-    const second = await new Promise<{ status: number; body: string; retryAfter: unknown }>((resolve, reject) => {
-      const req = http.request({ socketPath, method: 'POST', path: '/tool-call', headers: PTC_HEADERS }, res => {
+        const second = await new Promise<{
+            status: number;
+            body: string;
+            retryAfter: unknown;
+        }>((resolve, reject) => {
+            const req = http.request(
+                {
+                    socketPath,
+                    method: 'POST',
+                    path: '/tool-call',
+                    headers: PTC_HEADERS,
+                },
+                res => {
         const chunks: Buffer[] = [];
         res.on('data', chunk => chunks.push(Buffer.from(chunk)));
-        res.on('end', () => resolve({
+                    res.on('end', () =>
+                        resolve({
           status: res.statusCode ?? 0,
           body: Buffer.concat(chunks).toString('utf8'),
           retryAfter: res.headers['retry-after'],
-        }));
-      });
+                        }),
+                    );
+                },
+            );
       req.on('error', reject);
       req.end('{"tool_name":"second","input":{}}');
     });
@@ -304,9 +350,12 @@ describe('tool-call socket proxy', () => {
       // active request/upstream budgets.
       void res;
     });
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+        await new Promise<void>(resolve =>
+            server.listen(0, '127.0.0.1', resolve),
+        );
     const address = server.address();
-    if (address == null || typeof address === 'string') throw new Error('bad address');
+        if (address == null || typeof address === 'string')
+            throw new Error('bad address');
 
     const socketPath = makeSocketPath();
     const proxy = await startToolCallSocketProxy({
@@ -320,7 +369,8 @@ describe('tool-call socket proxy', () => {
 
     const client = await createRawSocket(socketPath);
     const body = '{"tool_name":"slow","input":{}}';
-    client.end([
+        client.end(
+            [
       'POST /tool-call HTTP/1.1',
       'Host: localhost',
       'Content-Type: application/json',
@@ -331,7 +381,8 @@ describe('tool-call socket proxy', () => {
       'X-Callback-Token: t',
       '',
       body,
-    ].join('\r\n'));
+            ].join('\r\n'),
+        );
 
     await upstreamSeen;
     expect(upstreamCalls).toBe(1);
@@ -355,9 +406,12 @@ describe('tool-call socket proxy', () => {
       upstreamCalls += 1;
       res.writeHead(200).end('unexpected');
     });
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+        await new Promise<void>(resolve =>
+            server.listen(0, '127.0.0.1', resolve),
+        );
     const address = server.address();
-    if (address == null || typeof address === 'string') throw new Error('bad address');
+        if (address == null || typeof address === 'string')
+            throw new Error('bad address');
 
     const socketPath = makeSocketPath();
     const proxy = await startToolCallSocketProxy({
@@ -368,15 +422,30 @@ describe('tool-call socket proxy', () => {
     });
     handles.push(proxy);
 
-    const response = await new Promise<{ status: number; body: string }>((resolve, reject) => {
-      const req = http.request({ socketPath, method: 'POST', path: '/tool-call', headers: PTC_HEADERS }, res => {
+        const response = await new Promise<{
+            status: number;
+            body: string;
+            trailers: http.IncomingHttpHeaders;
+        }>((resolve, reject) => {
+            const req = http.request(
+                {
+                    socketPath,
+                    method: 'POST',
+                    path: '/tool-call',
+                    headers: PTC_HEADERS,
+                },
+                res => {
         const chunks: Buffer[] = [];
         res.on('data', chunk => chunks.push(Buffer.from(chunk)));
-        res.on('end', () => resolve({
+                    res.on('end', () =>
+                        resolve({
           status: res.statusCode ?? 0,
           body: Buffer.concat(chunks).toString('utf8'),
-        }));
-      });
+                            trailers: res.trailers,
+                        }),
+                    );
+                },
+            );
       req.on('error', reject);
       req.end('too large');
     });
@@ -388,12 +457,18 @@ describe('tool-call socket proxy', () => {
   });
 
   test('forwards only the fixed external-fetch envelope and safe response metadata', async () => {
-    const upstreamRequests: Array<{ headers: http.IncomingHttpHeaders; body: string }> = [];
+        const upstreamRequests: Array<{
+            headers: http.IncomingHttpHeaders;
+            body: string;
+        }> = [];
     const server = http.createServer((req, res) => {
       const chunks: Buffer[] = [];
       req.on('data', chunk => chunks.push(Buffer.from(chunk)));
       req.on('end', () => {
-        upstreamRequests.push({ headers: req.headers, body: Buffer.concat(chunks).toString('utf8') });
+                upstreamRequests.push({
+                    headers: req.headers,
+                    body: Buffer.concat(chunks).toString('utf8'),
+                });
         res.writeHead(200, {
           'Content-Type': 'application/pdf',
           'X-Request-ID': 'request-123',
@@ -409,7 +484,8 @@ describe('tool-call socket proxy', () => {
     server.listen(0, '127.0.0.1', listening.resolve);
     await listening.promise;
     const address = server.address();
-    if (address == null || typeof address === 'string') throw new Error('bad address');
+        if (address == null || typeof address === 'string')
+            throw new Error('bad address');
     const socketPath = makeSocketPath();
     const proxy = await startToolCallSocketProxy({
       socketPath,
@@ -425,27 +501,36 @@ describe('tool-call socket proxy', () => {
         headers: http.IncomingHttpHeaders;
         trailers: http.IncomingHttpHeaders;
       }>();
-      const outgoing = http.request({
+            const outgoing = http.request(
+                {
         socketPath,
         method: 'POST',
         path: '/external-fetch',
         headers,
-      }, response => {
+                },
+                response => {
         const chunks: Buffer[] = [];
-        response.on('data', chunk => chunks.push(Buffer.from(chunk)));
-        response.on('end', () => result.resolve({
+                    response.on('data', chunk =>
+                        chunks.push(Buffer.from(chunk)),
+                    );
+                    response.on('end', () =>
+                        result.resolve({
           status: response.statusCode ?? 0,
           body: Buffer.concat(chunks).toString('utf8'),
           headers: response.headers,
           trailers: response.trailers,
-        }));
-      });
+                        }),
+                    );
+                },
+            );
       outgoing.on('error', result.reject);
       outgoing.end(body);
       return result.promise;
     };
 
-    const body = JSON.stringify({ url: 'https://allowed.test/file.pdf?secret=marker' });
+        const body = JSON.stringify({
+            url: 'https://allowed.test/file.pdf?secret=marker',
+        });
     const response = await request(body, {
       'Content-Type': 'application/json',
       'Content-Length': String(Buffer.byteLength(body)),
@@ -469,7 +554,9 @@ describe('tool-call socket proxy', () => {
     expect(upstreamRequests[0]?.headers.cookie).toBeUndefined();
     expect(upstreamRequests[0]?.headers.range).toBeUndefined();
     expect(upstreamRequests[0]?.headers['x-caller-header']).toBeUndefined();
-    expect(upstreamRequests[0]?.headers['x-codeapi-egress-grant']).toBe('opaque-grant');
+        expect(upstreamRequests[0]?.headers['x-codeapi-egress-grant']).toBe(
+            'opaque-grant',
+        );
 
     const missingGrant = await request(body, {
       'Content-Type': 'application/json',
@@ -479,7 +566,10 @@ describe('tool-call socket proxy', () => {
     expect(missingGrant.body).toBe('not found');
     expect(upstreamRequests).toHaveLength(1);
 
-    const unknownFieldBody = JSON.stringify({ url: 'https://allowed.test/file.pdf', method: 'POST' });
+        const unknownFieldBody = JSON.stringify({
+            url: 'https://allowed.test/file.pdf',
+            method: 'POST',
+        });
     const unknownField = await request(unknownFieldBody, {
       'Content-Type': 'application/json',
       'Content-Length': String(Buffer.byteLength(unknownFieldBody)),
@@ -496,7 +586,9 @@ describe('tool-call socket proxy', () => {
     expect(nullEnvelope.status).toBe(400);
     expect(upstreamRequests).toHaveLength(1);
 
-    const oversizedBody = JSON.stringify({ url: `https://allowed.test/${'a'.repeat(16_384)}` });
+        const oversizedBody = JSON.stringify({
+            url: `https://allowed.test/${'a'.repeat(16_384)}`,
+        });
     const oversized = await request(oversizedBody, {
       'Content-Type': 'application/json',
       'Content-Length': String(Buffer.byteLength(oversizedBody)),
@@ -511,21 +603,35 @@ describe('tool-call socket proxy', () => {
   });
 
   test('forwards the bounded HTTPS passthrough envelope without exposing outer caller headers', async () => {
-    const upstreamRequests: Array<{ path: string; headers: http.IncomingHttpHeaders; body: string }> = [];
+        const upstreamRequests: Array<{
+            path: string;
+            headers: http.IncomingHttpHeaders;
+            body: string;
+        }> = [];
     const server = net.createServer(socket => {
       let rawRequest = Buffer.alloc(0);
       socket.on('data', chunk => {
         rawRequest = Buffer.concat([rawRequest, Buffer.from(chunk)]);
         const headerEnd = rawRequest.indexOf('\r\n\r\n');
         if (headerEnd < 0) return;
-        const headerText = rawRequest.subarray(0, headerEnd).toString('utf8');
-        const declared = Number(headerText.match(/\r\ncontent-length: (\d+)/i)?.[1] ?? 0);
+                const headerText = rawRequest
+                    .subarray(0, headerEnd)
+                    .toString('utf8');
+                const declared = Number(
+                    headerText.match(/\r\ncontent-length: (\d+)/i)?.[1] ?? 0,
+                );
         const body = rawRequest.subarray(headerEnd + 4);
         if (body.length < declared) return;
         const requestLine = headerText.split('\r\n')[0] ?? '';
-        const headerEntries = headerText.split('\r\n').slice(1).map(line => {
+                const headerEntries = headerText
+                    .split('\r\n')
+                    .slice(1)
+                    .map(line => {
           const colon = line.indexOf(':');
-          return [line.slice(0, colon).toLowerCase(), line.slice(colon + 1).trim()];
+                        return [
+                            line.slice(0, colon).toLowerCase(),
+                            line.slice(colon + 1).trim(),
+                        ];
         });
         upstreamRequests.push({
           path: requestLine.split(' ')[1] ?? '',
@@ -533,7 +639,8 @@ describe('tool-call socket proxy', () => {
           body: body.subarray(0, declared).toString('utf8'),
         });
         const responseBody = '{"accepted":true}';
-        socket.end([
+                socket.end(
+                    [
           'HTTP/1.1 201 Created',
           'Content-Type: application/json',
           'Content-Length: ' + responseBody.length,
@@ -541,12 +648,16 @@ describe('tool-call socket proxy', () => {
           'Connection: close',
           '',
           responseBody,
-        ].join('\r\n'));
+                    ].join('\r\n'),
+                );
       });
     });
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+        await new Promise<void>(resolve =>
+            server.listen(0, '127.0.0.1', resolve),
+        );
     const address = server.address();
-    if (address == null || typeof address === 'string') throw new Error('bad address');
+        if (address == null || typeof address === 'string')
+            throw new Error('bad address');
     const socketPath = makeSocketPath();
     const proxy = await startToolCallSocketProxy({
       socketPath,
@@ -566,7 +677,8 @@ describe('tool-call socket proxy', () => {
       trailers: http.IncomingHttpHeaders;
       body: string;
     }>((resolve, reject) => {
-      const request = http.request({
+            const request = http.request(
+                {
         socketPath,
         method: 'POST',
         path: '/https-passthrough',
@@ -576,16 +688,22 @@ describe('tool-call socket proxy', () => {
           'X-CodeAPI-Egress-Grant': 'opaque-grant',
           Authorization: 'must-not-cross-outer-relay',
         },
-      }, response => {
+                },
+                response => {
         const chunks: Buffer[] = [];
-        response.on('data', chunk => chunks.push(Buffer.from(chunk)));
-        response.on('end', () => resolve({
+                    response.on('data', chunk =>
+                        chunks.push(Buffer.from(chunk)),
+                    );
+                    response.on('end', () =>
+                        resolve({
           status: response.statusCode ?? 0,
           headers: response.headers,
           trailers: response.trailers,
           body: Buffer.concat(chunks).toString('utf8'),
-        }));
-      });
+                        }),
+                    );
+                },
+            );
       request.on('error', reject);
       request.end(body);
     });
@@ -598,7 +716,9 @@ describe('tool-call socket proxy', () => {
     expect(upstreamRequests).toHaveLength(1);
     expect(upstreamRequests[0]?.path).toBe('/https-passthrough');
     expect(upstreamRequests[0]?.body).toBe(body);
-    expect(upstreamRequests[0]?.headers['x-codeapi-egress-grant']).toBe('opaque-grant');
+        expect(upstreamRequests[0]?.headers['x-codeapi-egress-grant']).toBe(
+            'opaque-grant',
+        );
     expect(upstreamRequests[0]?.headers.authorization).toBeUndefined();
 
     await new Promise<void>(resolve => server.close(() => resolve()));
@@ -621,7 +741,11 @@ describe('createTokenBucket', () => {
   });
 
   test('returns true until the bucket is drained, then false', () => {
-    const b = createTokenBucket({ burst: 3, refillPerSec: 0, now: () => 0 });
+        const b = createTokenBucket({
+            burst: 3,
+            refillPerSec: 0,
+            now: () => 0,
+        });
     expect(b.tryConsume()).toBe(true);
     expect(b.tryConsume()).toBe(true);
     expect(b.tryConsume()).toBe(true);
@@ -631,7 +755,11 @@ describe('createTokenBucket', () => {
 
   test('refills at refillPerSec without exceeding the burst cap', () => {
     let t = 1000;
-    const b = createTokenBucket({ burst: 10, refillPerSec: 100, now: () => t });
+        const b = createTokenBucket({
+            burst: 10,
+            refillPerSec: 100,
+            now: () => t,
+        });
     /* Drain. */
     for (let i = 0; i < 10; i++) expect(b.tryConsume()).toBe(true);
     expect(b.tryConsume()).toBe(false);
@@ -646,7 +774,11 @@ describe('createTokenBucket', () => {
   });
 
   test('refillPerSec=0 freezes the bucket once drained (test-determinism guarantee)', () => {
-    const b = createTokenBucket({ burst: 2, refillPerSec: 0, now: () => 0 });
+        const b = createTokenBucket({
+            burst: 2,
+            refillPerSec: 0,
+            now: () => 0,
+        });
     expect(b.tryConsume()).toBe(true);
     expect(b.tryConsume()).toBe(true);
     /* No matter how much time we'd advance with a real clock, refill of
@@ -701,4 +833,83 @@ describe('connection-rate defaults scale with SANDBOX_MAX_CONCURRENT_JOBS', () =
     /* 256 * 2 = 512, capped at 200 ceiling. */
     expect(defaultConnectionRateRefillPerSec()).toBe(200);
   });
+
+    test('forwards only the bounded package transport envelope through the existing relay', async () => {
+        let observedPath = '';
+        let observedGrant = '';
+        let observedBody = '';
+        const upstream = http.createServer((req, res) => {
+            observedPath = req.url ?? '';
+            observedGrant = String(req.headers['x-codeapi-egress-grant'] ?? '');
+            const chunks: Buffer[] = [];
+            req.on('data', chunk => chunks.push(Buffer.from(chunk)));
+            req.on('end', () => {
+                observedBody = Buffer.concat(chunks).toString('utf8');
+                res.writeHead(200, {
+                    'Content-Type': 'application/octet-stream',
+                    'X-CodeAPI-Egress-Requests': '7',
+                    'X-CodeAPI-Egress-Bytes': '2048',
+                });
+                res.end('package-bytes');
+            });
+        });
+        await new Promise<void>(resolve =>
+            upstream.listen(0, '127.0.0.1', resolve),
+        );
+        const address = upstream.address();
+        if (address == null || typeof address === 'string')
+            throw new Error('bad address');
+
+        const socketPath = makeSocketPath();
+        const proxy = await startToolCallSocketProxy({
+            socketPath,
+            rawTarget: `http://127.0.0.1:${address.port}`,
+            log: { log() {}, warn() {}, error() {} },
+        });
+        handles.push(proxy);
+        const envelope = JSON.stringify({
+            url: 'https://registry.npmjs.org/pkg',
+            method: 'GET',
+            headers: { accept: 'application/json' },
+        });
+        const response = await new Promise<{ status: number; body: string }>(
+            (resolve, reject) => {
+                const req = http.request(
+                    {
+                        socketPath,
+                        method: 'POST',
+                        path: '/package-transport',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Content-Length': String(
+                                Buffer.byteLength(envelope),
+                            ),
+                            'X-CodeAPI-Egress-Grant': 'opaque-grant',
+                        },
+                    },
+                    res => {
+                        const chunks: Buffer[] = [];
+                        res.on('data', chunk =>
+                            chunks.push(Buffer.from(chunk)),
+                        );
+                        res.on('end', () =>
+                            resolve({
+                                status: res.statusCode ?? 0,
+                                body: Buffer.concat(chunks).toString('utf8'),
+                            }),
+                        );
+                    },
+                );
+                req.on('error', reject);
+                req.end(envelope);
+            },
+        );
+
+        expect(response.status).toBe(200);
+        expect(response.body).toBe('package-bytes');
+        expect(observedPath).toBe('/package-transport');
+        expect(observedGrant).toBe('opaque-grant');
+        expect(JSON.parse(observedBody)).toEqual(JSON.parse(envelope));
+        await new Promise<void>(resolve => upstream.close(() => resolve()));
+    });
 });

@@ -1,4 +1,9 @@
 import crypto from 'crypto';
+import {
+    externalFetchPolicyDigest,
+    parseExternalFetchPolicy,
+    type ExternalFetchPolicySnapshot,
+} from './external-fetch-policy';
 
 export const EXECUTION_MANIFEST_HEADER = 'X-CodeAPI-Execution-Manifest';
 export const EXECUTION_MANIFEST_VERSION = 1;
@@ -78,6 +83,8 @@ export interface ExecutionManifestClaims {
   service_id?: string;
   principal_source?: string;
   auth_context_hash?: string;
+    network_policy?: ExternalFetchPolicySnapshot;
+    network_policy_digest?: string;
 }
 
 function base64UrlEncode(input: Buffer | string): string {
@@ -86,13 +93,19 @@ function base64UrlEncode(input: Buffer | string): string {
 
 function base64UrlDecode(input: string): Buffer {
   if (!BASE64URL_PATTERN.test(input) || input.length % 4 === 1) {
-    throw new ExecutionManifestError('malformed', 'Execution manifest is not valid base64url');
+        throw new ExecutionManifestError(
+            'malformed',
+            'Execution manifest is not valid base64url',
+        );
   }
 
   try {
     return Buffer.from(input, 'base64url');
   } catch {
-    throw new ExecutionManifestError('malformed', 'Execution manifest is not valid base64url');
+        throw new ExecutionManifestError(
+            'malformed',
+            'Execution manifest is not valid base64url',
+        );
   }
 }
 
@@ -102,7 +115,10 @@ function canonicalJson(value: unknown): string {
   if (typeof value === 'boolean') return value ? 'true' : 'false';
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) {
-      throw new ExecutionManifestError('malformed', 'Execution manifest contains a non-finite number');
+            throw new ExecutionManifestError(
+                'malformed',
+                'Execution manifest contains a non-finite number',
+            );
     }
     return JSON.stringify(value);
   }
@@ -118,18 +134,28 @@ function canonicalJson(value: unknown): string {
     return `{${entries.join(',')}}`;
   }
 
-  throw new ExecutionManifestError('malformed', 'Execution manifest contains an unsupported value');
+    throw new ExecutionManifestError(
+        'malformed',
+        'Execution manifest contains an unsupported value',
+    );
 }
 
 function bodyForManifestDigest(body: unknown): unknown {
-  if (body == null || typeof body !== 'object' || Array.isArray(body)) return body;
-  const { execution_manifest: _executionManifest, ...rest } = body as Record<string, unknown>;
+    if (body == null || typeof body !== 'object' || Array.isArray(body))
+        return body;
+    const { execution_manifest: _executionManifest, ...rest } = body as Record<
+        string,
+        unknown
+    >;
   return rest;
 }
 
 export function executionManifestBodySha256(body: unknown): string {
   const canonicalBody = canonicalJson(bodyForManifestDigest(body));
-  return crypto.createHash('sha256').update(canonicalBody, 'utf8').digest('base64url');
+    return crypto
+        .createHash('sha256')
+        .update(canonicalBody, 'utf8')
+        .digest('base64url');
 }
 
 function hmacSha256(data: string, secret: string): Buffer {
@@ -161,17 +187,35 @@ function publicKeyFromEnv(key: string): crypto.KeyObject | string {
 }
 
 function ed25519Sign(data: string, privateKey: string): Buffer {
-  return crypto.sign(null, Buffer.from(data, 'utf8'), privateKeyFromEnv(privateKey));
+    return crypto.sign(
+        null,
+        Buffer.from(data, 'utf8'),
+        privateKeyFromEnv(privateKey),
+    );
 }
 
-function ed25519Verify(data: string, publicKey: string, signature: Buffer): boolean {
-  return crypto.verify(null, Buffer.from(data, 'utf8'), publicKeyFromEnv(publicKey), signature);
+function ed25519Verify(
+    data: string,
+    publicKey: string,
+    signature: Buffer,
+): boolean {
+    return crypto.verify(
+        null,
+        Buffer.from(data, 'utf8'),
+        publicKeyFromEnv(publicKey),
+        signature,
+    );
 }
 
-function validateClaimsShape(value: unknown): asserts value is ExecutionManifestClaims {
+function validateClaimsShape(
+    value: unknown,
+): asserts value is ExecutionManifestClaims {
   const claims = value as Partial<ExecutionManifestClaims> | null;
   if (claims == null || typeof claims !== 'object') {
-    throw new ExecutionManifestError('malformed', 'Execution manifest claims must be an object');
+        throw new ExecutionManifestError(
+            'malformed',
+            'Execution manifest claims must be an object',
+        );
   }
 
   const stringFields: Array<keyof ExecutionManifestClaims> = [
@@ -183,7 +227,10 @@ function validateClaimsShape(value: unknown): asserts value is ExecutionManifest
   ];
   for (const field of stringFields) {
     if (typeof claims[field] !== 'string' || claims[field] === '') {
-      throw new ExecutionManifestError('malformed', `Execution manifest ${field} is invalid`);
+            throw new ExecutionManifestError(
+                'malformed',
+                `Execution manifest ${field} is invalid`,
+            );
     }
   }
 
@@ -195,28 +242,91 @@ function validateClaimsShape(value: unknown): asserts value is ExecutionManifest
     'exp',
   ];
   for (const field of numberFields) {
-    if (typeof claims[field] !== 'number' || !Number.isFinite(claims[field])) {
-      throw new ExecutionManifestError('malformed', `Execution manifest ${field} is invalid`);
+        if (
+            typeof claims[field] !== 'number' ||
+            !Number.isFinite(claims[field])
+        ) {
+            throw new ExecutionManifestError(
+                'malformed',
+                `Execution manifest ${field} is invalid`,
+            );
     }
   }
 
   if (claims.v !== EXECUTION_MANIFEST_VERSION) {
-    throw new ExecutionManifestError('malformed', 'Execution manifest version is unsupported');
+        throw new ExecutionManifestError(
+            'malformed',
+            'Execution manifest version is unsupported',
+        );
   }
   if (!Array.isArray(claims.input_files)) {
-    throw new ExecutionManifestError('malformed', 'Execution manifest input_files must be an array');
+        throw new ExecutionManifestError(
+            'malformed',
+            'Execution manifest input_files must be an array',
+        );
   }
-  if (!Array.isArray(claims.read_sessions) || claims.read_sessions.some(session => typeof session !== 'string' || session === '')) {
-    throw new ExecutionManifestError('malformed', 'Execution manifest read_sessions is invalid');
+    if (
+        !Array.isArray(claims.read_sessions) ||
+        claims.read_sessions.some(
+            session => typeof session !== 'string' || session === '',
+        )
+    ) {
+        throw new ExecutionManifestError(
+            'malformed',
+            'Execution manifest read_sessions is invalid',
+        );
   }
   if (
     claims.execute_body_sha256 !== undefined &&
-    (typeof claims.execute_body_sha256 !== 'string' || claims.execute_body_sha256 === '')
+        (typeof claims.execute_body_sha256 !== 'string' ||
+            claims.execute_body_sha256 === '')
   ) {
-    throw new ExecutionManifestError('malformed', 'Execution manifest execute_body_sha256 is invalid');
+        throw new ExecutionManifestError(
+            'malformed',
+            'Execution manifest execute_body_sha256 is invalid',
+        );
+    }
+    if (
+        claims.tool_call_socket !== undefined &&
+        typeof claims.tool_call_socket !== 'boolean'
+    ) {
+        throw new ExecutionManifestError(
+            'malformed',
+            'Execution manifest tool_call_socket is invalid',
+        );
+    }
+    const hasNetworkPolicy = claims.network_policy !== undefined;
+    const hasNetworkPolicyDigest = claims.network_policy_digest !== undefined;
+    if (hasNetworkPolicy !== hasNetworkPolicyDigest) {
+        throw new ExecutionManifestError(
+            'malformed',
+            'Execution manifest network policy binding is incomplete',
+        );
+    }
+    if (hasNetworkPolicy && hasNetworkPolicyDigest) {
+        if (
+            typeof claims.network_policy_digest !== 'string' ||
+            !/^[A-Za-z0-9_-]{43}$/.test(claims.network_policy_digest)
+        ) {
+            throw new ExecutionManifestError(
+                'malformed',
+                'Execution manifest network policy digest is invalid',
+            );
+        }
+        try {
+            const policy = parseExternalFetchPolicy(claims.network_policy);
+            if (
+                externalFetchPolicyDigest(policy) !==
+                claims.network_policy_digest
+            ) {
+                throw new Error('digest mismatch');
+            }
+        } catch {
+            throw new ExecutionManifestError(
+                'malformed',
+                'Execution manifest network policy binding is invalid',
+            );
   }
-  if (claims.tool_call_socket !== undefined && typeof claims.tool_call_socket !== 'boolean') {
-    throw new ExecutionManifestError('malformed', 'Execution manifest tool_call_socket is invalid');
   }
   for (const file of claims.input_files) {
     if (
@@ -229,7 +339,10 @@ function validateClaimsShape(value: unknown): asserts value is ExecutionManifest
       file.session_id === '' ||
       file.name === ''
     ) {
-      throw new ExecutionManifestError('malformed', 'Execution manifest input_files contains an invalid file');
+            throw new ExecutionManifestError(
+                'malformed',
+                'Execution manifest input_files contains an invalid file',
+            );
     }
   }
 }
@@ -250,7 +363,10 @@ function decodeSignedManifest(token: string): {
 } {
   const [payloadPart, signaturePart, extraPart] = token.split('.');
   if (!payloadPart || !signaturePart || extraPart !== undefined) {
-    throw new ExecutionManifestError('malformed', 'Execution manifest token is malformed');
+        throw new ExecutionManifestError(
+            'malformed',
+            'Execution manifest token is malformed',
+        );
   }
 
   const payload = base64UrlDecode(payloadPart).toString('utf8');
@@ -258,13 +374,19 @@ function decodeSignedManifest(token: string): {
   try {
     parsed = JSON.parse(payload);
   } catch {
-    throw new ExecutionManifestError('malformed', 'Execution manifest payload is not valid JSON');
+        throw new ExecutionManifestError(
+            'malformed',
+            'Execution manifest payload is not valid JSON',
+        );
   }
 
   validateClaimsShape(parsed);
   const canonicalPayload = canonicalJson(parsed);
   if (payload !== canonicalPayload) {
-    throw new ExecutionManifestError('malformed', 'Execution manifest payload is not canonical');
+        throw new ExecutionManifestError(
+            'malformed',
+            'Execution manifest payload is not canonical',
+        );
   }
 
   return {
@@ -281,25 +403,43 @@ function assertManifestTimeWindow(
   const now = options.nowSeconds ?? Math.floor(Date.now() / 1000);
   const tolerance = options.clockToleranceSeconds ?? 30;
   if (claims.exp <= now - tolerance) {
-    throw new ExecutionManifestError('expired', 'Execution manifest is expired');
+        throw new ExecutionManifestError(
+            'expired',
+            'Execution manifest is expired',
+        );
   }
   if (claims.iat > now + tolerance) {
-    throw new ExecutionManifestError('not_yet_valid', 'Execution manifest is not valid yet');
+        throw new ExecutionManifestError(
+            'not_yet_valid',
+            'Execution manifest is not valid yet',
+        );
   }
 }
 
-export function signExecutionManifest(claims: ExecutionManifestClaims, secret: string): string {
+export function signExecutionManifest(
+    claims: ExecutionManifestClaims,
+    secret: string,
+): string {
   if (!secret) {
-    throw new ExecutionManifestError('missing_secret', 'Execution manifest secret is not configured');
+        throw new ExecutionManifestError(
+            'missing_secret',
+            'Execution manifest secret is not configured',
+        );
   }
 
   const payload = payloadForClaims(claims);
   return encodeSignedManifest(payload, hmacSha256(payload, secret));
 }
 
-export function signExecutionManifestWithPrivateKey(claims: ExecutionManifestClaims, privateKey: string): string {
+export function signExecutionManifestWithPrivateKey(
+    claims: ExecutionManifestClaims,
+    privateKey: string,
+): string {
   if (!privateKey) {
-    throw new ExecutionManifestError('missing_secret', 'Execution manifest private key is not configured');
+        throw new ExecutionManifestError(
+            'missing_secret',
+            'Execution manifest private key is not configured',
+        );
   }
 
   const payload = payloadForClaims(claims);
@@ -322,13 +462,22 @@ export function verifyExecutionManifest(
   options: ExecutionManifestVerifyOptions = {},
 ): ExecutionManifestClaims {
   if (!secret) {
-    throw new ExecutionManifestError('missing_secret', 'Execution manifest secret is not configured');
+        throw new ExecutionManifestError(
+            'missing_secret',
+            'Execution manifest secret is not configured',
+        );
   }
 
   const manifest = decodeSignedManifest(token);
   const expected = hmacSha256(manifest.payload, secret);
-  if (manifest.signature.length !== expected.length || !crypto.timingSafeEqual(manifest.signature, expected)) {
-    throw new ExecutionManifestError('invalid_signature', 'Execution manifest signature is invalid');
+    if (
+        manifest.signature.length !== expected.length ||
+        !crypto.timingSafeEqual(manifest.signature, expected)
+    ) {
+        throw new ExecutionManifestError(
+            'invalid_signature',
+            'Execution manifest signature is invalid',
+        );
   }
   assertManifestTimeWindow(manifest.claims, options);
   return manifest.claims;
@@ -340,12 +489,18 @@ export function verifyExecutionManifestWithPublicKey(
   options: ExecutionManifestVerifyOptions = {},
 ): ExecutionManifestClaims {
   if (!publicKey) {
-    throw new ExecutionManifestError('missing_secret', 'Execution manifest public key is not configured');
+        throw new ExecutionManifestError(
+            'missing_secret',
+            'Execution manifest public key is not configured',
+        );
   }
 
   const manifest = decodeSignedManifest(token);
   if (!ed25519Verify(manifest.payload, publicKey, manifest.signature)) {
-    throw new ExecutionManifestError('invalid_signature', 'Execution manifest signature is invalid');
+        throw new ExecutionManifestError(
+            'invalid_signature',
+            'Execution manifest signature is invalid',
+        );
   }
   assertManifestTimeWindow(manifest.claims, options);
   return manifest.claims;
@@ -358,7 +513,11 @@ export function verifyExecutionManifestWithKey(
 ): ExecutionManifestClaims {
   if (verifier.publicKey) {
     try {
-      return verifyExecutionManifestWithPublicKey(token, verifier.publicKey, options);
+            return verifyExecutionManifestWithPublicKey(
+                token,
+                verifier.publicKey,
+                options,
+            );
     } catch (error) {
       if (
         error instanceof ExecutionManifestError &&

@@ -1,3 +1,4 @@
+ARG SOURCE_REVISION=unknown
 # ============================================================================
 # MicroVM Sandbox Launcher
 #
@@ -114,6 +115,8 @@ RUN cargo build --release
 # Stage 3: Final launcher image (Fedora-based for libkrun ABI compatibility)
 # ============================================================================
 FROM fedora:43
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION
 
 RUN dnf install -y --setopt=install_weak_deps=False \
     libkrun \

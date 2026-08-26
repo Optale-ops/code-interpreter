@@ -43,6 +43,7 @@ describe('external fetch policy parser', () => {
     expect(policy.hosts.get(FROZEN_HOST)).toEqual({
       contentTypes: new Set(['application/pdf']),
       httpsPassthrough: false,
+            packageTransport: false,
       limits: HARD_EXTERNAL_FETCH_LIMITS,
     });
   });
@@ -62,19 +63,28 @@ describe('external fetch policy parser', () => {
       contentTypes: new Set(),
       httpsPassthrough: true,
       httpsPassthroughTotalTimeoutMs: 300_000,
+            packageTransport: false,
       limits: HARD_EXTERNAL_FETCH_LIMITS,
     });
     expectCode(
-      () => validateExternalFetchUrl(`https://${consoleHost}/api/optale/mcp`, policy),
+            () =>
+                validateExternalFetchUrl(
+                    `https://${consoleHost}/api/optale/mcp`,
+                    policy,
+                ),
       'HOST_NOT_ALLOWED',
     );
     expect(
-      validateHttpsPassthroughUrl(`https://${consoleHost}/api/optale/mcp`, policy).host,
+            validateHttpsPassthroughUrl(
+                `https://${consoleHost}/api/optale/mcp`,
+                policy,
+            ).host,
     ).toBe(consoleHost);
   });
 
   test('bounds the passthrough lifetime separately from PDF fetch limits', () => {
-    expect(() => parseExternalFetchPolicy(
+        expect(() =>
+            parseExternalFetchPolicy(
       frozenPolicy({
         hosts: {
           'console-staging.optale.com': {
@@ -83,7 +93,8 @@ describe('external fetch policy parser', () => {
           },
         },
       }),
-    )).toThrow();
+            ),
+        ).toThrow();
     const policy = parseExternalFetchPolicy(
       frozenPolicy({
         hosts: {
@@ -94,21 +105,24 @@ describe('external fetch policy parser', () => {
         },
       }),
     );
-    expect(policy.hosts.get('console-staging.optale.com')?.httpsPassthroughTotalTimeoutMs)
-      .toBe(25_000);
+        expect(
+            policy.hosts.get('console-staging.optale.com')
+                ?.httpsPassthroughTotalTimeoutMs,
+        ).toBe(25_000);
   });
 
-  test.each([
-    {},
-    { httpsPassthrough: false },
-    { httpsPassthrough: 'true' },
-  ])('rejects a host without one enabled egress scope %#', hostPolicy => {
+    test.each([{}, { httpsPassthrough: false }, { httpsPassthrough: 'true' }])(
+        'rejects a host without one enabled egress scope %#',
+        hostPolicy => {
     expect(() =>
       parseExternalFetchPolicy(
-        frozenPolicy({ hosts: { 'console-staging.optale.com': hostPolicy } }),
+                    frozenPolicy({
+                        hosts: { 'console-staging.optale.com': hostPolicy },
+                    }),
       ),
     ).toThrow();
-  });
+        },
+    );
 
   test('accepts an empty host map as deny-all', () => {
     const policy = parseExternalFetchPolicy(frozenPolicy({ hosts: {} }));
@@ -152,7 +166,8 @@ describe('external fetch policy parser', () => {
               contentTypes: ['application/pdf'],
               limits: {
                 maxResponseBytes:
-                  HARD_EXTERNAL_FETCH_LIMITS.maxResponseBytes + 1,
+                                    HARD_EXTERNAL_FETCH_LIMITS.maxResponseBytes +
+                                    1,
               },
             },
           },
@@ -217,7 +232,9 @@ describe('external fetch URL validation', () => {
     expect(parsed.host).toBe(FROZEN_HOST);
     expect(parsed.queryPresent).toBe(true);
     expect(parsed.pathHash).toMatch(/^[A-Za-z0-9_-]{16}$/);
-    expect(parsed.policy.contentTypes).toEqual(new Set(['application/pdf']));
+        expect(parsed.policy.contentTypes).toEqual(
+            new Set(['application/pdf']),
+        );
   });
 
   test.each([
@@ -244,7 +261,10 @@ describe('external fetch URL validation', () => {
   test('distinguishes a valid but unlisted exact host', () => {
     expectCode(
       () =>
-        validateExternalFetchUrl('https://unlisted.example/file.pdf', policy),
+                validateExternalFetchUrl(
+                    'https://unlisted.example/file.pdf',
+                    policy,
+                ),
       'HOST_NOT_ALLOWED',
     );
   });

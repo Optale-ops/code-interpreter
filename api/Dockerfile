@@ -1,3 +1,4 @@
+ARG SOURCE_REVISION=unknown
 # Standalone sandbox API Dockerfile (development)
 # Boots the sandbox server inside a libkrun microVM with its own kernel.
 # Only requires /dev/kvm on the host — no privileged mode, no capabilities.
@@ -67,6 +68,8 @@ RUN chmod +x /package-init.sh && FORCE_REBUILD=true /package-init.sh
 # Stage 2: Build sandbox rootfs
 # ============================================================================
 FROM oven/bun:1.3.14-debian AS sandbox-build
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -78,6 +81,7 @@ RUN apt-get update && \
     locales \
     procps \
     iptables \
+    iproute2 \
     bc \
     file \
     jq \
@@ -88,6 +92,7 @@ RUN apt-get update && \
     libprotobuf32 \
     libffi8 \
     ca-certificates \
+    openssl \
     && rm -rf /var/lib/apt/lists/* \
     && libffi=$(find /usr/lib -name 'libffi.so.8' -print -quit) \
     && { [ -n "$libffi" ] || { echo "libffi.so.8 not found" >&2; exit 1; }; } \
@@ -132,11 +137,21 @@ COPY api/helpers /usr/local/lib/sandbox-fetch
 RUN chmod 0444 \
       /usr/local/lib/sandbox-fetch/sandbox_fetch.py \
       /usr/local/lib/sandbox-fetch/https_passthrough_preload.cjs \
+    && chmod 0555 \
+      /usr/local/lib/sandbox-fetch/package-entrypoint \
+      /usr/local/lib/sandbox-fetch/package-bin/npm \
+      /usr/local/lib/sandbox-fetch/package-bin/bun \
     && ln -s /usr/local/lib/sandbox-fetch/sandbox_fetch.py /usr/local/bin/sandbox-fetch \
     && chmod 0555 /usr/local/bin/sandbox-fetch
 RUN mkdir -p /run/codeapi && touch /run/codeapi/egress-grant && chmod 0000 /run/codeapi/egress-grant
 
 RUN bun run build
+
+# Keep nsenter available to the trusted runner only. /usr is mounted into the
+# sandbox, so the ordinary /usr/bin copy is removed below.
+RUN cp /usr/bin/nsenter /sandbox_api/nsenter \
+    && cp /usr/bin/unshare /sandbox_api/unshare \
+    && chmod 0555 /sandbox_api/nsenter /sandbox_api/unshare
 
 RUN mkdir -p /pkgs /tmp/sandbox
 
@@ -212,6 +227,8 @@ RUN cargo build --release
 #   - sandbox-runner-default: final alias for the safe baked KVM image
 # ============================================================================
 FROM fedora:43 AS sandbox-runner-base
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION
 
 RUN dnf install -y --setopt=install_weak_deps=False \
     libkrun \

@@ -1,12 +1,31 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import {
+    spawn,
+    spawnSync,
+    type ChildProcessWithoutNullStreams,
+} from 'node:child_process';
 import { nanoid } from 'nanoid';
 import { config } from './config';
 import { logger } from './logger';
-import { defaultNsJailSetupGate, type NsJailSetupGate } from './nsjail-setup-gate';
+import {
+    defaultNsJailSetupGate,
+    type NsJailSetupGate,
+} from './nsjail-setup-gate';
 import { nsjailSetupGateWatchdogFires } from './metrics';
-import { SANDBOX_INSIDE_GID, SANDBOX_INSIDE_UID, type SandboxJobIdentity } from './workspace-isolation';
+import {
+    SANDBOX_INSIDE_GID,
+    SANDBOX_INSIDE_UID,
+    type SandboxJobIdentity,
+} from './workspace-isolation';
+import {
+    cleanupPackageProxyState,
+    createPackageProxyCertificateAuthority,
+} from './package-proxy';
+import type {
+    PackageSetupSummary,
+    PackageTransportSummary,
+} from '../../shared/package-transport';
 
 export interface NsJailResult {
   stdout: string;
@@ -19,14 +38,29 @@ export interface NsJailResult {
   status: string | null;
   cpu_time: number | null;
   wall_time: number | null;
+    package_transport?: PackageTransportSummary;
+    package_setup?: PackageSetupSummary[];
 }
 
 const SIGNALS: Record<number, string> = {
-  1: 'SIGHUP', 2: 'SIGINT', 3: 'SIGQUIT', 4: 'SIGILL',
-  5: 'SIGTRAP', 6: 'SIGABRT', 7: 'SIGBUS', 8: 'SIGFPE',
-  9: 'SIGKILL', 10: 'SIGUSR1', 11: 'SIGSEGV', 12: 'SIGUSR2',
-  13: 'SIGPIPE', 14: 'SIGALRM', 15: 'SIGTERM', 24: 'SIGXCPU',
-  25: 'SIGXFSZ', 31: 'SIGSYS',
+    1: 'SIGHUP',
+    2: 'SIGINT',
+    3: 'SIGQUIT',
+    4: 'SIGILL',
+    5: 'SIGTRAP',
+    6: 'SIGABRT',
+    7: 'SIGBUS',
+    8: 'SIGFPE',
+    9: 'SIGKILL',
+    10: 'SIGUSR1',
+    11: 'SIGSEGV',
+    12: 'SIGUSR2',
+    13: 'SIGPIPE',
+    14: 'SIGALRM',
+    15: 'SIGTERM',
+    24: 'SIGXCPU',
+    25: 'SIGXFSZ',
+    31: 'SIGSYS',
 };
 
 const TIME_LIMIT_RE = /time limit/i;
@@ -53,7 +87,8 @@ const sharedSyscallDefines = [
   '#define pidfd_open 434',
 ];
 
-const syscallDefines = process.arch === 'arm64'
+const syscallDefines =
+    process.arch === 'arm64'
   ? [
       ...sharedSyscallDefines,
       '#define umount2 39',
@@ -89,11 +124,12 @@ const kexecSyscalls = '    kexec_load, kexec_file_load, bpf, perf_event_open,';
  * fail to parse (the symbol/define is absent). lookup_dcookie was deprecated
  * upstream and removed in recent kernels; keeping it on x86_64 is defense-
  * in-depth, dropped on arm64 where the syscall slot is unused. */
-const archSpecificLowPrioritySyscalls = process.arch === 'arm64'
+const archSpecificLowPrioritySyscalls =
+    process.arch === 'arm64'
   ? ''
   : '    ioperm, iopl, modify_ldt, lookup_dcookie,';
 
-const SECCOMP_POLICY = [
+const BASE_SECCOMP_POLICY = [
   ...syscallDefines,
   '#define AF_INET 2',
   '#define AF_INET6 10',
@@ -171,7 +207,17 @@ const SECCOMP_POLICY = [
   '  }',
   '}',
   'USE sandbox DEFAULT ALLOW',
-].filter(line => line !== '').join('\n');
+]
+    .filter(line => line !== '')
+    .join('\n');
+
+export function sandboxSeccompPolicy(packageProxyEnabled = false): string {
+    if (!packageProxyEnabled) return BASE_SECCOMP_POLICY;
+    return BASE_SECCOMP_POLICY.replace(
+        'domain == AF_INET || domain == AF_INET6 || domain == AF_NETLINK',
+        'domain == AF_INET6 || domain == AF_NETLINK',
+    );
+}
 
 export { SIGNALS };
 
@@ -193,7 +239,10 @@ function readBaseConfig(): string {
  * embedded backslashes and double-quotes defensively in case future
  * callers pass arbitrary paths in. The cfg syntax is C-like so only those
  * two characters need escaping inside a string literal. */
-export function renderJobConfigOverlay(submissionDir: string): string {
+export function renderJobConfigOverlay(
+    submissionDir: string,
+    packageProxyCaFile?: string,
+): string {
   const escaped = submissionDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   return [
     '',
@@ -210,8 +259,144 @@ export function renderJobConfigOverlay(submissionDir: string): string {
     '    nosuid: true',
     '    nodev: true',
     '}',
+        ...(packageProxyCaFile
+            ? [
+                  '',
+                  'mount {',
+                  `    src: "${packageProxyCaFile.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`,
+                  '    dst: "/run/codeapi/package-ca.pem"',
+                  '    is_bind: true',
+                  '    rw: false',
+                  '}',
+              ]
+            : []),
     '',
   ].join('\n');
+}
+
+export function renderJobConfig(
+    baseConfig: string,
+    submissionDir: string,
+    packageProxyCaFile?: string,
+): string {
+    const configured = packageProxyCaFile
+        ? baseConfig.replace(/^iface_no_lo:\s*true\s*$/m, 'iface_no_lo: false')
+        : baseConfig;
+    if (packageProxyCaFile && !configured.includes('iface_no_lo: false')) {
+        throw new Error(
+            'NsJail package proxy requires an explicit iface_no_lo setting',
+        );
+    }
+    return (
+        configured + renderJobConfigOverlay(submissionDir, packageProxyCaFile)
+    );
+}
+
+const PACKAGE_PROXY_PORT = 3129;
+const PACKAGE_PROXY_START_TIMEOUT_MS = 5_000;
+
+function packageProxySummary(
+    summaryPath: string,
+): PackageTransportSummary | undefined {
+    try {
+        const stat = fs.statSync(summaryPath);
+        if (!stat.isFile() || stat.size > 16_384) return undefined;
+        const parsed = JSON.parse(
+            fs.readFileSync(summaryPath, 'utf8'),
+        ) as Partial<PackageTransportSummary>;
+        if (
+            !Number.isSafeInteger(parsed.requestCount) ||
+            (parsed.requestCount ?? -1) < 0 ||
+            !Number.isSafeInteger(parsed.responseBytes) ||
+            (parsed.responseBytes ?? -1) < 0 ||
+            typeof parsed.policyDigest !== 'string' ||
+            !/^[A-Za-z0-9_-]{43}$/.test(parsed.policyDigest)
+        ) {
+            return undefined;
+        }
+        return parsed as PackageTransportSummary;
+    } catch {
+        return undefined;
+    }
+}
+
+async function startPrivatePackageNetwork(): Promise<ChildProcessWithoutNullStreams> {
+    const holder = spawn(
+        '/sandbox_api/unshare',
+        ['--net', '--', '/bin/sleep', '3600'],
+        { stdio: ['pipe', 'pipe', 'pipe'] },
+    ) as ChildProcessWithoutNullStreams;
+    holder.stdin.end();
+    holder.stdout.resume();
+    let stderr = '';
+    holder.stderr.on('data', chunk => {
+        if (stderr.length >= 2_048) return;
+        stderr += Buffer.from(chunk)
+            .toString('utf8')
+            .slice(0, 2_048 - stderr.length);
+    });
+    let spawnError: Error | undefined;
+    holder.once('error', error => {
+        spawnError = error;
+    });
+    const ownNamespace = fs.readlinkSync('/proc/self/ns/net');
+    const deadline = Date.now() + 2_000;
+    for (;;) {
+        if (spawnError) throw spawnError;
+        if (holder.exitCode !== null || holder.signalCode !== null) {
+            throw new Error(stderr || 'private package network holder exited');
+        }
+        try {
+            if (fs.readlinkSync(`/proc/${holder.pid}/ns/net`) !== ownNamespace)
+                break;
+        } catch {
+            /* holder is still entering its network namespace */
+        }
+        if (Date.now() >= deadline) {
+            holder.kill('SIGKILL');
+            throw new Error(
+                'private package network namespace creation timed out',
+            );
+        }
+        await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    const namespacePath = `/proc/${holder.pid}/ns/net`;
+    const loopback = spawnSync(
+        '/sandbox_api/nsenter',
+        [
+            `--net=${namespacePath}`,
+            '--',
+            '/usr/sbin/ip',
+            'link',
+            'set',
+            'lo',
+            'up',
+        ],
+        { stdio: ['ignore', 'ignore', 'pipe'] },
+    );
+    if (loopback.status !== 0) {
+        holder.kill('SIGKILL');
+        throw new Error(
+            `private package loopback setup failed: ${loopback.stderr.toString().trim()}`,
+        );
+    }
+    return holder;
+}
+
+async function stopPackageProxy(
+    child: ChildProcessWithoutNullStreams | undefined,
+): Promise<void> {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    const closed = new Promise<void>(resolve =>
+        child.once('close', () => resolve()),
+    );
+    child.kill('SIGTERM');
+    const stopped = await Promise.race([
+        closed.then(() => true),
+        new Promise<false>(resolve => setTimeout(() => resolve(false), 1_000)),
+    ]);
+    if (!stopped && child.exitCode === null && child.signalCode === null)
+        child.kill('SIGKILL');
 }
 
 interface ExecuteOptions {
@@ -227,10 +412,15 @@ interface ExecuteOptions {
   identity: SandboxJobIdentity;
   enableToolCallSocket?: boolean;
   externalFetchGrant?: string;
+    packageProxyCaFile?: string;
+    packageProxyReadyFile?: string;
   suppressSuccessLogs?: boolean;
 }
 
-export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate = defaultNsJailSetupGate): Promise<NsJailResult> {
+export async function execute(
+    opts: ExecuteOptions,
+    setupGate: NsJailSetupGate = defaultNsJailSetupGate,
+): Promise<NsJailResult> {
   const {
     command,
     envVars,
@@ -249,20 +439,59 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
   const logId = nanoid();
   const logPath = `/tmp/nsjail-${logId}.log`;
   const cfgPath = `/tmp/nsjail-${logId}.cfg`;
-  const externalFetchGrantFile = externalFetchGrant ? `/tmp/nsjail-${logId}.egress-grant` : undefined;
+    const externalFetchGrantFile = externalFetchGrant
+        ? `/tmp/nsjail-${logId}.egress-grant`
+        : undefined;
+    const packageProxyStateDir = externalFetchGrant
+        ? fs.mkdtempSync(`/tmp/codeapi-package-proxy-${logId}-`)
+        : undefined;
+    const packageProxyReadyFile = packageProxyStateDir
+        ? path.join(packageProxyStateDir, 'ready')
+        : undefined;
+    const packageProxySummaryFile = packageProxyStateDir
+        ? path.join(packageProxyStateDir, 'summary.json')
+        : undefined;
+    const packageProxyCa = packageProxyStateDir
+        ? await createPackageProxyCertificateAuthority(packageProxyStateDir)
+        : undefined;
+    if (packageProxyStateDir) fs.chmodSync(packageProxyStateDir, 0o711);
   const cleanupTemporaryFiles = (): void => {
-    for (const temporaryPath of [logPath, cfgPath, externalFetchGrantFile]) {
+        for (const temporaryPath of [
+            logPath,
+            cfgPath,
+            externalFetchGrantFile,
+        ]) {
       if (!temporaryPath) continue;
-      try { fs.unlinkSync(temporaryPath); } catch { /* absent temporary file */ }
+            try {
+                fs.unlinkSync(temporaryPath);
+            } catch {
+                /* absent temporary file */
     }
+        }
+        if (packageProxyStateDir)
+            cleanupPackageProxyState(packageProxyStateDir);
   };
 
   try {
-    fs.writeFileSync(cfgPath, readBaseConfig() + renderJobConfigOverlay(submissionDir), { mode: 0o600 });
+        fs.writeFileSync(
+            cfgPath,
+            renderJobConfig(
+                readBaseConfig(),
+                submissionDir,
+                packageProxyCa?.certPath,
+            ),
+            { mode: 0o600 },
+        );
     if (externalFetchGrantFile) {
-      fs.writeFileSync(externalFetchGrantFile, externalFetchGrant ?? '', { mode: 0o400 });
+            fs.writeFileSync(externalFetchGrantFile, externalFetchGrant ?? '', {
+                mode: 0o400,
+            });
       fs.chownSync(externalFetchGrantFile, identity.uid, identity.gid);
     }
+        if (packageProxyReadyFile) {
+            fs.writeFileSync(packageProxyReadyFile, '', { mode: 0o400 });
+            fs.chownSync(packageProxyReadyFile, identity.uid, identity.gid);
+        }
   } catch (error) {
     cleanupTemporaryFiles();
     throw error;
@@ -280,6 +509,8 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
     identity,
     enableToolCallSocket,
     externalFetchGrantFile,
+        packageProxyCaFile: packageProxyCa?.certPath,
+        packageProxyReadyFile,
   });
 
   const startTime = Date.now();
@@ -347,7 +578,10 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
       });
       /* Defensive: if the stream is already closed at attach time, late
        * listeners may not see the events. */
-      const s = stream as NodeJS.ReadableStream & { destroyed?: boolean; readableEnded?: boolean };
+            const s = stream as NodeJS.ReadableStream & {
+                destroyed?: boolean;
+                readableEnded?: boolean;
+            };
       if (s.destroyed === true || s.readableEnded === true) {
         resolve();
         return;
@@ -382,6 +616,18 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
    * dominates when there's no I/O; once pipes actually carry data the
    * gap narrows. Pipe FD lifecycle is equivalent — both methods steady
    * at baseline FD count across 2000+ spawns, sequential and concurrent. */
+    let packageNetworkHolder: ChildProcessWithoutNullStreams | undefined;
+    if (packageProxyStateDir) {
+        try {
+            packageNetworkHolder = await startPrivatePackageNetwork();
+        } catch (error) {
+            cleanupTemporaryFiles();
+            throw new Error(
+                `Failed to create package network namespace: ${(error as Error).message}`,
+            );
+        }
+    }
+
   let proc: ChildProcessWithoutNullStreams;
   let stdoutDrain: Promise<void> | undefined;
   let stderrDrain: Promise<void> | undefined;
@@ -400,13 +646,32 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
    * on a misconfigured nsjail_path or fork-pressure burst). */
   const childDiedSignal = new AbortController();
   try {
-    ({ value: proc, markerSeen, pollError } = await setupGate.runSetup(logPath, () => {
-      const child = spawn(config.nsjail_path, nsjailArgs, {
+        ({
+            value: proc,
+            markerSeen,
+            pollError,
+        } = await setupGate.runSetup(
+            logPath,
+            () => {
+                const child = spawn(
+                    packageNetworkHolder
+                        ? '/sandbox_api/nsenter'
+                        : config.nsjail_path,
+                    packageNetworkHolder
+                        ? [
+                              `--net=/proc/${packageNetworkHolder.pid}/ns/net`,
+                              '--',
+                              config.nsjail_path,
+                              ...nsjailArgs,
+                          ]
+                        : nsjailArgs,
+                    {
         /* stdin always 'pipe' so we have a writable handle to .end() even
          * when no input is supplied. The child sees EOF on stdin
          * immediately, equivalent to the previous Bun.spawn 'ignore'. */
         stdio: ['pipe', 'pipe', 'pipe'],
-      }) as ChildProcessWithoutNullStreams;
+                    },
+                ) as ChildProcessWithoutNullStreams;
       /* Attach the 'error' listener SYNCHRONOUSLY before any await. The
        * setup gate then polls the log file for ~tens of ms; during that
        * window, an async spawn failure (ENOENT for a missing nsjail
@@ -419,7 +684,10 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
         const errno = err as NodeJS.ErrnoException;
         if (spawnError === null) spawnError = errno;
         logger.warn(
-          { logId, err: { code: errno.code, message: errno.message } },
+                        {
+                            logId,
+                            err: { code: errno.code, message: errno.message },
+                        },
           'nsjail child process error',
         );
         childDiedSignal.abort();
@@ -439,13 +707,19 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
       child.stdin.on('error', err => {
         const errno = err as NodeJS.ErrnoException;
         logger.warn(
-          { logId, err: { code: errno.code, message: errno.message } },
+                        {
+                            logId,
+                            err: { code: errno.code, message: errno.message },
+                        },
           'nsjail stdin pipe error (child likely exited mid-write)',
         );
       });
       return child;
-    }, childDiedSignal.signal));
+            },
+            childDiedSignal.signal,
+        ));
   } catch (err) {
+        await stopPackageProxy(packageNetworkHolder);
     cleanupTemporaryFiles();
     throw new Error(`Failed to spawn nsjail: ${(err as Error).message}`);
   }
@@ -457,7 +731,9 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
   if (spawnError) {
     cleanupTemporaryFiles();
     const errno: NodeJS.ErrnoException = spawnError;
-    throw new Error(`Failed to spawn nsjail: ${errno.code ?? 'UNKNOWN'}: ${errno.message}`);
+        throw new Error(
+            `Failed to spawn nsjail: ${errno.code ?? 'UNKNOWN'}: ${errno.message}`,
+        );
   }
   if (!markerSeen) {
     /* The watchdog fired before NsJail logged its post-mount marker. The
@@ -467,11 +743,105 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
      * log was unreadable (EACCES on a chmod race, EISDIR if the path got
      * replaced, EIO, ...) which is far more diagnostic than a bare timeout. */
     logger.warn(
-      { logId, pollError: pollError && { code: pollError.code, message: pollError.message } },
+            {
+                logId,
+                pollError: pollError && {
+                    code: pollError.code,
+                    message: pollError.message,
+                },
+            },
       'nsjail setup gate watchdog fired before "Executing" marker',
     );
     nsjailSetupGateWatchdogFires.inc();
   }
+
+    let packageProxyProcess: ChildProcessWithoutNullStreams | undefined;
+    let packageProxyStderr = '';
+    if (
+        packageProxyStateDir &&
+        packageProxyReadyFile &&
+        packageProxySummaryFile &&
+        packageProxyCa &&
+        externalFetchGrant
+    ) {
+        try {
+            if (!packageNetworkHolder?.pid)
+                throw new Error(
+                    'private package network namespace is unavailable',
+                );
+            packageProxyProcess = spawn(
+                '/sandbox_api/nsenter',
+                [
+                    `--net=/proc/${packageNetworkHolder.pid}/ns/net`,
+                    '--',
+                    '/usr/local/bin/node',
+                    '/sandbox_api/.build/package-proxy.cjs',
+                ],
+                {
+                    stdio: ['pipe', 'pipe', 'pipe'],
+                    env: {
+                        PATH: '/usr/local/bin:/usr/bin:/bin',
+                        PACKAGE_PROXY_PORT: String(PACKAGE_PROXY_PORT),
+                        PACKAGE_PROXY_RELAY_SOCKET: '/tmp/tcs.sock',
+                        PACKAGE_PROXY_GRANT: externalFetchGrant,
+                        PACKAGE_PROXY_STATE_DIR: packageProxyStateDir,
+                        PACKAGE_PROXY_CA_CERT: packageProxyCa.certPath,
+                        PACKAGE_PROXY_CA_KEY: packageProxyCa.keyPath,
+                        PACKAGE_PROXY_READY_PATH: packageProxyReadyFile,
+                        PACKAGE_PROXY_SUMMARY_PATH: packageProxySummaryFile,
+                    },
+                },
+            ) as ChildProcessWithoutNullStreams;
+            packageProxyProcess.stdin.end();
+            packageProxyProcess.stdout.resume();
+            packageProxyProcess.stderr.on('data', chunk => {
+                if (packageProxyStderr.length >= 4_096) return;
+                packageProxyStderr += Buffer.from(chunk)
+                    .toString('utf8')
+                    .slice(0, 4_096 - packageProxyStderr.length);
+            });
+            let packageProxySpawnError: Error | undefined;
+            packageProxyProcess.once('error', error => {
+                packageProxySpawnError = error;
+            });
+            proc.once('close', () => {
+                void stopPackageProxy(packageProxyProcess);
+            });
+            const deadline = Date.now() + PACKAGE_PROXY_START_TIMEOUT_MS;
+            for (;;) {
+                if (packageProxySpawnError) throw packageProxySpawnError;
+                if (
+                    packageProxyProcess.exitCode !== null ||
+                    packageProxyProcess.signalCode !== null
+                ) {
+                    throw new Error(
+                        packageProxyStderr ||
+                            'package proxy exited before readiness',
+                    );
+                }
+                try {
+                    if (
+                        fs.readFileSync(packageProxyReadyFile, 'utf8') ===
+                        'ready'
+                    )
+                        break;
+                } catch {
+                    /* readiness file is created before NsJail and filled by the proxy */
+                }
+                if (Date.now() >= deadline)
+                    throw new Error('package proxy readiness timed out');
+                await new Promise(resolve => setTimeout(resolve, 10));
+            }
+        } catch (error) {
+            proc.kill('SIGKILL');
+            await stopPackageProxy(packageProxyProcess);
+            await stopPackageProxy(packageNetworkHolder);
+            cleanupTemporaryFiles();
+            throw new Error(
+                `Failed to start package proxy: ${(error as Error).message}`,
+            );
+        }
+    }
 
   if (hasStdin) {
     proc.stdin.write(stdin!);
@@ -487,6 +857,11 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
     stdoutDrain ?? drainStream(proc, proc.stdout, 'stdout'),
     stderrDrain ?? drainStream(proc, proc.stderr, 'stderr'),
   ]);
+    await stopPackageProxy(packageProxyProcess);
+    await stopPackageProxy(packageNetworkHolder);
+    const finalPackageTransport = packageProxySummaryFile
+        ? packageProxySummary(packageProxySummaryFile)
+        : undefined;
 
   if (spawnError) {
     /* Belt-and-braces: the pre-drain spawn-error short-circuit above
@@ -495,7 +870,9 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
      * BETWEEN the pre-drain check and now. Same throw shape. */
     cleanupTemporaryFiles();
     const errno: NodeJS.ErrnoException = spawnError;
-    throw new Error(`Failed to spawn nsjail: ${errno.code ?? 'UNKNOWN'}: ${errno.message}`);
+        throw new Error(
+            `Failed to spawn nsjail: ${errno.code ?? 'UNKNOWN'}: ${errno.message}`,
+        );
   }
 
   /* Map signal name -> signum, derived once from the existing SIGNALS
@@ -523,7 +900,10 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
    * (2) Process is still running (typical happy path). Attach the
    *     'close' listener and decode the (code, signal) tuple. */
   const exitCode: number | null = await new Promise(resolve => {
-    const decode = (code: number | null, signal: NodeJS.Signals | null): number | null => {
+        const decode = (
+            code: number | null,
+            signal: NodeJS.Signals | null,
+        ): number | null => {
       if (code !== null) return code;
       if (signal != null) {
         const num = SIGNAL_NUM_BY_NAME[signal];
@@ -546,24 +926,40 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
   try {
     const cgroupLine = fs.readFileSync('/proc/self/cgroup', 'utf8').trim();
     // cgroup v2 format: "0::<path>"
-    const cgroupPath = cgroupLine.split('\n').find(l => l.startsWith('0::'))?.split('::')[1] ?? '/';
+        const cgroupPath =
+            cgroupLine
+                .split('\n')
+                .find(l => l.startsWith('0::'))
+                ?.split('::')[1] ?? '/';
     const cgroupFsPath = `/sys/fs/cgroup${cgroupPath}`;
 
-    const memoryCurrent = fs.readFileSync(`${cgroupFsPath}/memory.current`, 'utf8').trim();
-    const memoryStat = fs.readFileSync(`${cgroupFsPath}/memory.stat`, 'utf8');
+        const memoryCurrent = fs
+            .readFileSync(`${cgroupFsPath}/memory.current`, 'utf8')
+            .trim();
+        const memoryStat = fs.readFileSync(
+            `${cgroupFsPath}/memory.stat`,
+            'utf8',
+        );
     const parseStatValue = (key: string): number => {
-      const match = memoryStat.match(new RegExp(`^${key}\\s+(\\d+)`, 'm'));
+            const match = memoryStat.match(
+                new RegExp(`^${key}\\s+(\\d+)`, 'm'),
+            );
       return match ? parseInt(match[1], 10) : 0;
     };
     if (suppressSuccessLogs !== true) {
-      logger.info({
+            logger.info(
+                {
         memoryMb: Math.round(parseInt(memoryCurrent, 10) / 1048576),
         anonMb: Math.round(parseStatValue('anon') / 1048576),
         fileCacheMb: Math.round(parseStatValue('file') / 1048576),
         shmemMb: Math.round(parseStatValue('shmem') / 1048576),
-      }, 'Post-execution memory');
+                },
+                'Post-execution memory',
+            );
+        }
+    } catch {
+        /* cgroup files may not be accessible in all environments */
     }
-  } catch { /* cgroup files may not be accessible in all environments */ }
 
   let logMessage: string | null = null;
   let logStatus: string | null = null;
@@ -595,7 +991,9 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
     } else if (exitCode === 255) {
       logger.error({ logPath }, 'nsjail exit 255 - no log file found');
     }
-  } catch { /* log file may not exist */ } finally {
+    } catch {
+        /* log file may not exist */
+    } finally {
     cleanupTemporaryFiles();
   }
 
@@ -612,7 +1010,8 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
   }
 
   if (stderrTruncated) {
-    finalMessage = finalMessage ?? `stderr truncated at ${outputMaxSize} bytes`;
+        finalMessage =
+            finalMessage ?? `stderr truncated at ${outputMaxSize} bytes`;
   }
 
   /* Surface the reason in the streams themselves: most clients (and the
@@ -635,6 +1034,9 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
     status: finalStatus,
     cpu_time: null,
     wall_time: wallTime,
+        ...(finalPackageTransport
+            ? { package_transport: finalPackageTransport }
+            : {}),
   };
 }
 
@@ -654,6 +1056,8 @@ interface BuildArgsOptions {
   identity: SandboxJobIdentity;
   enableToolCallSocket?: boolean;
   externalFetchGrantFile?: string;
+    packageProxyCaFile?: string;
+    packageProxyReadyFile?: string;
 }
 
 export function buildArgs(opts: BuildArgsOptions): string[] {
@@ -669,20 +1073,31 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
     identity,
     enableToolCallSocket,
     externalFetchGrantFile,
+        packageProxyCaFile,
+        packageProxyReadyFile,
   } = opts;
 
   const timeoutSecs = Math.max(1, Math.ceil(timeout / 1000));
 
   const args: string[] = [
-    '--config', cfgPath ?? config.nsjail_config,
-    '--log', logPath,
-    '--seccomp_string', SECCOMP_POLICY,
-    '--user', `${SANDBOX_INSIDE_UID}:${identity.uid}:1`,
-    '--group', `${SANDBOX_INSIDE_GID}:${identity.gid}:1`,
-    '-s', '/usr/bin:/bin',
-    '-s', '/usr/lib:/lib',
-    '-s', '/usr/lib64:/lib64',
-    '-R', `${pkgdir}:${pkgdir}`,
+        '--config',
+        cfgPath ?? config.nsjail_config,
+        '--log',
+        logPath,
+        '--seccomp_string',
+        sandboxSeccompPolicy(packageProxyCaFile !== undefined),
+        '--user',
+        `${SANDBOX_INSIDE_UID}:${identity.uid}:1`,
+        '--group',
+        `${SANDBOX_INSIDE_GID}:${identity.gid}:1`,
+        '-s',
+        '/usr/bin:/bin',
+        '-s',
+        '/usr/lib:/lib',
+        '-s',
+        '/usr/lib64:/lib64',
+        '-R',
+        `${pkgdir}:${pkgdir}`,
   ];
 
   if (config.use_cgroupv2) {
@@ -706,28 +1121,47 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
   }
 
   args.push(
-    '--time_limit', String(timeoutSecs),
-    '--rlimit_as', String(config.rlimit_as),
-    '--rlimit_fsize', String(config.rlimit_fsize),
-    '--rlimit_nofile', String(config.max_open_files),
-    '--rlimit_nproc', String(config.max_process_count),
-    '--rlimit_core', '0',
-    '--rlimit_cpu', String(timeoutSecs),
-    '--rlimit_stack', 'soft',
-    '--rlimit_memlock', '0',
+        '--time_limit',
+        String(timeoutSecs),
+        '--rlimit_as',
+        String(config.rlimit_as),
+        '--rlimit_fsize',
+        String(config.rlimit_fsize),
+        '--rlimit_nofile',
+        String(config.max_open_files),
+        '--rlimit_nproc',
+        String(config.max_process_count),
+        '--rlimit_core',
+        '0',
+        '--rlimit_cpu',
+        String(timeoutSecs),
+        '--rlimit_stack',
+        'soft',
+        '--rlimit_memlock',
+        '0',
   );
 
   if (config.use_cgroupv2 && memoryLimit > 0) {
     args.push('--cgroup_mem_max', String(memoryLimit));
   }
 
-  if (config.allowed_local_network_port > 0 && (enableToolCallSocket === true || externalFetchGrantFile !== undefined)) {
+    if (
+        config.allowed_local_network_port > 0 &&
+        (enableToolCallSocket === true || externalFetchGrantFile !== undefined)
+    ) {
     const socketPath = '/tmp/tcs.sock';
     args.push('-B', `${socketPath}:${socketPath}`);
   }
   if (externalFetchGrantFile) {
     args.push('-R', `${externalFetchGrantFile}:/run/codeapi/egress-grant`);
   }
+    if (packageProxyCaFile) args.push('--disable_clone_newnet');
+    if (packageProxyReadyFile) {
+        args.push(
+            '-R',
+            `${packageProxyReadyFile}:/run/codeapi/package-proxy-ready`,
+        );
+    }
 
   for (const [key, value] of Object.entries(envVars)) {
     args.push('-E', `${key}=${value}`);
@@ -748,7 +1182,13 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
    * do not receive that mount. */
 
   args.push('--');
-  args.push('/usr/local/bin/spec-guard', ...command);
+    args.push(
+        '/usr/local/bin/spec-guard',
+        ...(packageProxyReadyFile
+            ? ['/usr/local/lib/sandbox-fetch/package-entrypoint']
+            : []),
+        ...command,
+    );
 
   return args;
 }

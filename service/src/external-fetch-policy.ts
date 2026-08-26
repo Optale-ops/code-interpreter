@@ -17,7 +17,22 @@ export interface ExternalFetchHostPolicy {
   contentTypes: Set<string>;
   httpsPassthrough: boolean;
   httpsPassthroughTotalTimeoutMs?: number;
+    packageTransport: boolean;
   limits: ExternalFetchLimits;
+}
+
+export interface ExternalFetchPolicySnapshotHost {
+    contentTypes?: string[];
+    httpsPassthrough?: true;
+    httpsPassthroughTotalTimeoutMs?: number;
+    packageTransport?: true;
+    limits: ExternalFetchLimits;
+}
+
+export interface ExternalFetchPolicySnapshot {
+    version: 1;
+    limits: ExternalFetchLimits;
+    hosts: Record<string, ExternalFetchPolicySnapshotHost>;
 }
 
 export interface ExternalFetchPolicy {
@@ -150,7 +165,9 @@ function positiveInteger(
     value < 1 ||
     value > ceiling
   ) {
-    throw new Error(`${label} must be an integer from 1 through ${ceiling}`);
+        throw new Error(
+            `${label} must be an integer from 1 through ${ceiling}`,
+        );
   }
   return value;
 }
@@ -169,7 +186,11 @@ function parseLimits(
       if (requireAll) throw new Error(`${label}.${key} is required`);
       continue;
     }
-    parsed[key] = positiveInteger(raw[key], `${label}.${key}`, ceiling[key]);
+        parsed[key] = positiveInteger(
+            raw[key],
+            `${label}.${key}`,
+            ceiling[key],
+        );
   }
   return parsed;
 }
@@ -205,7 +226,11 @@ function validatePolicyHostname(host: string): void {
 
 export function parseExternalFetchPolicy(value: unknown): ExternalFetchPolicy {
   const raw = objectValue(value, 'External fetch policy');
-  assertOnlyKeys(raw, ['version', 'limits', 'hosts'], 'External fetch policy');
+    assertOnlyKeys(
+        raw,
+        ['version', 'limits', 'hosts'],
+        'External fetch policy',
+    );
   if (raw.version !== 1)
     throw new Error('External fetch policy version must be 1');
   const limits = parseLimits(
@@ -226,17 +251,33 @@ export function parseExternalFetchPolicy(value: unknown): ExternalFetchPolicy {
         'contentTypes',
         'httpsPassthrough',
         'httpsPassthroughTotalTimeoutMs',
+                'packageTransport',
         'limits',
       ],
       `External fetch host ${host}`,
     );
-    const httpsPassthrough = rawHost.httpsPassthrough === undefined
+        const httpsPassthrough =
+            rawHost.httpsPassthrough === undefined
       ? false
       : rawHost.httpsPassthrough === true;
     if (rawHost.httpsPassthrough !== undefined && !httpsPassthrough) {
-      throw new Error(`External fetch host ${host} has invalid httpsPassthrough`);
+            throw new Error(
+                `External fetch host ${host} has invalid httpsPassthrough`,
+            );
     }
-    if (rawHost.httpsPassthroughTotalTimeoutMs !== undefined && !httpsPassthrough) {
+        const packageTransport =
+            rawHost.packageTransport === undefined
+                ? false
+                : rawHost.packageTransport === true;
+        if (rawHost.packageTransport !== undefined && !packageTransport) {
+            throw new Error(
+                `External fetch host ${host} has invalid packageTransport`,
+            );
+        }
+        if (
+            rawHost.httpsPassthroughTotalTimeoutMs !== undefined &&
+            !httpsPassthrough
+        ) {
       throw new Error(
         `External fetch host ${host} cannot set httpsPassthroughTotalTimeoutMs without HTTPS passthrough`,
       );
@@ -250,12 +291,23 @@ export function parseExternalFetchPolicy(value: unknown): ExternalFetchPolicy {
             HARD_HTTPS_PASSTHROUGH_TOTAL_TIMEOUT_MS,
           )
       : undefined;
-    if (rawHost.contentTypes !== undefined && !Array.isArray(rawHost.contentTypes)) {
-      throw new Error(`External fetch host ${host} contentTypes must be an array`);
+        if (
+            rawHost.contentTypes !== undefined &&
+            !Array.isArray(rawHost.contentTypes)
+        ) {
+            throw new Error(
+                `External fetch host ${host} contentTypes must be an array`,
+            );
     }
     const rawContentTypes = rawHost.contentTypes as unknown[] | undefined;
-    if ((rawContentTypes?.length ?? 0) < 1 && !httpsPassthrough) {
-      throw new Error(`External fetch host ${host} must enable at least one egress scope`);
+        if (
+            (rawContentTypes?.length ?? 0) < 1 &&
+            !httpsPassthrough &&
+            !packageTransport
+        ) {
+            throw new Error(
+                `External fetch host ${host} must enable at least one egress scope`,
+            );
     }
     const contentTypes = new Set<string>();
     for (const contentType of rawContentTypes ?? []) {
@@ -273,6 +325,7 @@ export function parseExternalFetchPolicy(value: unknown): ExternalFetchPolicy {
     hosts.set(host, {
       contentTypes,
       httpsPassthrough,
+            packageTransport,
       ...(httpsPassthroughTotalTimeoutMs === undefined
         ? {}
         : { httpsPassthroughTotalTimeoutMs }),
@@ -365,7 +418,6 @@ function validatePolicyUrl(
   };
 }
 
-
 export function validateExternalFetchUrl(
   raw: string,
   policy: ExternalFetchPolicy,
@@ -386,6 +438,146 @@ export function validateHttpsPassthroughUrl(
     throw new ExternalFetchError('HOST_NOT_ALLOWED');
   }
   return validated;
+}
+
+export function validatePackageTransportUrl(
+    raw: string,
+    policy: ExternalFetchPolicy,
+): ValidatedExternalFetchUrl {
+    const validated = validatePolicyUrl(raw, policy);
+    if (!validated.policy.packageTransport) {
+        throw new ExternalFetchError('HOST_NOT_ALLOWED');
+    }
+    return validated;
+}
+
+function canonicalJson(value: unknown): string {
+    if (
+        value === null ||
+        typeof value === 'string' ||
+        typeof value === 'boolean'
+    ) {
+        return JSON.stringify(value);
+    }
+    if (typeof value === 'number') {
+        if (!Number.isFinite(value))
+            throw new Error('Policy contains a non-finite number');
+        return JSON.stringify(value);
+    }
+    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+    if (typeof value === 'object' && value !== undefined) {
+        const object = value as Record<string, unknown>;
+        return `{${Object.keys(object)
+            .filter(key => object[key] !== undefined)
+            .sort()
+            .map(key => `${JSON.stringify(key)}:${canonicalJson(object[key])}`)
+            .join(',')}}`;
+    }
+    throw new Error('Policy contains an unsupported value');
+}
+
+export function serializeExternalFetchPolicy(
+    policy: ExternalFetchPolicy,
+): ExternalFetchPolicySnapshot {
+    const hosts: Record<string, ExternalFetchPolicySnapshotHost> = {};
+    for (const host of Array.from(policy.hosts.keys()).sort()) {
+        const entry = policy.hosts.get(host);
+        if (!entry) continue;
+        hosts[host] = {
+            ...(entry.contentTypes.size > 0
+                ? { contentTypes: Array.from(entry.contentTypes).sort() }
+                : {}),
+            ...(entry.httpsPassthrough
+                ? { httpsPassthrough: true as const }
+                : {}),
+            ...(entry.httpsPassthroughTotalTimeoutMs === undefined
+                ? {}
+                : {
+                      httpsPassthroughTotalTimeoutMs:
+                          entry.httpsPassthroughTotalTimeoutMs,
+                  }),
+            ...(entry.packageTransport
+                ? { packageTransport: true as const }
+                : {}),
+            limits: { ...entry.limits },
+        };
+    }
+    return { version: 1, limits: { ...policy.limits }, hosts };
+}
+
+export function externalFetchPolicyDigest(policy: ExternalFetchPolicy): string {
+    return crypto
+        .createHash('sha256')
+        .update(canonicalJson(serializeExternalFetchPolicy(policy)), 'utf8')
+        .digest('base64url');
+}
+
+export function intersectExternalFetchPolicies(
+    signed: ExternalFetchPolicy,
+    deployment: ExternalFetchPolicy,
+): ExternalFetchPolicy {
+    const limits = Object.fromEntries(
+        LIMIT_KEYS.map(key => [
+            key,
+            Math.min(signed.limits[key], deployment.limits[key]),
+        ]),
+    ) as unknown as ExternalFetchLimits;
+    const hosts = new Map<string, ExternalFetchHostPolicy>();
+    for (const [host, requested] of signed.hosts) {
+        const upper = deployment.hosts.get(host);
+        if (!upper) throw new ExternalFetchError('HOST_NOT_ALLOWED');
+        for (const contentType of requested.contentTypes) {
+            if (!upper.contentTypes.has(contentType))
+                throw new ExternalFetchError('HOST_NOT_ALLOWED');
+        }
+        if (requested.httpsPassthrough && !upper.httpsPassthrough) {
+            throw new ExternalFetchError('HOST_NOT_ALLOWED');
+        }
+        if (requested.packageTransport && !upper.packageTransport) {
+            throw new ExternalFetchError('HOST_NOT_ALLOWED');
+        }
+        const hostLimits = Object.fromEntries(
+            LIMIT_KEYS.map(key => [
+                key,
+                Math.min(requested.limits[key], upper.limits[key], limits[key]),
+            ]),
+        ) as unknown as ExternalFetchLimits;
+        hosts.set(host, {
+            contentTypes: new Set(requested.contentTypes),
+            httpsPassthrough: requested.httpsPassthrough,
+            ...(requested.httpsPassthrough
+                ? {
+                      httpsPassthroughTotalTimeoutMs: Math.min(
+                          requested.httpsPassthroughTotalTimeoutMs ??
+                              HARD_HTTPS_PASSTHROUGH_TOTAL_TIMEOUT_MS,
+                          upper.httpsPassthroughTotalTimeoutMs ??
+                              HARD_HTTPS_PASSTHROUGH_TOTAL_TIMEOUT_MS,
+                      ),
+                  }
+                : {}),
+            packageTransport: requested.packageTransport,
+            limits: hostLimits,
+        });
+    }
+    return { version: 1, limits, hosts };
+}
+
+export function effectiveExternalFetchPolicy(
+    snapshot: ExternalFetchPolicySnapshot | undefined,
+    digest: string | undefined,
+    deployment: ExternalFetchPolicy,
+): ExternalFetchPolicy {
+    if (!snapshot || !digest) throw new ExternalFetchError('HOST_NOT_ALLOWED');
+    let signed: ExternalFetchPolicy;
+    try {
+        signed = parseExternalFetchPolicy(snapshot);
+    } catch {
+        throw new ExternalFetchError('HOST_NOT_ALLOWED');
+    }
+    if (externalFetchPolicyDigest(signed) !== digest) {
+        throw new ExternalFetchError('HOST_NOT_ALLOWED');
+    }
+    return intersectExternalFetchPolicies(signed, deployment);
 }
 
 export function validateResolvedAddresses(

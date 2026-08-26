@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { promises as dns } from 'node:dns';
 import { EventEmitter, once } from 'node:events';
 import https from 'node:https';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { ClientRequest } from 'node:http';
 import type { Socket } from 'node:net';
 
@@ -36,17 +38,36 @@ async function main(): Promise<void> {
   dns.resolveCname = async (): Promise<string[]> => [];
   dns.resolve4 = async (): Promise<string[]> => [];
   dns.resolve6 = async (): Promise<string[]> => ['2606:4700:3032::ac43:80c6'];
-  https.request = (() => new FailingRequest() as unknown as ClientRequest) as typeof https.request;
+    https.request = (() =>
+        new FailingRequest() as unknown as ClientRequest) as typeof https.request;
 
   // The gateway reads process environment during module initialization, so this
   // test intentionally loads it only after the fixture has installed its boundary.
-  const [{ app }, { EGRESS_GRANT_HEADER, sealEgressGrant }] = await Promise.all([
+    const [
+        { app },
+        { EGRESS_GRANT_HEADER, sealEgressGrant },
+        {
+            externalFetchPolicyDigest,
+            parseExternalFetchPolicy,
+            serializeExternalFetchPolicy,
+        },
+    ] = await Promise.all([
     import('./egress-gateway'),
     import('./egress-grant'),
+        import('./external-fetch-policy'),
   ]);
+    const deploymentPolicy = parseExternalFetchPolicy(
+        JSON.parse(
+            fs.readFileSync(
+                path.resolve(__dirname, '../config/external-fetch-policy.json'),
+                'utf8',
+            ),
+        ),
+    );
 
   const now = Math.floor(Date.now() / 1000);
-  const grant = sealEgressGrant({
+    const grant = sealEgressGrant(
+        {
     v: 1,
     typ: 'grant',
     grant_id: 'grant_socket_failure',
@@ -64,14 +85,19 @@ async function main(): Promise<void> {
     exp: now + 300,
     principal_source: 'test',
     auth_context_hash: 'test',
-  }, SECRET);
+            network_policy: serializeExternalFetchPolicy(deploymentPolicy),
+            network_policy_digest: externalFetchPolicyDigest(deploymentPolicy),
+        },
+        SECRET,
+    );
 
   const server = app.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const address = server.address();
   assert.notEqual(address, null);
   assert.equal(typeof address, 'object');
-  if (typeof address !== 'object') throw new Error('gateway did not bind a TCP address');
+    if (typeof address !== 'object')
+        throw new Error('gateway did not bind a TCP address');
   const baseUrl = `http://127.0.0.1:${address.port}`;
 
   try {

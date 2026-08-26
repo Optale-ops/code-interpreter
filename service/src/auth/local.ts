@@ -1,6 +1,38 @@
 import type { NextFunction, Response } from 'express';
 import type { AuthenticatedRequest } from '../types';
 import { applyPrincipal } from './principal';
+import {
+    externalFetchPolicyDigest,
+    loadExternalFetchPolicy,
+    serializeExternalFetchPolicy,
+    type ExternalFetchPolicySnapshot,
+} from '../external-fetch-policy';
+
+let cachedPolicyPath = '';
+let cachedPolicyBinding:
+    | {
+          networkPolicy: ExternalFetchPolicySnapshot;
+          networkPolicyDigest: string;
+      }
+    | undefined;
+
+function localNetworkPolicyBinding(): {
+    networkPolicy?: ExternalFetchPolicySnapshot;
+    networkPolicyDigest?: string;
+} {
+    const policyPath =
+        process.env.CODEAPI_LOCAL_NETWORK_POLICY_FILE?.trim() ?? '';
+    if (!policyPath) return {};
+    if (!cachedPolicyBinding || cachedPolicyPath !== policyPath) {
+        const policy = loadExternalFetchPolicy(policyPath);
+        cachedPolicyPath = policyPath;
+        cachedPolicyBinding = {
+            networkPolicy: serializeExternalFetchPolicy(policy),
+            networkPolicyDigest: externalFetchPolicyDigest(policy),
+        };
+    }
+    return cachedPolicyBinding;
+}
 
 export function applyLocalPrincipal(req: AuthenticatedRequest): void {
   req.planId = 'local-plan';
@@ -11,6 +43,7 @@ export function applyLocalPrincipal(req: AuthenticatedRequest): void {
     tenantId: 'local',
     principalSource: 'none',
     credentialId: 'local-test-key',
+        ...localNetworkPolicyBinding(),
   });
 }
 
