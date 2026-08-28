@@ -46,7 +46,7 @@ export const HARD_EXTERNAL_FETCH_LIMITS: Readonly<ExternalFetchLimits> =
     maxRedirects: 3,
     maxResponseBytes: 26_214_400,
     maxAggregateBytesPerGrant: 52_428_800,
-    maxFetchesPerGrant: 8,
+    maxFetchesPerGrant: 64,
     connectTimeoutMs: 3_000,
     headersTimeoutMs: 5_000,
     totalTimeoutMs: 15_000,

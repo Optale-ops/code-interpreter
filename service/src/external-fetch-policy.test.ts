@@ -73,6 +73,28 @@ describe('external fetch policy parser', () => {
     ).toBe(consoleHost);
   });
 
+  test('supports a larger CLI passthrough budget without widening typed PDF fetches', () => {
+    const policy = parseExternalFetchPolicy({
+      version: 1,
+      limits: {
+        ...HARD_EXTERNAL_FETCH_LIMITS,
+        maxFetchesPerGrant: 64,
+      },
+      hosts: {
+        [FROZEN_HOST]: {
+          contentTypes: ['application/pdf'],
+          limits: { maxFetchesPerGrant: 8 },
+        },
+        'console.optale.com': { httpsPassthrough: true },
+        'figent.optale.com': { httpsPassthrough: true },
+      },
+    });
+
+    expect(policy.hosts.get(FROZEN_HOST)?.limits.maxFetchesPerGrant).toBe(8);
+    expect(policy.hosts.get('console.optale.com')?.limits.maxFetchesPerGrant).toBe(64);
+    expect(policy.hosts.get('figent.optale.com')?.limits.maxFetchesPerGrant).toBe(64);
+  });
+
   test('bounds the passthrough lifetime separately from PDF fetch limits', () => {
     expect(() => parseExternalFetchPolicy(
       frozenPolicy({
