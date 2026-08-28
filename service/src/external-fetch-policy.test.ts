@@ -3,6 +3,7 @@ import {
   HARD_EXTERNAL_FETCH_LIMITS,
   parseExternalFetchPolicy,
   validateExternalFetchUrl,
+  validateHttpsPassthroughUrl,
   validateResolvedAddresses,
 } from './external-fetch-policy';
 import { ExternalFetchError } from './external-fetch-errors';
@@ -41,8 +42,94 @@ describe('external fetch policy parser', () => {
     expect(policy.limits).toEqual(HARD_EXTERNAL_FETCH_LIMITS);
     expect(policy.hosts.get(FROZEN_HOST)).toEqual({
       contentTypes: new Set(['application/pdf']),
+      httpsPassthrough: false,
       limits: HARD_EXTERNAL_FETCH_LIMITS,
     });
+  });
+
+  test('accepts a passthrough-only exact host without widening typed fetch', () => {
+    const consoleHost = 'console-staging.optale.com';
+    const policy = parseExternalFetchPolicy(
+      frozenPolicy({
+        hosts: {
+          [FROZEN_HOST]: { contentTypes: ['application/pdf'] },
+          [consoleHost]: { httpsPassthrough: true },
+        },
+      }),
+    );
+
+    expect(policy.hosts.get(consoleHost)).toEqual({
+      contentTypes: new Set(),
+      httpsPassthrough: true,
+      httpsPassthroughTotalTimeoutMs: 300_000,
+      limits: HARD_EXTERNAL_FETCH_LIMITS,
+    });
+    expectCode(
+      () => validateExternalFetchUrl(`https://${consoleHost}/api/optale/mcp`, policy),
+      'HOST_NOT_ALLOWED',
+    );
+    expect(
+      validateHttpsPassthroughUrl(`https://${consoleHost}/api/optale/mcp`, policy).host,
+    ).toBe(consoleHost);
+  });
+
+  test('supports a larger CLI passthrough budget without widening typed PDF fetches', () => {
+    const policy = parseExternalFetchPolicy({
+      version: 1,
+      limits: {
+        ...HARD_EXTERNAL_FETCH_LIMITS,
+        maxFetchesPerGrant: 64,
+      },
+      hosts: {
+        [FROZEN_HOST]: {
+          contentTypes: ['application/pdf'],
+          limits: { maxFetchesPerGrant: 8 },
+        },
+        'console.optale.com': { httpsPassthrough: true },
+        'figent.optale.com': { httpsPassthrough: true },
+      },
+    });
+
+    expect(policy.hosts.get(FROZEN_HOST)?.limits.maxFetchesPerGrant).toBe(8);
+    expect(policy.hosts.get('console.optale.com')?.limits.maxFetchesPerGrant).toBe(64);
+    expect(policy.hosts.get('figent.optale.com')?.limits.maxFetchesPerGrant).toBe(64);
+  });
+
+  test('bounds the passthrough lifetime separately from PDF fetch limits', () => {
+    expect(() => parseExternalFetchPolicy(
+      frozenPolicy({
+        hosts: {
+          'console-staging.optale.com': {
+            httpsPassthrough: true,
+            httpsPassthroughTotalTimeoutMs: 300_001,
+          },
+        },
+      }),
+    )).toThrow();
+    const policy = parseExternalFetchPolicy(
+      frozenPolicy({
+        hosts: {
+          'console-staging.optale.com': {
+            httpsPassthrough: true,
+            httpsPassthroughTotalTimeoutMs: 25_000,
+          },
+        },
+      }),
+    );
+    expect(policy.hosts.get('console-staging.optale.com')?.httpsPassthroughTotalTimeoutMs)
+      .toBe(25_000);
+  });
+
+  test.each([
+    {},
+    { httpsPassthrough: false },
+    { httpsPassthrough: 'true' },
+  ])('rejects a host without one enabled egress scope %#', hostPolicy => {
+    expect(() =>
+      parseExternalFetchPolicy(
+        frozenPolicy({ hosts: { 'console-staging.optale.com': hostPolicy } }),
+      ),
+    ).toThrow();
   });
 
   test('accepts an empty host map as deny-all', () => {

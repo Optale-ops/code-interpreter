@@ -129,7 +129,9 @@ COPY api/src ./src
 COPY shared /shared
 COPY api/config ./config
 COPY api/helpers /usr/local/lib/sandbox-fetch
-RUN chmod 0444 /usr/local/lib/sandbox-fetch/sandbox_fetch.py \
+RUN chmod 0444 \
+      /usr/local/lib/sandbox-fetch/sandbox_fetch.py \
+      /usr/local/lib/sandbox-fetch/https_passthrough_preload.cjs \
     && ln -s /usr/local/lib/sandbox-fetch/sandbox_fetch.py /usr/local/bin/sandbox-fetch \
     && chmod 0555 /usr/local/bin/sandbox-fetch
 RUN mkdir -p /run/codeapi && touch /run/codeapi/egress-grant && chmod 0000 /run/codeapi/egress-grant

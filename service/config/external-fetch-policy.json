@@ -4,14 +4,40 @@
     "maxRedirects": 3,
     "maxResponseBytes": 26214400,
     "maxAggregateBytesPerGrant": 52428800,
-    "maxFetchesPerGrant": 8,
+    "maxFetchesPerGrant": 64,
     "connectTimeoutMs": 3000,
     "headersTimeoutMs": 5000,
     "totalTimeoutMs": 15000
   },
   "hosts": {
     "temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com": {
-      "contentTypes": ["application/pdf"]
+      "contentTypes": [
+        "application/pdf"
+      ],
+      "limits": {
+        "maxFetchesPerGrant": 8
+      }
+    },
+    "console-staging.optale.com": {
+      "httpsPassthrough": true,
+      "httpsPassthroughTotalTimeoutMs": 300000,
+      "limits": {
+        "maxFetchesPerGrant": 64
+      }
+    },
+    "console.optale.com": {
+      "httpsPassthrough": true,
+      "httpsPassthroughTotalTimeoutMs": 300000,
+      "limits": {
+        "maxFetchesPerGrant": 64
+      }
+    },
+    "figent.optale.com": {
+      "httpsPassthrough": true,
+      "httpsPassthroughTotalTimeoutMs": 300000,
+      "limits": {
+        "maxFetchesPerGrant": 64
+      }
     }
   }
 }

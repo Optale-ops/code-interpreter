@@ -9,7 +9,32 @@ const server = https.createServer(
     key: fs.readFileSync('/fixtures/key.pem'),
     cert: fs.readFileSync('/fixtures/cert.pem'),
   },
-  (request, response) => {
+  async (request, response) => {
+    if (request.url === '/passthrough') {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request)
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      const body = Buffer.concat(chunks).toString('utf8');
+      if (
+        request.method !== 'POST'
+        || request.headers.authorization !== 'Bearer presence-only-test-token'
+        || request.headers['x-client-marker'] !== 'kept'
+        || request.headers['accept-encoding'] !== 'identity'
+        || body !== JSON.stringify({ action: 'record_search' })
+      ) {
+        response.writeHead(500, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({ accepted: false }));
+        return;
+      }
+      response.writeHead(201, {
+        'Content-Type': 'application/json',
+        'X-Upstream-Marker': 'preserved',
+        'X-CodeAPI-Egress-Outcome': 'spoofed-origin-value',
+        'X-Request-ID': 'spoofed-origin-value',
+      });
+      response.end(JSON.stringify({ accepted: true }));
+      return;
+    }
     if (request.url === '/redirect') {
       response.writeHead(302, { Location: '/success' });
       response.end();

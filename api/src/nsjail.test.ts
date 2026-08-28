@@ -151,6 +151,11 @@ describe('NsJail args', () => {
       expect(hasArgPair(args, '-B', '/tmp/tcs.sock:/tmp/tcs.sock')).toBe(true);
       expect(hasArgPair(args, '-R', '/tmp/nsjail-grant-random:/run/codeapi/egress-grant')).toBe(true);
       expect(args.join('\n')).not.toContain('opaque-grant');
+      expect(hasArgPair(
+        args,
+        '-E',
+        'NODE_OPTIONS=--require=/usr/local/lib/sandbox-fetch/https_passthrough_preload.cjs',
+      )).toBe(true);
       expect(args).not.toContain('--disable_clone_newnet');
       expect(args.join('\n')).toContain('domain == AF_INET || domain == AF_INET6');
     } finally {
