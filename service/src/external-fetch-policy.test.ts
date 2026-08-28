@@ -85,14 +85,17 @@ describe('external fetch policy parser', () => {
           contentTypes: ['application/pdf'],
           limits: { maxFetchesPerGrant: 8 },
         },
-        'console.optale.com': { httpsPassthrough: true },
-        'figent.optale.com': { httpsPassthrough: true },
+        'console.optale.com': { httpsPassthrough: true, limits: { maxFetchesPerGrant: 64, maxResponseBytes: 2_097_152 } },
+        'figent.optale.com': { httpsPassthrough: true, limits: { maxFetchesPerGrant: 64, maxResponseBytes: 2_097_152 } },
       },
     });
 
     expect(policy.hosts.get(FROZEN_HOST)?.limits.maxFetchesPerGrant).toBe(8);
     expect(policy.hosts.get('console.optale.com')?.limits.maxFetchesPerGrant).toBe(64);
     expect(policy.hosts.get('figent.optale.com')?.limits.maxFetchesPerGrant).toBe(64);
+    expect(policy.hosts.get(FROZEN_HOST)?.limits.maxResponseBytes).toBe(HARD_EXTERNAL_FETCH_LIMITS.maxResponseBytes);
+    expect(policy.hosts.get('console.optale.com')?.limits.maxResponseBytes).toBe(2_097_152);
+    expect(policy.hosts.get('figent.optale.com')?.limits.maxResponseBytes).toBe(2_097_152);
   });
 
   test('bounds the passthrough lifetime separately from PDF fetch limits', () => {

@@ -22,21 +22,24 @@
       "httpsPassthrough": true,
       "httpsPassthroughTotalTimeoutMs": 300000,
       "limits": {
-        "maxFetchesPerGrant": 64
+        "maxFetchesPerGrant": 64,
+        "maxResponseBytes": 2097152
       }
     },
     "console.optale.com": {
       "httpsPassthrough": true,
       "httpsPassthroughTotalTimeoutMs": 300000,
       "limits": {
-        "maxFetchesPerGrant": 64
+        "maxFetchesPerGrant": 64,
+        "maxResponseBytes": 2097152
       }
     },
     "figent.optale.com": {
       "httpsPassthrough": true,
       "httpsPassthroughTotalTimeoutMs": 300000,
       "limits": {
-        "maxFetchesPerGrant": 64
+        "maxFetchesPerGrant": 64,
+        "maxResponseBytes": 2097152
       }
     }
   }
