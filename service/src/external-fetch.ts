@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
 import https from 'node:https';
 import type { RequestOptions } from 'node:https';
-import { once } from 'node:events';
 import type { Writable } from 'node:stream';
 import { ExternalFetchError } from './external-fetch-errors';
 import {
@@ -127,7 +126,7 @@ interface PinnedHop {
 
 async function requestPinnedHop(
   target: ValidatedExternalFetchUrl,
-  selected: ResolvedExternalAddress,
+  addresses: ResolvedExternalAddress[],
   deadlineAt: number,
 ): Promise<PinnedHop> {
   const result = Promise.withResolvers<IncomingMessage>();
@@ -135,7 +134,7 @@ async function requestPinnedHop(
   let settled = false;
   let connectTimer: NodeJS.Timeout | undefined;
   let headersTimer: NodeJS.Timeout | undefined;
-  const request = https.request(buildPinnedRequestOptions(target, selected));
+  const request = https.request(buildPinnedRequestOptions(target, addresses));
   const totalTimer = setTimeout(
     () => {
       timedOut = true;
@@ -148,7 +147,18 @@ async function requestPinnedHop(
     clearTimeout(connectTimer);
     clearTimeout(headersTimer);
   };
+  const handleError = (): void => {
+    clearPreResponseTimers();
+    if (!settled) {
+      settled = true;
+      clearTimeout(totalTimer);
+      result.reject(
+        new ExternalFetchError(timedOut ? 'FETCH_TIMEOUT' : 'FETCH_FAILED'),
+      );
+    }
+  };
   request.once('socket', socket => {
+    socket.on('error', handleError);
     connectTimer = setTimeout(() => {
       timedOut = true;
       request.destroy(new Error('external fetch connect timeout'));
@@ -166,15 +176,7 @@ async function requestPinnedHop(
     clearPreResponseTimers();
     result.resolve(response);
   });
-  request.once('error', () => {
-    clearPreResponseTimers();
-    if (!settled) {
-      clearTimeout(totalTimer);
-      result.reject(
-        new ExternalFetchError(timedOut ? 'FETCH_TIMEOUT' : 'FETCH_FAILED'),
-      );
-    }
-  });
+  request.on('error', handleError);
   request.end();
 
   const response = await result.promise;
@@ -235,7 +237,7 @@ export async function openExternalFetch(
     }
     const deadlineAt = startedAt + target.policy.limits.totalTimeoutMs;
     if (Date.now() >= deadlineAt) throw new ExternalFetchError('FETCH_TIMEOUT');
-    const hop = await requestPinnedHop(target, addresses[0], deadlineAt);
+    const hop = await requestPinnedHop(target, addresses, deadlineAt);
     const status = hop.response.statusCode ?? 0;
     if ([301, 302, 303, 307, 308].includes(status)) {
       let location: string | undefined;
@@ -342,7 +344,7 @@ function passthroughRequestHeaders(
 
 async function requestPinnedPassthrough(
   target: ValidatedExternalFetchUrl,
-  selected: ResolvedExternalAddress,
+  addresses: ResolvedExternalAddress[],
   args: Pick<OpenHttpsPassthroughArgs, 'method' | 'headers' | 'body'>,
 ): Promise<OpenHttpsPassthroughResponse> {
   const result = Promise.withResolvers<IncomingMessage>();
@@ -354,22 +356,9 @@ async function requestPinnedPassthrough(
     + (target.policy.httpsPassthroughTotalTimeoutMs
       ?? target.policy.limits.totalTimeoutMs);
   const request = https.request({
-    protocol: 'https:',
-    hostname: target.host,
-    servername: target.host,
-    port: 443,
+    ...buildPinnedRequestOptions(target, addresses),
     method: args.method,
-    path: `${target.url.pathname}${target.url.search}`,
     headers: passthroughRequestHeaders(args.headers, args.body.length),
-    agent: false,
-    ...(PROCESS_TRUSTED_CA ? { ca: PROCESS_TRUSTED_CA } : {}),
-    lookup: (_hostname, options, callback) => {
-      if (options.all) {
-        callback(null, [{ address: selected.address, family: selected.family }]);
-        return;
-      }
-      callback(null, selected.address, selected.family);
-    },
   });
   const totalTimer = setTimeout(() => {
     timedOut = true;
@@ -379,7 +368,16 @@ async function requestPinnedPassthrough(
     clearTimeout(connectTimer);
     clearTimeout(headersTimer);
   };
+  const handleError = (): void => {
+    clearPreResponseTimers();
+    if (!settled) {
+      settled = true;
+      clearTimeout(totalTimer);
+      result.reject(new ExternalFetchError(timedOut ? 'FETCH_TIMEOUT' : 'FETCH_FAILED'));
+    }
+  };
   request.once('socket', socket => {
+    socket.on('error', handleError);
     connectTimer = setTimeout(() => {
       timedOut = true;
       request.destroy(new Error('HTTPS passthrough connect timeout'));
@@ -397,13 +395,7 @@ async function requestPinnedPassthrough(
     clearPreResponseTimers();
     result.resolve(response);
   });
-  request.once('error', () => {
-    clearPreResponseTimers();
-    if (!settled) {
-      clearTimeout(totalTimer);
-      result.reject(new ExternalFetchError(timedOut ? 'FETCH_TIMEOUT' : 'FETCH_FAILED'));
-    }
-  });
+  request.on('error', handleError);
   request.end(args.body);
 
   const response = await result.promise;
@@ -425,9 +417,7 @@ export async function openHttpsPassthrough(
 ): Promise<OpenHttpsPassthroughResponse> {
   const target = validateHttpsPassthroughUrl(args.url, args.policy);
   const addresses = await resolveExternalFetchAddresses(target.host, args.resolver);
-  const selected = addresses[Math.max(0, (args.fetchCount ?? 1) - 1) % addresses.length];
-  if (!selected) throw new ExternalFetchError('FETCH_FAILED');
-  return requestPinnedPassthrough(target, selected, args);
+  return requestPinnedPassthrough(target, addresses, args);
 }
 
 export async function pipeHttpsPassthroughBody(
@@ -529,8 +519,11 @@ export async function pipeExternalFetchBody(
 }
 export function buildPinnedRequestOptions(
   target: ValidatedExternalFetchUrl,
-  selected: ResolvedExternalAddress,
+  addresses: ResolvedExternalAddress[],
 ): RequestOptions {
+  const pinnedAddresses = addresses.toSorted((left, right) => left.family - right.family);
+  const selected = pinnedAddresses[0];
+  if (selected === undefined) throw new ExternalFetchError('FETCH_FAILED');
   return {
     protocol: 'https:',
     hostname: target.host,
@@ -544,12 +537,11 @@ export function buildPinnedRequestOptions(
       'User-Agent': USER_AGENT,
     },
     agent: false,
+    autoSelectFamily: pinnedAddresses.length > 1,
     ...(PROCESS_TRUSTED_CA ? { ca: PROCESS_TRUSTED_CA } : {}),
-    lookup: (_hostname, options, callback) => {
-      if (options.all) {
-        callback(null, [
-          { address: selected.address, family: selected.family },
-        ]);
+    lookup: (_hostname, options, callback): void => {
+      if (options.all === true) {
+        callback(null, pinnedAddresses);
         return;
       }
       callback(null, selected.address, selected.family);
