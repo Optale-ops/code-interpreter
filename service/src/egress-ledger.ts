@@ -30,6 +30,7 @@ export interface EgressLedgerRecord {
   uploaded_bytes: number;
   fetch_count: number;
   fetched_bytes: number;
+  fetch_reservations: Record<string, number>;
   output_file_ids: string[];
 }
 
@@ -173,6 +174,7 @@ function recordFromGrant(grant: EgressGrantClaims): EgressLedgerRecord {
     tool_call_count: 0,
     fetch_count: 0,
     fetched_bytes: 0,
+    fetch_reservations: {},
     uploaded_bytes: 0,
     output_file_ids: [],
   };
@@ -208,6 +210,13 @@ export async function ensureEgressLedger(grant: EgressGrantClaims): Promise<void
 function normalizeRecord(record: EgressLedgerRecord): EgressLedgerRecord {
   if (!Number.isSafeInteger(record.fetch_count) || record.fetch_count < 0) record.fetch_count = 0;
   if (!Number.isSafeInteger(record.fetched_bytes) || record.fetched_bytes < 0) record.fetched_bytes = 0;
+  if (
+    !record.fetch_reservations
+    || typeof record.fetch_reservations !== 'object'
+    || Array.isArray(record.fetch_reservations)
+  ) {
+    record.fetch_reservations = {};
+  }
   return record;
 }
 
@@ -356,11 +365,20 @@ export async function consumeEgressFetchAttempt(args: {
 
 export async function reserveEgressFetchBytes(args: {
   grant: EgressGrantClaims;
+  reservationId: string;
   maxBytes: number;
   maxAggregateBytes: number;
 }): Promise<number> {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(args.reservationId)) {
+    throw new ExternalFetchError('FETCH_FAILED');
+  }
   let reservedBytes = 0;
   await mutateRecord(args.grant, record => {
+    const existing = record.fetch_reservations[args.reservationId];
+    if (existing !== undefined) {
+      reservedBytes = existing;
+      return;
+    }
     if (
       !Number.isSafeInteger(args.maxBytes)
       || args.maxBytes < 1
@@ -373,17 +391,20 @@ export async function reserveEgressFetchBytes(args: {
     if (remaining < 1) throw new ExternalFetchError('FETCH_BUDGET_EXCEEDED');
     reservedBytes = Math.min(args.maxBytes, remaining);
     record.fetched_bytes += reservedBytes;
+    record.fetch_reservations[args.reservationId] = reservedBytes;
   });
   return reservedBytes;
 }
 
 export async function commitEgressFetchBytes(args: {
   grant: EgressGrantClaims;
+  reservationId: string;
   reservedBytes: number;
   responseBytes: number;
 }): Promise<void> {
   if (
-    !Number.isSafeInteger(args.reservedBytes)
+    !/^[A-Za-z0-9_-]{1,128}$/.test(args.reservationId)
+    || !Number.isSafeInteger(args.reservedBytes)
     || args.reservedBytes < 0
     || !Number.isSafeInteger(args.responseBytes)
     || args.responseBytes < 0
@@ -392,12 +413,19 @@ export async function commitEgressFetchBytes(args: {
     throw new ExternalFetchError('FETCH_FAILED');
   }
   await mutateRecord(args.grant, record => {
-    record.fetched_bytes = Math.max(0, record.fetched_bytes - (args.reservedBytes - args.responseBytes));
+    const reservedBytes = record.fetch_reservations[args.reservationId];
+    if (reservedBytes === undefined) return;
+    if (reservedBytes !== args.reservedBytes) {
+      throw new ExternalFetchError('FETCH_FAILED');
+    }
+    record.fetched_bytes = Math.max(0, record.fetched_bytes - (reservedBytes - args.responseBytes));
+    delete record.fetch_reservations[args.reservationId];
   });
 }
 
 export async function releaseEgressFetchBytes(args: {
   grant: EgressGrantClaims;
+  reservationId: string;
   reservedBytes: number;
 }): Promise<void> {
   await commitEgressFetchBytes({ ...args, responseBytes: 0 });

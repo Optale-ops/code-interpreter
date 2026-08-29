@@ -24,8 +24,9 @@ Practical consequences:
 
 ## Development
 
-See the [README](README.md) for the architecture overview and
-`docker compose up --build` for a local stack. Component-level docs live in
+See the [README](README.md) for the architecture overview and follow its
+[Local Development](README.md#local-development) steps to generate the required
+gateway credentials before starting the stack. Component-level docs live in
 `api/`, `service/`, and `helm/codeapi/`.
 
 ## Reporting issues

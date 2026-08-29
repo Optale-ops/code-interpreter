@@ -184,7 +184,10 @@ async function main(): Promise<void> {
         }, 200);
         return;
       }
-      response.writeHead(200, { 'Content-Type': 'application/pdf' });
+      response.writeHead(200, {
+        'Content-Type': 'application/pdf',
+        'Content-Length': '11',
+      });
       response.end('pdf fixture');
     },
   );
@@ -209,6 +212,7 @@ async function main(): Promise<void> {
     assert.equal(Buffer.concat(chunks).toString('utf8'), 'pdf fixture');
     assert.equal(opened.redirects, 0);
     assert.equal(opened.contentType, 'application/pdf');
+    assert.equal(opened.declaredBytes, 11);
     assert.equal(requests[0]?.method, 'GET');
     /* `connection` is added by the HTTP client itself (agent: false, i.e. a
      * one-shot connection) and Bun and Node differ on whether it appears on

@@ -1,0 +1,4 @@
+# The AX41 gateway deployment used this filename. Keep no service definitions here.
+# Compose the canonical stack so recreating egress_gateway receives its full environment contract.
+include:
+  - docker-compose.yaml

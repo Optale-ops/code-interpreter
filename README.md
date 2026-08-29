@@ -88,8 +88,12 @@ public issue (see [CONTRIBUTING](CONTRIBUTING.md)).
 
 ## Local Development
 
+The gateway requires per-checkout authentication values. Generate them in the current shell, then use Docker Compose 2.20 or newer:
+
 ```bash
-docker-compose up --build
+export CODEAPI_EGRESS_GRANT_SECRET="$(openssl rand -hex 32)"
+export CODEAPI_INTERNAL_SERVICE_TOKEN="$(openssl rand -hex 32)"
+docker compose up --build
 ```
 
 The default KVM Compose path builds `sandbox-runner-baked`: the guest root and
@@ -101,10 +105,9 @@ descriptors in the launcher.
 Setting `KVM_ENABLED=false` still selects the directory-root target and the
 host package mount automatically for direct NsJail development.
 
-Local Docker Compose files set `CODEAPI_INTERNAL_SERVICE_TOKEN` to a shared
-development value by default. Production deployments must override it with a
-strong secret; when it is unset, file object routes and Tool Call Server
-session-management routes stay unauthenticated for backwards compatibility.
+The canonical Compose stack refuses missing gateway credentials and the two shipped
+legacy development values. Generate fresh values for every checkout. Hardened gateway
+startup performs the same check before it listens for requests.
 
 ## Health Checks
 

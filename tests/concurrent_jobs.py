@@ -15,6 +15,8 @@ the mac / KVM-disabled overlay short-circuits the microVM and would test a
 different code path:
 
     cd services/codeapi
+    CODEAPI_EGRESS_GRANT_SECRET="$(openssl rand -hex 32)" \
+    CODEAPI_INTERNAL_SERVICE_TOKEN="$(openssl rand -hex 32)" \
     SANDBOX_REQUIRE_EGRESS_MANIFEST=false docker compose up -d
     # confirm KVM is on: `docker exec sandbox-runner ls -l /dev/kvm`
     python3 tests/concurrent_jobs.py 16

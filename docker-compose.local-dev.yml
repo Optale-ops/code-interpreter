@@ -1,5 +1,5 @@
-# Local Development Stack - No authentication required
-# Usage: docker compose -f docker-compose.local-dev.yml up
+# Local Development Stack - No user authentication required
+# Usage: CODEAPI_INTERNAL_SERVICE_TOKEN="$(openssl rand -hex 32)" docker compose -f docker-compose.local-dev.yml up
 #
 # This uses the combined service (API + Workers) for local development simplicity.
 # For scalable production deployment, see docker-compose.scalable.yml
@@ -39,7 +39,7 @@ services:
       - SANDBOX_OUTPUT_MAX_SIZE=65536
       - SANDBOX_DISABLE_NETWORKING=true
       - FILE_SERVER_URL=http://file_server:3000
-      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:-localdev-internal-service-token}
+      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:?CODEAPI_INTERNAL_SERVICE_TOKEN is required}
       - SANDBOX_ALLOWED_LOCAL_NETWORK_PORT=3033
       - SANDBOX_FORWARD_TARGET=tool_call_server:3033
     healthcheck:
@@ -70,7 +70,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=localdev
-      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:-localdev-internal-service-token}
+      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:?CODEAPI_INTERNAL_SERVICE_TOKEN is required}
     depends_on:
       - minio
       - redis
@@ -91,7 +91,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=localdev
-      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:-localdev-internal-service-token}
+      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:?CODEAPI_INTERNAL_SERVICE_TOKEN is required}
     depends_on:
       - redis
 
@@ -110,7 +110,7 @@ services:
       - SANDBOX_ENDPOINT=http://sandbox:2000/api/v2
       - FILE_SERVER_URL=http://file_server:3000
       - TOOL_CALL_SERVER_URL=http://tool_call_server:3033
-      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:-localdev-internal-service-token}
+      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:?CODEAPI_INTERNAL_SERVICE_TOKEN is required}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=localdev

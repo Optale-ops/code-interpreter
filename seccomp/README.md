@@ -58,7 +58,7 @@ kubectl get configmap codeapi-seccomp-profile -o jsonpath='{.data.nsjail\.json}'
 minikube cp /tmp/nsjail.json /var/lib/kubelet/seccomp/profiles/nsjail.json
 
 # Enable seccomp in Helm values
-helm upgrade codeapi ./helm/codeapi --set workerSandbox.seccomp.enabled=true
+helm upgrade codeapi ./helm/codeapi --reuse-values --set workerSandbox.seccomp.enabled=true
 ```
 
 #### Production Deployment

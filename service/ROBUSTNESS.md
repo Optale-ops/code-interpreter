@@ -232,7 +232,9 @@ grep "Error during execution cleanup" logs/error-*.log
 ./test-programmatic.sh simple &
 
 # Restart service mid-execution
-docker-compose restart service
+export CODEAPI_EGRESS_GRANT_SECRET="$(openssl rand -hex 32)"
+export CODEAPI_INTERNAL_SERVICE_TOKEN="$(openssl rand -hex 32)"
+docker compose restart service
 
 # Should: Resume from Redis state or fail gracefully
 ```
@@ -250,7 +252,9 @@ redis-cli keys "exec_state:*"
 ### Test 3: Tool Call Server Unavailable
 ```bash
 # Stop Tool Call Server
-docker-compose stop tool_call_server
+export CODEAPI_EGRESS_GRANT_SECRET="$(openssl rand -hex 32)"
+export CODEAPI_INTERNAL_SERVICE_TOKEN="$(openssl rand -hex 32)"
+docker compose stop tool_call_server
 
 # Try execution (should fail gracefully)
 ./test-programmatic.sh simple

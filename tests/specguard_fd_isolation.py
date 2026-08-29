@@ -21,8 +21,9 @@ The test asserts BOTH:
 
 Usage (local docker compose stack):
 
-    SANDBOX_REQUIRE_EGRESS_MANIFEST=false CODEAPI_HARDENED_SANDBOX_MODE=false \\
-        docker compose up -d
+    CODEAPI_EGRESS_GRANT_SECRET="$(openssl rand -hex 32)" \
+        CODEAPI_INTERNAL_SERVICE_TOKEN="$(openssl rand -hex 32)" \
+        SANDBOX_REQUIRE_EGRESS_MANIFEST=false docker compose up -d
     python3 services/codeapi/tests/specguard_fd_isolation.py
 """
 from __future__ import annotations
