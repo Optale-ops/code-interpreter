@@ -2,7 +2,7 @@
 # Local development configuration for minikube/kind
 #
 # Usage:
-#   helm install codeapi ./helm/codeapi -f ./helm/codeapi/values-local.yaml
+#   Use helm/setup-local.sh, which generates the required gateway credentials.
 
 # =============================================================================
 # TEST-ONLY KEYPAIR — also hardcoded in unit tests, never use outside local dev

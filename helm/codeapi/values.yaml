@@ -1,9 +1,8 @@
 # values.yaml - Configuration for the Code Interpreter API Helm chart
 #
-# This file contains default values. Override them with:
-#   helm install codeapi ./helm/codeapi -f my-values.yaml
-# Or inline:
-#   helm install codeapi ./helm/codeapi --set workerSandbox.sandboxRunner.replicaCount=5
+# This file contains default values. Every install must override
+# internalServiceAuth.token and egressGrant.secret with generated values.
+# See README.md for paste-safe install and upgrade commands.
 
 # =============================================================================
 # GLOBAL SETTINGS

@@ -100,11 +100,10 @@ List available language runtimes.
 
 ## Development
 
-```bash
-# Build and run locally with docker-compose, from the codeapi root
-docker compose up --build
+Follow the root [Local Development](../README.md#local-development) steps to generate
+the required gateway credentials and start the stack. Then test execution:
 
-# Test execution
+```bash
 curl -s http://localhost:2000/api/v2/execute \
   -H 'Content-Type: application/json' \
   -d '{"language":"python","version":"3.14.4","files":[{"content":"print(42)"}]}' | jq

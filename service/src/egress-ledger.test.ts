@@ -247,27 +247,50 @@ describe('egress Redis ledger', () => {
 
     const first = await reserveEgressFetchBytes({
       grant: claims,
+      reservationId: 'reservation-first',
       maxBytes: 60,
       maxAggregateBytes: 100,
     });
     const second = await reserveEgressFetchBytes({
       grant: claims,
+      reservationId: 'reservation-second',
       maxBytes: 60,
       maxAggregateBytes: 100,
     });
     expect(first).toBe(60);
     expect(second).toBe(40);
     await expectFetchError(
-      () => reserveEgressFetchBytes({ grant: claims, maxBytes: 1, maxAggregateBytes: 100 }),
+      () => reserveEgressFetchBytes({
+        grant: claims,
+        reservationId: 'reservation-rejected',
+        maxBytes: 1,
+        maxAggregateBytes: 100,
+      }),
       'FETCH_BUDGET_EXCEEDED',
     );
 
-    await commitEgressFetchBytes({ grant: claims, reservedBytes: first, responseBytes: 10 });
-    await releaseEgressFetchBytes({ grant: claims, reservedBytes: second });
+    await commitEgressFetchBytes({
+      grant: claims,
+      reservationId: 'reservation-first',
+      reservedBytes: first,
+      responseBytes: 10,
+    });
+    await commitEgressFetchBytes({
+      grant: claims,
+      reservationId: 'reservation-first',
+      reservedBytes: first,
+      responseBytes: 10,
+    });
+    await releaseEgressFetchBytes({
+      grant: claims,
+      reservationId: 'reservation-second',
+      reservedBytes: second,
+    });
     expect((await assertEgressGrantActive(claims)).fetched_bytes).toBe(10);
 
     expect(await reserveEgressFetchBytes({
       grant: claims,
+      reservationId: 'reservation-third',
       maxBytes: 90,
       maxAggregateBytes: 100,
     })).toBe(90);

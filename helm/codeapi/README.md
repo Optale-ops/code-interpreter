@@ -31,10 +31,15 @@ openssl pkey -in manifest-signing.pem -pubout -out manifest-signing.pub.pem
 # base64-encoded DER values for the chart
 PRIVATE_KEY=$(openssl pkey -in manifest-signing.pem -outform DER | base64)
 PUBLIC_KEY=$(openssl pkey -in manifest-signing.pem -pubout -outform DER | base64)
+INTERNAL_SERVICE_TOKEN="$(openssl rand -hex 32)"
+EGRESS_GRANT_SECRET="$(openssl rand -hex 32)"
 
 helm install codeapi . \
   --set executionManifest.privateKey="$PRIVATE_KEY" \
-  --set executionManifest.publicKey="$PUBLIC_KEY"
+  --set executionManifest.publicKey="$PUBLIC_KEY" \
+  --set-string internalServiceAuth.token="$INTERNAL_SERVICE_TOKEN" \
+  --set-string egressGrant.secret="$EGRESS_GRANT_SECRET"
+unset INTERNAL_SERVICE_TOKEN EGRESS_GRANT_SECRET
 ```
 
 For production, prefer external secrets management (Vault, AWS Secrets
@@ -168,6 +173,7 @@ docker build -t codeapi-worker:latest -f service/Dockerfile.worker .
 docker build --target sandbox-runner -t codeapi-sandbox-runner:latest -f api/Dockerfile .
 docker build -t codeapi-file-server:latest -f service/Dockerfile --target production .
 docker build -t codeapi-tool-call-server:latest -f service/Dockerfile.tool-call-server --target production .
+docker build -t codeapi-egress-gateway:latest -f service/Dockerfile.egress-gateway .
 docker build -t codeapi-package-init:latest -f docker/Dockerfile.package-init .
 ```
 
@@ -178,11 +184,15 @@ cd helm/codeapi
 # Download chart dependencies (Redis)
 helm dependency update
 
-# Deploy! Override internalServiceAuth.token for any shared/prod cluster.
-# values-local.yaml supplies a TEST-ONLY executionManifest keypair; without it
-# (or your own keypair) the install fails fast — see "Execution manifest
-# signing keys" above.
-helm install codeapi . -f values-local.yaml
+# Generate per-install gateway credentials. The chart's shipped placeholders are
+# rejected before the gateway starts. values-local.yaml supplies a TEST-ONLY
+# executionManifest keypair; see "Execution manifest signing keys" above.
+INTERNAL_SERVICE_TOKEN="$(openssl rand -hex 32)"
+EGRESS_GRANT_SECRET="$(openssl rand -hex 32)"
+helm install codeapi . -f values-local.yaml \
+  --set-string internalServiceAuth.token="$INTERNAL_SERVICE_TOKEN" \
+  --set-string egressGrant.secret="$EGRESS_GRANT_SECRET"
+unset INTERNAL_SERVICE_TOKEN EGRESS_GRANT_SECRET
 ```
 
 ### 4. Language Packages (Local PVC Mode)
@@ -196,7 +206,7 @@ start.
 This happens automatically on `helm install`. To force a rebuild:
 
 ```bash
-helm upgrade codeapi . --set workerSandbox.packages.initJob.forceRebuild=true
+helm upgrade codeapi . --reuse-values --set workerSandbox.packages.initJob.forceRebuild=true
 ```
 
 To check init job status:
@@ -211,7 +221,7 @@ When deploying the `/pkgs` package-root migration, update sandbox env values to
 so generated Python/Node/Bun paths are recreated under `/pkgs`:
 
 ```bash
-helm upgrade codeapi . --set workerSandbox.packages.initJob.forceRebuild=true
+helm upgrade codeapi . --reuse-values --set workerSandbox.packages.initJob.forceRebuild=true
 ```
 
 To manually populate packages instead (e.g., from a pre-built directory):
@@ -245,7 +255,12 @@ curl http://localhost:3112/v1/health
 minikube start
 
 # Deploy local direct mode (package-init job runs automatically)
-helm install codeapi ./helm/codeapi -f ./helm/codeapi/values-local.yaml
+INTERNAL_SERVICE_TOKEN="$(openssl rand -hex 32)"
+EGRESS_GRANT_SECRET="$(openssl rand -hex 32)"
+helm install codeapi ./helm/codeapi -f ./helm/codeapi/values-local.yaml \
+  --set-string internalServiceAuth.token="$INTERNAL_SERVICE_TOKEN" \
+  --set-string egressGrant.secret="$EGRESS_GRANT_SECRET"
+unset INTERNAL_SERVICE_TOKEN EGRESS_GRANT_SECRET
 
 # Port forward
 kubectl port-forward svc/codeapi-api 3112:3112
@@ -271,20 +286,17 @@ kubectl describe pod <pod-name>
 kubectl scale deployment/codeapi-sandbox-runner --replicas=10
 
 # Or via Helm upgrade
-helm upgrade codeapi ./helm/codeapi -f ./helm/codeapi/values-local.yaml \
+helm upgrade codeapi ./helm/codeapi --reuse-values \
   --set workerSandbox.sandboxRunner.replicaCount=10
 ```
 
 ### Update After Code Changes
-```bash
-# Rebuild images (must be in minikube docker env)
-eval $(minikube docker-env)
-docker build -t codeapi-worker:latest -f service/Dockerfile.worker .
-docker build --target sandbox-runner -t codeapi-sandbox-runner:latest -f api/Dockerfile .
 
-# Restart deployments to pick up new images
-kubectl rollout restart deployment/codeapi-service-worker
-kubectl rollout restart deployment/codeapi-sandbox-runner
+Run the setup helper again. It rebuilds every local image, preserves the installed
+gateway credentials and Helm values, then restarts all CodeAPI deployments:
+
+```bash
+./helm/setup-local.sh minikube
 ```
 
 ### Teardown
@@ -396,7 +408,7 @@ kubectl get jobs -l app.kubernetes.io/component=package-init
 kubectl logs job/codeapi-package-init
 
 # Force a rebuild:
-helm upgrade codeapi . --set workerSandbox.packages.initJob.forceRebuild=true
+helm upgrade codeapi . --reuse-values --set workerSandbox.packages.initJob.forceRebuild=true
 
 # Then restart sandbox-runner pods
 kubectl rollout restart deployment/codeapi-sandbox-runner

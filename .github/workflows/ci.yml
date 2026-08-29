@@ -31,6 +31,9 @@ jobs:
       - name: Block-root package delivery
         run: tests/block_root_package_delivery.sh
 
+      - name: Hardened egress gateway compose contract
+        run: tests/egress_gateway_compose.sh
+
       - name: Sandbox-runner liveness checks
         run: tests/sandbox_runner_healthcheck.sh
 

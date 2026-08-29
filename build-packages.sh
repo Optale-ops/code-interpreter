@@ -540,7 +540,9 @@ main() {
     echo "Packages installed to: $PACKAGES_DIR"
     echo ""
     echo "Next steps:"
-    echo "  1. Run: docker compose up --build"
+    echo '  1. Run: export CODEAPI_EGRESS_GRANT_SECRET="$(openssl rand -hex 32)"'
+    echo '  2. Run: export CODEAPI_INTERNAL_SERVICE_TOKEN="$(openssl rand -hex 32)"'
+    echo "  3. Run: docker compose up --build"
     echo ""
 }
 

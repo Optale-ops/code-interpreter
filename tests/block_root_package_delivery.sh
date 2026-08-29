@@ -9,6 +9,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+HELM_GATEWAY_ARGS=(
+    --set-string internalServiceAuth.token=test-internal-service-token-at-least-32-bytes
+    --set-string egressGrant.secret=test-egress-grant-secret-at-least-32-bytes
+)
+
 for command in docker helm jq; do
     if ! command -v "$command" >/dev/null 2>&1; then
         echo "missing required command: $command" >&2
@@ -61,6 +66,8 @@ assert_compose_mode() {
     local output="$5"
 
     KVM_ENABLED="$kvm_enabled" \
+    CODEAPI_EGRESS_GRANT_SECRET='test-egress-grant-secret-at-least-32-bytes' \
+    CODEAPI_INTERNAL_SERVICE_TOKEN='test-internal-service-token-at-least-32-bytes' \
         docker compose -f "$compose_file" config --format json > "$output"
 
     local target
@@ -192,7 +199,16 @@ cp -R "$ROOT/helm/codeapi/templates" "$TMP_DIR/chart/templates"
 awk '/^dependencies:/{exit} {print}' \
     "$ROOT/helm/codeapi/Chart.yaml" > "$TMP_DIR/chart/Chart.yaml"
 
+if helm template codeapi "$TMP_DIR/chart" \
+    --set executionManifest.privateKey=test \
+    --set executionManifest.publicKey=test \
+    >/dev/null 2>&1; then
+    echo "Helm must reject missing or shipped gateway credentials" >&2
+    exit 1
+fi
+
 helm template codeapi "$TMP_DIR/chart" \
+    "${HELM_GATEWAY_ARGS[@]}" \
     --set executionManifest.privateKey=test \
     --set executionManifest.publicKey=test \
     > "$TMP_DIR/helm-image.yaml"
@@ -234,6 +250,7 @@ if [ "$(grep -Fc -- '- /usr/local/bin/sandbox-runner-healthcheck.sh' "$TMP_DIR/h
 fi
 
 helm template codeapi "$TMP_DIR/chart" \
+    "${HELM_GATEWAY_ARGS[@]}" \
     --set executionManifest.privateKey=test \
     --set executionManifest.publicKey=test \
     --set workerSandbox.sandboxImage.repository=registry.example/sandbox \
@@ -246,6 +263,7 @@ assert_contains \
     "image package mode must preserve the established sandboxImage override"
 
 helm template codeapi "$TMP_DIR/chart" \
+    "${HELM_GATEWAY_ARGS[@]}" \
     --set executionManifest.privateKey=test \
     --set executionManifest.publicKey=test \
     --set workerSandbox.packages.source=pvc \
@@ -269,6 +287,7 @@ assert_contains \
     "PVC compatibility mode must create package-init"
 
 helm template codeapi "$TMP_DIR/chart" \
+    "${HELM_GATEWAY_ARGS[@]}" \
     --set executionManifest.privateKey=test \
     --set executionManifest.publicKey=test \
     --set workerSandbox.sandboxRunner.fdLivenessLimit=0 \
@@ -280,6 +299,7 @@ assert_contains \
     "fdLivenessLimit=0 must reach the healthcheck instead of reverting to 40000"
 
 helm template codeapi "$TMP_DIR/chart" \
+    "${HELM_GATEWAY_ARGS[@]}" \
     --set executionManifest.privateKey=test \
     --set executionManifest.publicKey=test \
     --set workerSandbox.sandboxRunner.clockSkewLivenessLimitSeconds=0 \
@@ -292,6 +312,7 @@ assert_env_value \
     "clockSkewLivenessLimitSeconds=0 must reach the healthcheck instead of reverting to 10"
 
 if helm template codeapi "$TMP_DIR/chart" \
+    "${HELM_GATEWAY_ARGS[@]}" \
     --set executionManifest.privateKey=test \
     --set executionManifest.publicKey=test \
     --set workerSandbox.sandboxRunner.clockSkewLivenessLimitSeconds=25 \
@@ -306,6 +327,7 @@ assert_contains \
     "clock-skew limit validation failed for an unexpected reason"
 
 if helm template codeapi "$TMP_DIR/chart" \
+    "${HELM_GATEWAY_ARGS[@]}" \
     --set executionManifest.privateKey=test \
     --set executionManifest.publicKey=test \
     --set workerSandbox.sandboxRunner.clockSkewLivenessLimitSeconds=29.5 \
@@ -320,6 +342,7 @@ assert_contains \
     "fractional clock-skew limit validation failed for an unexpected reason"
 
 if helm template codeapi "$TMP_DIR/chart" \
+    "${HELM_GATEWAY_ARGS[@]}" \
     --set executionManifest.privateKey=test \
     --set executionManifest.publicKey=test \
     --set workerSandbox.sandboxRunner.clockSkewLivenessJitterSeconds=10 \
@@ -334,6 +357,7 @@ assert_contains \
     "clock-skew jitter validation failed for an unexpected reason"
 
 if helm template codeapi "$TMP_DIR/chart" \
+    "${HELM_GATEWAY_ARGS[@]}" \
     --set executionManifest.privateKey=test \
     --set executionManifest.publicKey=test \
     --set workerSandbox.sandboxRunner.clockSkewLivenessJitterSeconds=1.5 \
@@ -348,6 +372,7 @@ assert_contains \
     "fractional clock-skew jitter validation failed for an unexpected reason"
 
 if helm template codeapi "$TMP_DIR/chart" \
+    "${HELM_GATEWAY_ARGS[@]}" \
     --set executionManifest.privateKey=test \
     --set executionManifest.publicKey=test \
     --set workerSandbox.kvmEnabled=false \
@@ -362,6 +387,7 @@ assert_contains \
     "KVM validation failed for an unexpected reason"
 
 if helm template codeapi "$TMP_DIR/chart" \
+    "${HELM_GATEWAY_ARGS[@]}" \
     --set executionManifest.privateKey=test \
     --set executionManifest.publicKey=test \
     --set workerSandbox.packages.source=invalid \

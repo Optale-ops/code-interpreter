@@ -1,3 +1,4 @@
+# Set fresh CODEAPI_INTERNAL_SERVICE_TOKEN and CODEAPI_EGRESS_GRANT_SECRET values for every run.
 services:
   redis:
     image: redis:7-alpine
@@ -33,7 +34,7 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: '6379'
       REDIS_PASSWORD: localdev
-      CODEAPI_INTERNAL_SERVICE_TOKEN: localdev-internal-service-token
+      CODEAPI_INTERNAL_SERVICE_TOKEN: ${CODEAPI_INTERNAL_SERVICE_TOKEN:?CODEAPI_INTERNAL_SERVICE_TOKEN is required}
     depends_on:
       redis:
         condition: service_healthy
@@ -52,7 +53,7 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: '6379'
       REDIS_PASSWORD: localdev
-      CODEAPI_INTERNAL_SERVICE_TOKEN: localdev-internal-service-token
+      CODEAPI_INTERNAL_SERVICE_TOKEN: ${CODEAPI_INTERNAL_SERVICE_TOKEN:?CODEAPI_INTERNAL_SERVICE_TOKEN is required}
     depends_on:
       redis:
         condition: service_healthy
@@ -91,8 +92,8 @@ services:
       CODEAPI_HARDENED_SANDBOX_MODE: 'true'
       CODEAPI_EGRESS_LEDGER_REQUIRED: 'true'
       CODEAPI_EXTERNAL_FETCH_POLICY_FILE: /run/codeapi/external-fetch-policy.json
-      CODEAPI_EGRESS_GRANT_SECRET: localdev-egress-grant-secret-change-me-32b
-      CODEAPI_INTERNAL_SERVICE_TOKEN: localdev-internal-service-token
+      CODEAPI_EGRESS_GRANT_SECRET: ${CODEAPI_EGRESS_GRANT_SECRET:?CODEAPI_EGRESS_GRANT_SECRET is required}
+      CODEAPI_INTERNAL_SERVICE_TOKEN: ${CODEAPI_INTERNAL_SERVICE_TOKEN:?CODEAPI_INTERNAL_SERVICE_TOKEN is required}
       EGRESS_GATEWAY_PORT: '3190'
       EGRESS_GATEWAY_FILE_SERVER_URL: http://file-server:3000
       EGRESS_GATEWAY_TOOL_CALL_SERVER_URL: http://tool-call-server:3033
@@ -188,7 +189,7 @@ services:
       CODEAPI_EXECUTION_MANIFEST_PRIVATE_KEY: MC4CAQAwBQYDK2VwBCIEIBoxzSJjQ5jTVyuohHtlD+uDGqv/tZ6hQS2CmxuOg2Wn
       SANDBOX_ENDPOINT: http://sandbox-runner:2000/api/v2
       EGRESS_GATEWAY_URL: http://egress-gateway:3190
-      CODEAPI_INTERNAL_SERVICE_TOKEN: localdev-internal-service-token
+      CODEAPI_INTERNAL_SERVICE_TOKEN: ${CODEAPI_INTERNAL_SERVICE_TOKEN:?CODEAPI_INTERNAL_SERVICE_TOKEN is required}
       REDIS_HOST: redis
       REDIS_PORT: '6379'
       REDIS_PASSWORD: localdev
@@ -217,7 +218,7 @@ services:
       EGRESS_GATEWAY_URL: http://egress-gateway:3190
       FILE_SERVER_URL: http://file-server:3000
       TOOL_CALL_SERVER_URL: http://tool-call-server:3033
-      CODEAPI_INTERNAL_SERVICE_TOKEN: localdev-internal-service-token
+      CODEAPI_INTERNAL_SERVICE_TOKEN: ${CODEAPI_INTERNAL_SERVICE_TOKEN:?CODEAPI_INTERNAL_SERVICE_TOKEN is required}
       REDIS_HOST: redis
       REDIS_PORT: '6379'
       REDIS_PASSWORD: localdev
@@ -233,6 +234,8 @@ services:
     command: ['bun', 'run', '/tests/external-fetch-e2e.ts']
     environment:
       SERVICE_URL: http://api:3112
+      CODEAPI_EGRESS_GRANT_SECRET: ${CODEAPI_EGRESS_GRANT_SECRET:?CODEAPI_EGRESS_GRANT_SECRET is required}
+      CODEAPI_INTERNAL_SERVICE_TOKEN: ${CODEAPI_INTERNAL_SERVICE_TOKEN:?CODEAPI_INTERNAL_SERVICE_TOKEN is required}
     volumes:
       - ./tests/external-fetch-e2e.ts:/tests/external-fetch-e2e.ts:ro
     depends_on:

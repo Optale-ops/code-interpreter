@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import path from 'path';
 import { env } from './config';
 import {
   validateApiHardenedConfig,
@@ -85,6 +86,38 @@ function restore(): void {
 
 afterEach(restore);
 
+async function runFreshGateway(
+  overrides: Record<string, string>,
+): Promise<{ status: number; stderr: string }> {
+  const child = Bun.spawn(
+    [process.execPath, '-e', "await import('./src/egress-gateway.ts')"],
+    {
+      cwd: path.resolve(__dirname, '..'),
+      env: {
+        ...process.env,
+        CODEAPI_EGRESS_GATEWAY_AUTOSTART: 'false',
+        CODEAPI_HARDENED_SANDBOX_MODE: 'true',
+        CODEAPI_EGRESS_LEDGER_REQUIRED: 'true',
+        CODEAPI_EGRESS_GRANT_SECRET: 'strong-egress-grant-secret-32-bytes',
+        CODEAPI_INTERNAL_SERVICE_TOKEN: 'strong-internal-service-token-32-bytes',
+        EGRESS_GATEWAY_FILE_SERVER_URL: 'http://file-server:3000',
+        EGRESS_GATEWAY_TOOL_CALL_SERVER_URL: 'http://tool-call-server:3033',
+        CODEAPI_EXTERNAL_FETCH_POLICY_FILE: path.resolve(__dirname, '../config/external-fetch-policy.json'),
+        CODEAPI_SYNTHETIC_ACCESS_TOKEN: '',
+        REDIS_HOST: 'redis',
+        ...overrides,
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+  );
+  const [status, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stderr).text(),
+  ]);
+  return { status, stderr };
+}
+
 describe('execution profile policy', () => {
   test('accepts the AWS-free default profile', () => {
     env.EXECUTION_PROFILE = 'default';
@@ -158,7 +191,7 @@ describe('hardened CodeAPI startup config', () => {
     env.HARDENED_SANDBOX_MODE = true;
     env.EGRESS_GATEWAY_URL = 'http://egress-gateway:3190';
     env.EXECUTION_MANIFEST_PRIVATE_KEY = 'private-key';
-    process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = 'internal-token';
+    process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = 'strong-internal-service-token-32-bytes';
     process.env.CODEAPI_EGRESS_GRANT_SECRET = 'must-not-be-here';
 
     expect(() => validateApiHardenedConfig()).toThrow('CODEAPI_EGRESS_GRANT_SECRET');
@@ -170,7 +203,7 @@ describe('hardened CodeAPI startup config', () => {
     env.EGRESS_GATEWAY_URL = 'http://egress-gateway:3190';
     env.EXECUTION_MANIFEST_PRIVATE_KEY = 'private-key';
     process.env.CODEAPI_EXECUTION_MANIFEST_SECRET = 'legacy-secret';
-    process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = 'internal-token';
+    process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = 'strong-internal-service-token-32-bytes';
 
     expect(() => validateWorkerHardenedConfig()).toThrow('CODEAPI_EXECUTION_MANIFEST_SECRET');
   });
@@ -185,7 +218,7 @@ describe('hardened CodeAPI startup config', () => {
     env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL = 'http://tool-call-server:3033';
     env.EXTERNAL_FETCH_POLICY_FILE = '/run/codeapi/external-fetch-policy.json';
     process.env.REDIS_HOST = 'redis';
-    process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = 'internal-token';
+    process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = 'strong-internal-service-token-32-bytes';
     process.env.CODEAPI_SYNTHETIC_ACCESS_TOKEN = 'synthetic-token-must-stay-on-api';
 
     expect(() => validateWorkerHardenedConfig()).toThrow('CODEAPI_SYNTHETIC_ACCESS_TOKEN');
@@ -196,7 +229,7 @@ describe('hardened CodeAPI startup config', () => {
     env.HARDENED_SANDBOX_MODE = true;
     env.EGRESS_GATEWAY_URL = '';
     env.EXECUTION_MANIFEST_PRIVATE_KEY = 'private-key';
-    process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = 'internal-token';
+    process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = 'strong-internal-service-token-32-bytes';
 
     expect(() => validateApiHardenedConfig()).toThrow('EGRESS_GATEWAY_URL');
     expect(() => validateWorkerHardenedConfig()).toThrow('EGRESS_GATEWAY_URL');
@@ -206,16 +239,75 @@ describe('hardened CodeAPI startup config', () => {
     expect(() => validateApiHardenedConfig()).toThrow('CODEAPI_INTERNAL_SERVICE_TOKEN');
     expect(() => validateWorkerHardenedConfig()).toThrow('CODEAPI_INTERNAL_SERVICE_TOKEN');
 
-    process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = 'internal-token';
+    process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = 'strong-internal-service-token-32-bytes';
     env.EXECUTION_MANIFEST_PRIVATE_KEY = '';
     expect(() => validateWorkerHardenedConfig()).toThrow('CODEAPI_EXECUTION_MANIFEST_PRIVATE_KEY');
+  });
+
+  test('refuses a fresh hardened gateway process when the ledger is disabled', async () => {
+    const result = await runFreshGateway({ CODEAPI_EGRESS_LEDGER_REQUIRED: 'false' });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('CODEAPI_EGRESS_LEDGER_REQUIRED must be true');
+  });
+
+  test('refuses a weak internal token in a fresh hardened gateway process', async () => {
+    const result = await runFreshGateway({ CODEAPI_INTERNAL_SERVICE_TOKEN: 'x' });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('CODEAPI_INTERNAL_SERVICE_TOKEN must be at least 32 bytes');
+  });
+
+  test.each([
+    [
+      'grant secret',
+      { CODEAPI_EGRESS_GRANT_SECRET: 'localdev-egress-grant-secret-change-me-32b' },
+      'CODEAPI_EGRESS_GRANT_SECRET must not use a shipped development value',
+    ],
+    [
+      'internal token',
+      { CODEAPI_INTERNAL_SERVICE_TOKEN: 'localdev-internal-service-token' },
+      'CODEAPI_INTERNAL_SERVICE_TOKEN must not use a shipped development value',
+    ],
+    [
+      'padded grant secret',
+      { CODEAPI_EGRESS_GRANT_SECRET: ' localdev-egress-grant-secret-change-me-32b ' },
+      'CODEAPI_EGRESS_GRANT_SECRET must not use a shipped development value',
+    ],
+    [
+      'padded internal token',
+      { CODEAPI_INTERNAL_SERVICE_TOKEN: ' localdev-internal-service-token ' },
+      'CODEAPI_INTERNAL_SERVICE_TOKEN must not use a shipped development value',
+    ],
+    [
+      'Helm grant secret',
+      { CODEAPI_EGRESS_GRANT_SECRET: 'changeme-egress-grant-secret-32-bytes-minimum' },
+      'CODEAPI_EGRESS_GRANT_SECRET must not use a shipped development value',
+    ],
+    [
+      'Helm internal token',
+      { CODEAPI_INTERNAL_SERVICE_TOKEN: 'changeme-in-production' },
+      'CODEAPI_INTERNAL_SERVICE_TOKEN must not use a shipped development value',
+    ],
+    [
+      'padded Helm grant secret',
+      { CODEAPI_EGRESS_GRANT_SECRET: ' changeme-egress-grant-secret-32-bytes-minimum ' },
+      'CODEAPI_EGRESS_GRANT_SECRET must not use a shipped development value',
+    ],
+    [
+      'padded Helm internal token',
+      { CODEAPI_INTERNAL_SERVICE_TOKEN: ' changeme-in-production ' },
+      'CODEAPI_INTERNAL_SERVICE_TOKEN must not use a shipped development value',
+    ],
+  ])('refuses the shipped local %s in a fresh hardened gateway process', async (_label, overrides, message) => {
+    const result = await runFreshGateway(overrides);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(message);
   });
 
   test('requires strong gateway secret, Redis ledger, and upstream URLs', () => {
     env.HARDENED_SANDBOX_MODE = true;
     env.EGRESS_GRANT_SECRET = 'strong-egress-grant-secret-32-bytes';
     env.EGRESS_LEDGER_REQUIRED = true;
-    process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = 'internal-token';
+    process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = 'strong-internal-service-token-32-bytes';
     process.env.REDIS_HOST = 'redis';
 
     env.EGRESS_GATEWAY_FILE_SERVER_URL = '';
@@ -239,9 +331,6 @@ describe('hardened CodeAPI startup config', () => {
     env.EGRESS_GRANT_SECRET = 'short';
     expect(() => validateEgressGatewayHardenedConfig()).toThrow('at least 32 bytes');
 
-    env.EGRESS_GRANT_SECRET = 'strong-egress-grant-secret-32-bytes';
-    env.EGRESS_LEDGER_REQUIRED = false;
-    expect(() => validateEgressGatewayHardenedConfig()).toThrow('CODEAPI_EGRESS_LEDGER_REQUIRED');
   });
 });
 

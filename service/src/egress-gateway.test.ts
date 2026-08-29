@@ -1,15 +1,18 @@
 process.env.CODEAPI_EGRESS_GATEWAY_AUTOSTART = 'false';
 
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import crypto from 'crypto';
 import RedisMock from 'ioredis-mock';
-import type { Server } from 'http';
+import { request as httpRequest, type IncomingMessage, type Server } from 'http';
 import type { AddressInfo } from 'net';
 import path from 'path';
+import { Readable } from 'stream';
 import { env } from './config';
 import {
   assertEgressGrantActive,
+  commitEgressFetchBytes,
   createEgressLedger,
+  reserveEgressFetchBytes,
   setEgressLedgerRedisForTest,
 } from './egress-ledger';
 import {
@@ -23,8 +26,16 @@ import {
 } from './egress-grant';
 import { INTERNAL_SERVICE_TOKEN_HEADER } from './internal-service-auth';
 import type * as t from './types';
+import { validateExternalFetchResponseHeaders } from './external-fetch';
+import logger from './logger';
+import { validateExternalFetchUrl } from './external-fetch-policy';
 
-const { app } = await import('./egress-gateway');
+const {
+  app,
+  setEgressFetchCommitForTest,
+  setEgressFetchReserveForTest,
+  setExternalFetchOpenForTest,
+} = await import('./egress-gateway');
 
 const SECRET = 'test-egress-gateway-secret-32-bytes';
 const INTERNAL_TOKEN = 'internal-token';
@@ -180,6 +191,27 @@ async function gatewayFetch(path: string, init: RequestInit = {}): Promise<globa
   return originalFetch(`${baseUrl}${path}`, init);
 }
 
+async function gatewayPostWithTrailers(
+  path: string,
+  headers: Record<string, string>,
+  body: string,
+): Promise<{ status: number; body: string; trailers: Record<string, string | undefined> }> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(`${baseUrl}${path}`, { method: 'POST', headers }, response => {
+      const chunks: Buffer[] = [];
+      response.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      response.once('error', reject);
+      response.once('end', () => resolve({
+        status: response.statusCode ?? 0,
+        body: Buffer.concat(chunks).toString('utf8'),
+        trailers: response.trailers,
+      }));
+    });
+    request.once('error', reject);
+    request.end(body);
+  });
+}
+
 beforeAll(() => {
   server = app.listen(0);
   const address = server.address() as AddressInfo;
@@ -209,6 +241,12 @@ afterAll(() => {
   globalThis.fetch = originalFetch;
   server.close();
   delete process.env.CODEAPI_INTERNAL_SERVICE_TOKEN;
+});
+
+afterEach(() => {
+  setEgressFetchCommitForTest(null);
+  setEgressFetchReserveForTest(null);
+  setExternalFetchOpenForTest(null);
 });
 
 describe('egress gateway routes', () => {
@@ -1082,6 +1120,234 @@ describe('egress gateway routes', () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: 'Malformed PTC tool-call JSON' });
     expect(upstreamCalls).toHaveLength(0);
+  });
+
+  test('commits a non-zero reservation for an allowed response with Content-Length', async () => {
+    const redis = new RedisMock();
+    const grant = claims();
+    const body = Buffer.from('pdf fixture');
+    env.EGRESS_LEDGER_REQUIRED = true;
+    setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
+    await createEgressLedger(grant);
+    setExternalFetchOpenForTest(async ({ url, policy }) => {
+      const target = validateExternalFetchUrl(url, policy);
+      const headers = validateExternalFetchResponseHeaders({
+        'content-type': 'application/pdf',
+        'content-length': String(body.length),
+      }, target.policy);
+      return {
+        response: Readable.from([body]) as unknown as IncomingMessage,
+        target,
+        ...headers,
+        responseBytes: 0,
+        redirects: 0,
+        timedOut: () => false,
+        close: () => undefined,
+      };
+    });
+
+    try {
+      const response = await gatewayFetch('/external-fetch', {
+        method: 'POST',
+        headers: { ...grantHeader(grant), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: 'https://temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com/file.pdf',
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe(body.toString('utf8'));
+      const ledger = await assertEgressGrantActive(grant);
+      expect(ledger.fetch_count).toBe(1);
+      expect(ledger.fetched_bytes).toBe(body.length);
+      expect(ledger.fetched_bytes).toBeGreaterThan(0);
+    } finally {
+      await redis.disconnect();
+      setEgressLedgerRedisForTest(null);
+      env.EGRESS_LEDGER_REQUIRED = false;
+    }
+  });
+
+  test('closes the upstream response when byte reservation is rejected', async () => {
+    const redis = new RedisMock();
+    const grant = claims();
+    const body = Buffer.from('pdf fixture');
+    let closed = false;
+    env.EGRESS_LEDGER_REQUIRED = true;
+    setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
+    await createEgressLedger(grant);
+    await reserveEgressFetchBytes({
+      grant,
+      reservationId: 'reservation-capacity-fill',
+      maxBytes: 52_428_800,
+      maxAggregateBytes: 52_428_800,
+    });
+    setExternalFetchOpenForTest(async ({ url, policy }) => ({
+      response: Readable.from([body]) as unknown as IncomingMessage,
+      target: validateExternalFetchUrl(url, policy),
+      contentType: 'application/pdf',
+      declaredBytes: body.length,
+      responseBytes: 0,
+      redirects: 0,
+      timedOut: () => false,
+      close: () => { closed = true; },
+    }));
+
+    try {
+      const response = await gatewayFetch('/external-fetch', {
+        method: 'POST',
+        headers: { ...grantHeader(grant), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: 'https://temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com/file.pdf',
+        }),
+      });
+
+      expect(response.status).toBe(429);
+      expect(closed).toBe(true);
+    } finally {
+      await redis.disconnect();
+      setEgressLedgerRedisForTest(null);
+      env.EGRESS_LEDGER_REQUIRED = false;
+    }
+  });
+
+  test('keeps the full reservation charged when byte settlement fails', async () => {
+    const redis = new RedisMock();
+    const grant = claims();
+    const body = Buffer.from('pdf fixture');
+    env.EGRESS_LEDGER_REQUIRED = true;
+    setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
+    await createEgressLedger(grant);
+    setExternalFetchOpenForTest(async ({ url, policy }) => ({
+      response: Readable.from([body]) as unknown as IncomingMessage,
+      target: validateExternalFetchUrl(url, policy),
+      contentType: 'application/pdf',
+      responseBytes: 0,
+      redirects: 0,
+      timedOut: () => false,
+      close: () => undefined,
+    }));
+    setEgressFetchCommitForTest(async () => {
+      throw new Error('injected settlement failure');
+    });
+
+    try {
+      const response = await gatewayFetch('/external-fetch', {
+        method: 'POST',
+        headers: { ...grantHeader(grant), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: 'https://temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com/file.pdf',
+        }),
+      });
+      await response.text();
+
+      const ledger = await assertEgressGrantActive(grant);
+      expect(ledger.fetched_bytes).toBe(26_214_400);
+    } finally {
+      await redis.disconnect();
+      setEgressLedgerRedisForTest(null);
+      env.EGRESS_LEDGER_REQUIRED = false;
+    }
+  });
+
+  test('settles idempotently when Redis applies commit before losing its reply', async () => {
+    const redis = new RedisMock();
+    const grant = claims();
+    const body = Buffer.from('pdf fixture');
+    env.EGRESS_LEDGER_REQUIRED = true;
+    setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
+    await createEgressLedger(grant);
+    setExternalFetchOpenForTest(async ({ url, policy }) => ({
+      response: Readable.from([body]) as unknown as IncomingMessage,
+      target: validateExternalFetchUrl(url, policy),
+      contentType: 'application/pdf',
+      responseBytes: 0,
+      redirects: 0,
+      timedOut: () => false,
+      close: () => undefined,
+    }));
+    let commitAttempts = 0;
+    const completionOutcomes: unknown[] = [];
+    const originalLoggerInfo = logger.info;
+    logger.info = ((message: string, fields?: Record<string, unknown>) => {
+      if (message === 'Egress gateway request completed' && fields?.route === 'external-fetch') {
+        completionOutcomes.push(fields.outcome);
+      }
+    }) as typeof logger.info;
+    setEgressFetchCommitForTest(async args => {
+      commitAttempts += 1;
+      await commitEgressFetchBytes(args);
+      if (commitAttempts === 1) throw new Error('injected lost Redis EXEC reply');
+    });
+
+    try {
+      const requestBody = JSON.stringify({
+        url: 'https://temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com/file.pdf',
+      });
+      const response = await gatewayPostWithTrailers('/external-fetch', {
+        ...grantHeader(grant),
+        'Content-Type': 'application/json',
+        'Content-Length': String(Buffer.byteLength(requestBody)),
+      }, requestBody);
+
+      expect(response.status).toBe(200);
+      expect(response.body).toBe(body.toString('utf8'));
+      expect(commitAttempts).toBe(2);
+      expect(completionOutcomes).toContain('success');
+      const ledger = await assertEgressGrantActive(grant);
+      expect(ledger.fetched_bytes).toBe(body.length);
+    } finally {
+      logger.info = originalLoggerInfo;
+      await redis.disconnect();
+      setEgressLedgerRedisForTest(null);
+      env.EGRESS_LEDGER_REQUIRED = false;
+    }
+  });
+
+  test('retries an idempotent reservation after Redis applies it but loses the reply', async () => {
+    const redis = new RedisMock();
+    const grant = claims();
+    const body = Buffer.from('pdf fixture');
+    let reserveAttempts = 0;
+    env.EGRESS_LEDGER_REQUIRED = true;
+    setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
+    await createEgressLedger(grant);
+    setExternalFetchOpenForTest(async ({ url, policy }) => ({
+      response: Readable.from([body]) as unknown as IncomingMessage,
+      target: validateExternalFetchUrl(url, policy),
+      contentType: 'application/pdf',
+      declaredBytes: body.length,
+      responseBytes: 0,
+      redirects: 0,
+      timedOut: () => false,
+      close: () => undefined,
+    }));
+    setEgressFetchReserveForTest(async args => {
+      reserveAttempts += 1;
+      const reserved = await reserveEgressFetchBytes(args);
+      if (reserveAttempts === 1) throw new Error('injected lost Redis EXEC reply');
+      return reserved;
+    });
+
+    try {
+      const response = await gatewayFetch('/external-fetch', {
+        method: 'POST',
+        headers: { ...grantHeader(grant), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: 'https://temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com/file.pdf',
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe(body.toString('utf8'));
+      expect(reserveAttempts).toBe(2);
+      const ledger = await assertEgressGrantActive(grant);
+      expect(ledger.fetched_bytes).toBe(body.length);
+      expect(ledger.fetch_reservations).toEqual({});
+    } finally {
+      await redis.disconnect();
+      setEgressLedgerRedisForTest(null);
+      env.EGRESS_LEDGER_REQUIRED = false;
+    }
   });
 
   test('keeps external-fetch opaque without a non-empty grant', async () => {

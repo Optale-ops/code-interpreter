@@ -35,6 +35,16 @@ function rejectValue(name: string, value: string | undefined): void {
   }
 }
 
+function rejectKnownValue(
+  name: string,
+  value: string | undefined,
+  rejected: readonly string[],
+): void {
+  if (rejected.includes(value?.trim() ?? '')) {
+    throw new SecureStartupConfigError(`${name} must not use a shipped development value`);
+  }
+}
+
 function requireSafeWholeNumber(name: string, value: number, min: number): void {
   if (!Number.isSafeInteger(value) || value < min) {
     throw new SecureStartupConfigError(
@@ -207,7 +217,23 @@ export function validateEgressGatewayHardenedConfig(): void {
   if (!env.HARDENED_SANDBOX_MODE) return;
   rejectValue('CODEAPI_SYNTHETIC_ACCESS_TOKEN', process.env.CODEAPI_SYNTHETIC_ACCESS_TOKEN);
   requireStrongSecret('CODEAPI_EGRESS_GRANT_SECRET', env.EGRESS_GRANT_SECRET);
-  requireValue(INTERNAL_SERVICE_TOKEN_ENV, process.env[INTERNAL_SERVICE_TOKEN_ENV]);
+  rejectKnownValue(
+    'CODEAPI_EGRESS_GRANT_SECRET',
+    env.EGRESS_GRANT_SECRET,
+    [
+      'localdev-egress-grant-secret-change-me-32b',
+      'changeme-egress-grant-secret-32-bytes-minimum',
+    ],
+  );
+  rejectKnownValue(
+    INTERNAL_SERVICE_TOKEN_ENV,
+    process.env[INTERNAL_SERVICE_TOKEN_ENV],
+    [
+      'localdev-internal-service-token',
+      'changeme-in-production',
+    ],
+  );
+  requireStrongSecret(INTERNAL_SERVICE_TOKEN_ENV, process.env[INTERNAL_SERVICE_TOKEN_ENV]);
   requireValue('EGRESS_GATEWAY_FILE_SERVER_URL', env.EGRESS_GATEWAY_FILE_SERVER_URL);
   requireValue('EGRESS_GATEWAY_TOOL_CALL_SERVER_URL', env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL);
   requireValue('CODEAPI_EXTERNAL_FETCH_POLICY_FILE', env.EXTERNAL_FETCH_POLICY_FILE);

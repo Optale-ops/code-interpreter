@@ -62,8 +62,15 @@ async function execute(
 }
 
 const GATEWAY_URL = 'http://egress-gateway:3190';
-const INTERNAL_TOKEN = 'localdev-internal-service-token';
-const GRANT_SECRET = 'localdev-egress-grant-secret-change-me-32b';
+
+function requiredEnv(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`${name} is required`);
+  return value;
+}
+
+const INTERNAL_TOKEN = requiredEnv('CODEAPI_INTERNAL_SERVICE_TOKEN');
+const GRANT_SECRET = requiredEnv('CODEAPI_EGRESS_GRANT_SECRET');
 
 function grantClaims(execId: string, exp: number): Record<string, unknown> {
   const now = Math.floor(Date.now() / 1000);

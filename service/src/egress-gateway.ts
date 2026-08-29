@@ -58,6 +58,28 @@ validateEgressGatewayHardenedConfig();
 app.use(traceHttpRequest('codeapi.egress_gateway.request'));
 app.use(httpMetricsMiddleware);
 
+let egressFetchCommit = commitEgressFetchBytes;
+let egressFetchReserve = reserveEgressFetchBytes;
+let externalFetchOpen = openExternalFetch;
+
+export function setEgressFetchCommitForTest(
+  commit: typeof commitEgressFetchBytes | null,
+): void {
+  egressFetchCommit = commit ?? commitEgressFetchBytes;
+}
+
+export function setEgressFetchReserveForTest(
+  reserve: typeof reserveEgressFetchBytes | null,
+): void {
+  egressFetchReserve = reserve ?? reserveEgressFetchBytes;
+}
+
+export function setExternalFetchOpenForTest(
+  open: typeof openExternalFetch | null,
+): void {
+  externalFetchOpen = open ?? openExternalFetch;
+}
+
 const SUPPORTED_OUTPUT_EXTENSIONS = new Set([
   '.c', '.cs', '.cpp', '.go', '.java', '.js', '.kt', '.kts', '.lua',
   '.php', '.pl', '.ps1', '.py', '.r', '.rb', '.rs', '.scala', '.sh',
@@ -871,6 +893,8 @@ app.post('/external-fetch', async (req, res) => {
 
   let grant: EgressGrantClaims | undefined;
   let reservedBytes = 0;
+  let bodyCompleted = false;
+  let reservationId: string | undefined;
   let opened: OpenExternalFetchResponse | undefined;
   try {
     let url: string;
@@ -898,19 +922,27 @@ app.post('/external-fetch', async (req, res) => {
     fields.queryPresent = initial.queryPresent;
     res.locals.egressAuditFields = fields;
 
-    opened = await openExternalFetch({ url, policy, fetchCount: ledger.fetch_count });
+    opened = await externalFetchOpen({ url, policy, fetchCount: ledger.fetch_count });
     fields.destinationHost = opened.target.host;
     fields.pathHash = opened.target.pathHash;
     fields.queryPresent = opened.target.queryPresent;
     fields.redirectCount = opened.redirects;
     fields.contentType = opened.contentType;
-    reservedBytes = await reserveEgressFetchBytes({
+    reservationId = nanoid();
+    const reservation = {
       grant,
+      reservationId,
       maxBytes: opened.declaredBytes && opened.declaredBytes > 0
         ? opened.declaredBytes
         : opened.target.policy.limits.maxResponseBytes,
       maxAggregateBytes: opened.target.policy.limits.maxAggregateBytesPerGrant,
-    });
+    };
+    try {
+      reservedBytes = await egressFetchReserve(reservation);
+    } catch (error) {
+      if (error instanceof ExternalFetchError || error instanceof EgressGrantError) throw error;
+      reservedBytes = await egressFetchReserve(reservation);
+    }
     if (opened.declaredBytes !== undefined && opened.declaredBytes > reservedBytes) {
       opened.close();
       throw new ExternalFetchError('FETCH_BUDGET_EXCEEDED');
@@ -923,8 +955,10 @@ app.post('/external-fetch', async (req, res) => {
     res.setHeader('Trailer', 'X-CodeAPI-Egress-Outcome');
     res.setHeader('Transfer-Encoding', 'chunked');
     await pipeExternalFetchBody(opened, res, reservedBytes);
-    await commitEgressFetchBytes({
+    bodyCompleted = true;
+    await egressFetchCommit({
       grant,
+      reservationId,
       reservedBytes,
       responseBytes: Math.min(opened.responseBytes, reservedBytes),
     });
@@ -935,13 +969,21 @@ app.post('/external-fetch', async (req, res) => {
     res.end();
     return res;
   } catch (error) {
-    if (grant && reservedBytes > 0) {
+    let settlementRecovered = false;
+    if (grant && reservationId && reservedBytes > 0) {
       const responseBytes = Math.min(opened?.responseBytes ?? 0, reservedBytes);
       try {
-        await commitEgressFetchBytes({ grant, reservedBytes, responseBytes });
+        await egressFetchCommit({
+          grant,
+          reservationId,
+          reservedBytes,
+          responseBytes,
+        });
         reservedBytes = 0;
+        settlementRecovered = bodyCompleted;
       } catch {
-        logger.error('Failed to settle external fetch byte reservation', {
+        reservedBytes = 0;
+        logger.error('Failed to settle external fetch byte reservation; reservation remains charged', {
           grantHash: hashLabel(grant.grant_id),
           outcome: 'ledger_commit_failed',
         });
@@ -949,6 +991,14 @@ app.post('/external-fetch', async (req, res) => {
       const fields = auditFields(res);
       fields.responseBytes = responseBytes;
       res.locals.egressAuditFields = fields;
+    }
+    if (settlementRecovered && res.headersSent) {
+      const fields = auditFields(res);
+      fields.outcome = 'success';
+      res.locals.egressAuditFields = fields;
+      res.addTrailers({ 'X-CodeAPI-Egress-Outcome': 'OK' });
+      res.end();
+      return res;
     }
     if (res.headersSent) {
       const code = error instanceof ExternalFetchError ? error.code : 'FETCH_FAILED';
@@ -961,9 +1011,10 @@ app.post('/external-fetch', async (req, res) => {
     }
     return sendEgressError(req, res, error);
   } finally {
-    if (grant && reservedBytes > 0) {
+    opened?.close();
+    if (grant && reservationId && reservedBytes > 0) {
       try {
-        await releaseEgressFetchBytes({ grant, reservedBytes });
+        await releaseEgressFetchBytes({ grant, reservationId, reservedBytes });
       } catch {
         logger.error('Failed to release external fetch byte reservation', {
           grantHash: hashLabel(grant.grant_id),

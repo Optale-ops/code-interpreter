@@ -6,7 +6,8 @@
 #
 # Requires: /dev/kvm accessible in Docker (WSL2 with nested virt, or bare metal Linux)
 #
-# Usage: docker compose -f docker-compose.scalable.yml up --scale worker-sandbox=3 --scale api=2
+# Usage: set CODEAPI_INTERNAL_SERVICE_TOKEN as documented below, then run:
+# docker compose -f docker-compose.scalable.yml up --scale worker-sandbox=3 --scale api=2
 #
 # Architecture:
 # ┌─────────────────────────────────────────────────────────────────────────┐
@@ -92,7 +93,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=localdev
-      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:-localdev-internal-service-token}
+      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:?CODEAPI_INTERNAL_SERVICE_TOKEN is required}
     depends_on:
       redis:
         condition: service_healthy
@@ -116,7 +117,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=localdev
-      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:-localdev-internal-service-token}
+      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:?CODEAPI_INTERNAL_SERVICE_TOKEN is required}
     depends_on:
       redis:
         condition: service_healthy
@@ -138,7 +139,7 @@ services:
       - LOCAL_MODE=${LOCAL_MODE:-true}
       - FILE_SERVER_URL=http://file_server:3000
       - TOOL_CALL_SERVER_URL=http://tool_call_server:3033
-      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:-localdev-internal-service-token}
+      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:?CODEAPI_INTERNAL_SERVICE_TOKEN is required}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=localdev
@@ -180,7 +181,7 @@ services:
       - SANDBOX_ENDPOINT=http://localhost:2000/api/v2
       - FILE_SERVER_URL=http://file_server:3000
       - TOOL_CALL_SERVER_URL=http://tool_call_server:3033
-      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:-localdev-internal-service-token}
+      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:?CODEAPI_INTERNAL_SERVICE_TOKEN is required}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=localdev
@@ -232,6 +233,9 @@ volumes:
 # =============================================================================
 # USAGE NOTES
 # =============================================================================
+#
+# Generate the shared internal credential once in the current shell:
+#   export CODEAPI_INTERNAL_SERVICE_TOKEN="$(openssl rand -hex 32)"
 #
 # Start with default replicas:
 #   docker compose -f docker-compose.scalable.yml up

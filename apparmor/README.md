@@ -27,6 +27,9 @@ Compose file (not shipped with this repo) that removes `privileged: true` from
 the sandbox-runner service and grants the explicit capability set instead:
 
 ```bash
+# Generate the shared internal credential once in this shell
+export CODEAPI_INTERNAL_SERVICE_TOKEN="$(openssl rand -hex 32)"
+
 # Baseline (privileged: true)
 docker compose -f docker-compose.local-dev.yml up -d
 ./test-sandbox.sh
