@@ -23,6 +23,9 @@ async function main(): Promise<void> {
             calls.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
             res.writeHead(200, {
                 'Content-Type': 'application/octet-stream',
+                'X-CodeAPI-Network-Policy-Digest': 'P'.repeat(43),
+                'X-CodeAPI-Egress-Requests': '7',
+                'X-CodeAPI-Egress-Bytes': '2048',
                 Trailer: 'X-CodeAPI-Egress-Outcome',
                 'Transfer-Encoding': 'chunked',
             });
@@ -86,6 +89,11 @@ async function main(): Promise<void> {
         );
     });
     assert.match(response, /package-bytes/);
+    assert.deepEqual(proxy.summary(), {
+        requestCount: 7,
+        responseBytes: 2048,
+        policyDigest: 'P'.repeat(43),
+    });
     assert.deepEqual(calls, [
         {
             url: 'https://registry.npmjs.org/pkg',
