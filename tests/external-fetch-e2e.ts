@@ -592,16 +592,28 @@ print("W733_DNS_DENIES_OK")
 const fetchBudgetDenies = `
 import os
 from sandbox_fetch import sandbox_fetch
+host_denial_output = "/mnt/data/fetch-budget-host-denial.pdf"
+try:
+    sandbox_fetch("https://unlisted.test/file.pdf", host_denial_output)
+    raise AssertionError("unlisted host unexpectedly succeeded")
+except Exception as error:
+    assert str(error) == "HOST_NOT_ALLOWED", str(error)
+assert not os.path.exists(host_denial_output)
+
 for index in range(9):
     output = f"/mnt/data/fetch-budget-{index}.pdf"
+    if index < 8:
+        sandbox_fetch("https://allowed.test/success", output)
+        assert os.path.exists(output)
+        os.unlink(output)
+        continue
     try:
-        sandbox_fetch("https://unlisted.test/file.pdf", output)
-        raise AssertionError("unlisted host unexpectedly succeeded")
+        sandbox_fetch("https://allowed.test/success", output)
+        raise AssertionError("ninth far-side request unexpectedly succeeded")
     except Exception as error:
-        expected = "FETCH_BUDGET_EXCEEDED" if index == 8 else "HOST_NOT_ALLOWED"
-        assert str(error) == expected, (index, str(error), expected)
+        assert str(error) == "FETCH_BUDGET_EXCEEDED", (index, str(error))
     assert not os.path.exists(output)
-print("W733_FETCH_BUDGET_OK")
+print("W733_HOST_DENIAL_AND_FETCH_BUDGET_OK")
 `;
 
 const aggregateBudgetDenies = `
@@ -669,7 +681,11 @@ if (process.env.E2E_MODE !== 'packages') {
         await execute(surface, responseDenies, 'W733_RESPONSE_DENIES_OK');
         await execute(surface, authorityDenies, 'W733_AUTHORITY_DENIES_OK');
         await execute(surface, dnsDenies, 'W733_DNS_DENIES_OK');
-        await execute(surface, fetchBudgetDenies, 'W733_FETCH_BUDGET_OK');
+        await execute(
+            surface,
+            fetchBudgetDenies,
+            'W733_HOST_DENIAL_AND_FETCH_BUDGET_OK',
+        );
         await execute(
             surface,
             aggregateBudgetDenies,
