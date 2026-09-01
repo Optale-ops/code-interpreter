@@ -55,6 +55,7 @@ export interface ResolvedExternalAddress {
 }
 
 export const HARD_HTTPS_PASSTHROUGH_TOTAL_TIMEOUT_MS = 300_000;
+export const HARD_MAX_EXTERNAL_FETCH_HOSTS = 256;
 
 export const HARD_EXTERNAL_FETCH_LIMITS: Readonly<ExternalFetchLimits> =
   Object.freeze({
@@ -282,6 +283,11 @@ export function parseExternalFetchPolicy(value: unknown): ExternalFetchPolicy {
     true,
   );
   const rawHosts = objectValue(raw.hosts, 'External fetch policy hosts');
+  if (Object.keys(rawHosts).length > HARD_MAX_EXTERNAL_FETCH_HOSTS) {
+    throw new Error(
+      `External fetch policy supports at most ${HARD_MAX_EXTERNAL_FETCH_HOSTS} exact hosts`,
+    );
+  }
   const hosts = new Map<string, ExternalFetchHostPolicy>();
 
   for (const [host, hostValue] of Object.entries(rawHosts)) {
@@ -522,6 +528,11 @@ function canonicalJson(value: unknown): string {
 export function serializeExternalFetchPolicy(
     policy: ExternalFetchPolicy,
 ): ExternalFetchPolicySnapshot {
+    if (policy.hosts.size > HARD_MAX_EXTERNAL_FETCH_HOSTS) {
+        throw new Error(
+            `External fetch policy supports at most ${HARD_MAX_EXTERNAL_FETCH_HOSTS} exact hosts`,
+        );
+    }
     const hosts: Record<string, ExternalFetchPolicySnapshotHost> = {};
     for (const host of Array.from(policy.hosts.keys()).sort()) {
         const entry = policy.hosts.get(host);

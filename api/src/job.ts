@@ -683,11 +683,32 @@ interface PackageInvocationRecord {
     outcome: 'success' | 'failed';
 }
 
-function boundedRequestedSpec(value: unknown): string | undefined {
+const PACKAGE_ARCHIVE_SUFFIX = /(?:\.tar\.gz|\.tgz|\.whl|\.zip)$/i;
+const NPM_REGISTRY_SPEC = /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)(?:@[A-Za-z0-9*^~<>=|., -]+)?$/i;
+const PIP_REGISTRY_SPEC = /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9._,-]+\])?(?:\s*(?:===|==|~=|!=|<=|>=|<|>)\s*[A-Za-z0-9*+!._,-]+(?:\s*,\s*(?:===|==|~=|!=|<=|>=|<|>)\s*[A-Za-z0-9*+!._,-]+)*)?$/;
+
+function sanitizePackageRequestedSpec(
+    manager: 'pip' | 'npm' | 'bun',
+    value: unknown,
+): string | undefined {
     if (typeof value !== 'string' || value.length < 1 || value.length > 256)
         return undefined;
-    if (/[\u0000-\u001f\u007f]/.test(value)) return undefined;
-    return value;
+    if (
+        value !== value.trim() ||
+        /[\u0000-\u001f\u007f\\]/.test(value) ||
+        /:\/\//.test(value) ||
+        /^[/.]/.test(value) ||
+        PACKAGE_ARCHIVE_SUFFIX.test(value)
+    )
+        return undefined;
+    if (manager === 'pip') {
+        if (value.includes('@') || /^(?:git|hg|svn|bzr|file):/i.test(value))
+            return undefined;
+        return PIP_REGISTRY_SPEC.test(value) ? value : undefined;
+    }
+    if (/^(?:git|hg|svn|bzr|file|github|gitlab|bitbucket):/i.test(value))
+        return undefined;
+    return NPM_REGISTRY_SPEC.test(value) ? value : undefined;
 }
 
 async function readPackageInvocations(
@@ -728,7 +749,7 @@ async function readPackageInvocations(
             )
                 continue;
             const requestedSpecs = value.requestedSpecs
-                .map(boundedRequestedSpec)
+                .map(spec => sanitizePackageRequestedSpec(value.manager, spec))
                 .filter((spec): spec is string => spec !== undefined)
                 .slice(0, 32);
             if (requestedSpecs.length === 0) continue;
