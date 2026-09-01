@@ -206,7 +206,10 @@ services:
     redis:
         image: redis:7-alpine
         container_name: redis
-        command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+        command:
+            - redis-server
+            - --requirepass
+            - "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"
         ports:
             - ${CODEAPI_REDIS_PORT:-16379}:6379
 
