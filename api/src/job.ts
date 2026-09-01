@@ -8,6 +8,10 @@ import { pipeline } from 'stream/promises';
 import { Readable, Transform } from 'stream';
 import type { Logger } from 'pino';
 import type { NsJailResult } from './nsjail';
+import type {
+    PackageSetupSummary,
+    PackageTransportSummary,
+} from '../../shared/package-transport';
 import type { Runtime } from './runtime';
 import { logger as rootLogger } from './logger';
 import { getRuntimes } from './runtime';
@@ -41,7 +45,11 @@ import {
   validateFilePath,
   isValidFilePath,
 } from './validation';
-import { cachedInputResponse, inputCacheKey, openCachedInput } from './session-inputs';
+import {
+    cachedInputResponse,
+    inputCacheKey,
+    openCachedInput,
+} from './session-inputs';
 
 export {
   DIRKEEP,
@@ -63,7 +71,9 @@ const AUTO_LOAD_DIRKEEP_TIMEOUT_MS = 10000;
  * module boundary (Node's `stream/web` vs. lib.dom) don't overlap cleanly,
  * hence the isolated cast; at runtime they're structurally compatible.
  */
-function toNodeReadable(body: import('stream/web').ReadableStream | ReadableStream): Readable {
+function toNodeReadable(
+    body: import('stream/web').ReadableStream | ReadableStream,
+): Readable {
   return Readable.fromWeb(body as import('stream/web').ReadableStream);
 }
 
@@ -94,8 +104,10 @@ export function aggregateBashExtras(
   const pathSources: string[] = [];
   const nodePathSources: string[] = [];
 
-  const sorted = [...runtimes].sort((a, b) =>
-    a.language.localeCompare(b.language) || semver.rcompare(a.version, b.version),
+    const sorted = [...runtimes].sort(
+        (a, b) =>
+            a.language.localeCompare(b.language) ||
+            semver.rcompare(a.version, b.version),
   );
 
   let extraPkgdirs: string[] | undefined;
@@ -106,7 +118,11 @@ export function aggregateBashExtras(
     seenLangs.add(rt.language);
     extraPkgdirs ??= [];
     extraPkgdirs.push(rt.pkgdir);
-    collectDelimitedEnvEntries(rt.env_vars.PATH, pathSources, seenPathEntries);
+        collectDelimitedEnvEntries(
+            rt.env_vars.PATH,
+            pathSources,
+            seenPathEntries,
+        );
     if (rt.env_vars.NODE_PATH) {
       if (rt.language === 'node' || rt.runtime === 'node') {
         nodePathSources.unshift(rt.env_vars.NODE_PATH);
@@ -118,7 +134,12 @@ export function aggregateBashExtras(
   prependDelimitedEnvEntries('PATH', pathSources, envVars);
   for (const source of nodePathSources) {
     if (linkTarget) rememberPreferredNodeModules(source, linkTarget);
-    mergeDelimitedEnvEntries('NODE_PATH', source, envVars, seenNodePathEntries);
+        mergeDelimitedEnvEntries(
+            'NODE_PATH',
+            source,
+            envVars,
+            seenNodePathEntries,
+        );
   }
   return extraPkgdirs;
 }
@@ -131,7 +152,11 @@ function rememberPreferredNodeModules(
   const nodeModulesPath = source
     .split(':')
     .filter(Boolean)
-    .find(entry => path.isAbsolute(entry) && path.basename(entry) === 'node_modules');
+        .find(
+            entry =>
+                path.isAbsolute(entry) &&
+                path.basename(entry) === 'node_modules',
+        );
   if (nodeModulesPath) linkTarget.nodeModulesPath = nodeModulesPath;
 }
 
@@ -192,8 +217,9 @@ export function resolveOriginalName(response: Response, file: TFile): string {
     }
   }
 
-  const match = header.match(/filename="([^"]+)"/i)
-    ?? header.match(/filename=([^\s;]+)/i);
+    const match =
+        header.match(/filename="([^"]+)"/i) ??
+        header.match(/filename=([^\s;]+)/i);
   return match ? match[1] : fallback;
 }
 
@@ -205,8 +231,12 @@ export function resolveOriginalName(response: Response, file: TFile): string {
  */
 export function isNormalizedObjectForSession(
   sid: string,
-): (o: unknown) => o is { id: string; name: string; storage_session_id: string } {
-  return (o): o is { id: string; name: string; storage_session_id: string } => {
+): (
+    o: unknown,
+) => o is { id: string; name: string; storage_session_id: string } {
+    return (
+        o,
+    ): o is { id: string; name: string; storage_session_id: string } => {
     if (!o || typeof o !== 'object') return false;
     const rec = o as Record<string, unknown>;
     if (typeof rec.id !== 'string') return false;
@@ -278,11 +308,20 @@ const MIME_TYPE_BY_EXTENSION: ReadonlyMap<string, string> = new Map([
   // Documents
   ['.pdf', 'application/pdf'],
   ['.doc', 'application/msword'],
-  ['.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+    [
+        '.docx',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    ],
   ['.xls', 'application/vnd.ms-excel'],
-  ['.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+    [
+        '.xlsx',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ],
   ['.ppt', 'application/vnd.ms-powerpoint'],
-  ['.pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+    [
+        '.pptx',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    ],
   ['.odt', 'application/vnd.oasis.opendocument.text'],
   ['.ods', 'application/vnd.oasis.opendocument.spreadsheet'],
   ['.odp', 'application/vnd.oasis.opendocument.presentation'],
@@ -377,7 +416,10 @@ const MIME_TYPE_BY_EXTENSION: ReadonlyMap<string, string> = new Map([
  * Pure; exported for unit testing.
  */
 export function mimeTypeFor(filename: string): string {
-  const lastSep = Math.max(filename.lastIndexOf('/'), filename.lastIndexOf('\\'));
+    const lastSep = Math.max(
+        filename.lastIndexOf('/'),
+        filename.lastIndexOf('\\'),
+    );
   const basename = lastSep >= 0 ? filename.slice(lastSep + 1) : filename;
   const dot = basename.lastIndexOf('.');
   if (dot <= 0) return 'application/octet-stream';
@@ -476,7 +518,9 @@ function prependDelimitedEnvEntries(
 ): void {
   if (entries.length === 0) return;
   const joinedEntries = entries.join(':');
-  envVars[key] = envVars[key] ? joinedEntries + ':' + envVars[key] : joinedEntries;
+    envVars[key] = envVars[key]
+        ? joinedEntries + ':' + envVars[key]
+        : joinedEntries;
 }
 
 /** Environment variables that must never be influenced by caller-supplied
@@ -515,8 +559,30 @@ export const RESERVED_ENV_KEYS: ReadonlySet<string> = new Set([
    * programmatic router never populates `env_vars` from user input,
    * but the v2 endpoint surface is broader. */
   'PTC_HISTORY_PATH',
+    'PACKAGE_PROXY_URL',
+    'PIP_PROXY',
+    'PIP_CERT',
+    'PIP_TARGET',
+    'PIP_NO_INPUT',
+    'NPM_CONFIG_PROXY',
+    'NPM_CONFIG_HTTPS_PROXY',
+    'NPM_CONFIG_CAFILE',
+    'NPM_CONFIG_PREFIX',
+    'NPM_CONFIG_AUDIT',
+    'NPM_CONFIG_FUND',
+    'BUN_INSTALL',
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'ALL_PROXY',
+    'NO_PROXY',
+    'SSL_CERT_FILE',
+    'REQUESTS_CA_BUNDLE',
 ]);
-export const RESERVED_ENV_PREFIXES: readonly string[] = ['LD_', 'DYLD_', 'PTC_'];
+export const RESERVED_ENV_PREFIXES: readonly string[] = [
+    'LD_',
+    'DYLD_',
+    'PTC_',
+];
 
 /** Filter a caller-supplied env-var map by the same rules `safeCall()`
  * applies before spreading into nsjail. Exposed for unit tests so the
@@ -535,27 +601,404 @@ export function filterExtraEnvVars(
   return out;
 }
 
+const PACKAGE_INSTALL_ROOT = '/mnt/data/.optale-packages';
+const PACKAGE_PROXY_URL = 'http://127.0.0.1:3129';
+const PACKAGE_CA_PATH = '/run/codeapi/package-ca.pem';
+const PACKAGE_WRAPPER_PATH = '/usr/local/lib/sandbox-fetch/package-bin';
+
+export function applyPackageManagerEnvironment(
+    envVars: Record<string, string>,
+): void {
+    envVars.PACKAGE_PROXY_URL = PACKAGE_PROXY_URL;
+    envVars.PIP_PROXY = PACKAGE_PROXY_URL;
+    envVars.PIP_CERT = PACKAGE_CA_PATH;
+    envVars.PIP_TARGET = `${PACKAGE_INSTALL_ROOT}/python`;
+    envVars.PIP_NO_INPUT = '1';
+    envVars.npm_config_proxy = PACKAGE_PROXY_URL;
+    envVars.npm_config_https_proxy = PACKAGE_PROXY_URL;
+    envVars.npm_config_cafile = PACKAGE_CA_PATH;
+    envVars.npm_config_prefix = `${PACKAGE_INSTALL_ROOT}/node`;
+    envVars.npm_config_audit = 'false';
+    envVars.npm_config_fund = 'false';
+    prependDelimitedEnvEntries(
+        'PATH',
+        [
+            PACKAGE_WRAPPER_PATH,
+            `${PACKAGE_INSTALL_ROOT}/node/bin`,
+            `${PACKAGE_INSTALL_ROOT}/bun/bin`,
+        ],
+        envVars,
+    );
+    prependDelimitedEnvEntries(
+        'NODE_PATH',
+        [
+            `${PACKAGE_INSTALL_ROOT}/node/node_modules`,
+            `${PACKAGE_INSTALL_ROOT}/node/lib/node_modules`,
+            `${PACKAGE_INSTALL_ROOT}/bun/node_modules`,
+        ],
+        envVars,
+    );
+    prependDelimitedEnvEntries(
+        'PYTHONPATH',
+        [`${PACKAGE_INSTALL_ROOT}/python`],
+        envVars,
+    );
+}
+
+function boundedPackageFact(
+    value: unknown,
+    maxLength = 256,
+): string | undefined {
+    if (
+        typeof value !== 'string' ||
+        value.length < 1 ||
+        value.length > maxLength
+    )
+        return undefined;
+    if (/[:\/\\@]|[\u0000-\u001f\u007f]/.test(value)) return undefined;
+    return value;
+}
+
+async function readBoundedJson(
+    filePath: string,
+): Promise<Record<string, unknown> | undefined> {
+    try {
+        const stat = await fsp.stat(filePath);
+        if (!stat.isFile() || stat.size > 131_072) return undefined;
+        const parsed = JSON.parse(
+            await fsp.readFile(filePath, 'utf8'),
+        ) as unknown;
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+            return undefined;
+        return parsed as Record<string, unknown>;
+    } catch {
+        return undefined;
+    }
+}
+
+interface PackageInvocationRecord {
+    manager: 'pip' | 'npm' | 'bun';
+    requestedSpecs: string[];
+    durationMs: number;
+    outcome: 'success' | 'failed';
+}
+
+const PACKAGE_ARCHIVE_SUFFIX = /(?:\.tar\.gz|\.tgz|\.whl|\.zip)$/i;
+const NPM_REGISTRY_SPEC = /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)(?:@[A-Za-z0-9*^~<>=|., -]+)?$/i;
+const PIP_REGISTRY_SPEC = /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9._,-]+\])?(?:\s*(?:===|==|~=|!=|<=|>=|<|>)\s*[A-Za-z0-9*+!._,-]+(?:\s*,\s*(?:===|==|~=|!=|<=|>=|<|>)\s*[A-Za-z0-9*+!._,-]+)*)?$/;
+
+function sanitizePackageRequestedSpec(
+    manager: 'pip' | 'npm' | 'bun',
+    value: unknown,
+): string | undefined {
+    if (typeof value !== 'string' || value.length < 1 || value.length > 256)
+        return undefined;
+    if (
+        value !== value.trim() ||
+        /[\u0000-\u001f\u007f\\]/.test(value) ||
+        /:\/\//.test(value) ||
+        /^[/.]/.test(value) ||
+        PACKAGE_ARCHIVE_SUFFIX.test(value)
+    )
+        return undefined;
+    if (manager === 'pip') {
+        if (value.includes('@') || /^(?:git|hg|svn|bzr|file):/i.test(value))
+            return undefined;
+        return PIP_REGISTRY_SPEC.test(value) ? value : undefined;
+    }
+    if (/^(?:git|hg|svn|bzr|file|github|gitlab|bitbucket):/i.test(value))
+        return undefined;
+    return NPM_REGISTRY_SPEC.test(value) ? value : undefined;
+}
+
+async function readPackageInvocations(
+    submissionDir: string,
+): Promise<PackageInvocationRecord[]> {
+    const invocationPath = path.join(
+        submissionDir,
+        '.optale-packages/invocations.jsonl',
+    );
+    try {
+        const stat = await fsp.stat(invocationPath);
+        if (!stat.isFile() || stat.size > 131_072) return [];
+        const records: PackageInvocationRecord[] = [];
+        for (const line of (await fsp.readFile(invocationPath, 'utf8')).split('\n')) {
+            if (!line || records.length >= 64) continue;
+            let raw: unknown;
+            try {
+                raw = JSON.parse(line);
+            } catch {
+                continue;
+            }
+            if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+            const value = raw as Record<string, unknown>;
+            if (
+                value.manager !== 'pip' &&
+                value.manager !== 'npm' &&
+                value.manager !== 'bun'
+            )
+                continue;
+            if (value.outcome !== 'success' && value.outcome !== 'failed')
+                continue;
+            if (
+                typeof value.durationMs !== 'number' ||
+                !Number.isSafeInteger(value.durationMs) ||
+                value.durationMs < 0 ||
+                value.durationMs > 300_000 ||
+                !Array.isArray(value.requestedSpecs)
+            )
+                continue;
+            const requestedSpecs = value.requestedSpecs
+                .map(spec => sanitizePackageRequestedSpec(value.manager, spec))
+                .filter((spec): spec is string => spec !== undefined)
+                .slice(0, 32);
+            if (requestedSpecs.length === 0) continue;
+            records.push({
+                manager: value.manager,
+                requestedSpecs,
+                durationMs: value.durationMs,
+                outcome: value.outcome,
+            });
+        }
+        return records;
+    } catch {
+        return [];
+    }
+}
+
+function requestedPackageName(
+    manager: 'pip' | 'npm' | 'bun',
+    spec: string,
+): string | undefined {
+    if (manager === 'pip') {
+        return spec.match(/^([A-Za-z0-9][A-Za-z0-9._-]*)/)?.[1];
+    }
+    const candidate = spec.startsWith('@')
+        ? spec.slice(0, spec.lastIndexOf('@') > spec.indexOf('/') ? spec.lastIndexOf('@') : undefined)
+        : spec.split('@', 1)[0];
+    return /^(?:@[a-z0-9._-]+\/[a-z0-9._-]+|[a-z0-9._-]+)$/i.test(candidate)
+        ? candidate
+        : undefined;
+}
+
+function normalizedPythonName(value: string): string {
+    return value.toLowerCase().replace(/[-_.]+/g, '-');
+}
+
+async function installedPythonVersions(
+    submissionDir: string,
+): Promise<Map<string, string>> {
+    const versions = new Map<string, string>();
+    try {
+        const root = path.join(submissionDir, '.optale-packages/python');
+        const entries = await fsp.readdir(root, { withFileTypes: true });
+        for (const entry of entries) {
+            if (!entry.isDirectory() || !entry.name.endsWith('.dist-info')) continue;
+            const metadataPath = path.join(root, entry.name, 'METADATA');
+            const stat = await fsp.stat(metadataPath);
+            if (!stat.isFile() || stat.size > 131_072) continue;
+            const metadata = await fsp.readFile(metadataPath, 'utf8');
+            const name = boundedPackageFact(metadata.match(/^Name:\s*(.+)$/im)?.[1]?.trim());
+            const version = boundedPackageFact(metadata.match(/^Version:\s*(.+)$/im)?.[1]?.trim());
+            if (name && version) versions.set(normalizedPythonName(name), version);
+        }
+    } catch {
+        /* no Python installs */
+    }
+    return versions;
+}
+
+export async function collectPackageSetupSummary(
+    submissionDir: string,
+    transport: PackageTransportSummary,
+): Promise<PackageSetupSummary[]> {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(transport.policyDigest)) return [];
+    const invocations = await readPackageInvocations(submissionDir);
+    if (invocations.length === 0) return [];
+    const pythonVersions = await installedPythonVersions(submissionDir);
+    const summaries: PackageSetupSummary[] = [];
+    for (const invocation of invocations) {
+        for (const requestedSpec of invocation.requestedSpecs) {
+            if (summaries.length >= 32) return summaries;
+            const name = requestedPackageName(invocation.manager, requestedSpec);
+            let installedVersion: string | undefined;
+            let artifactDigest: string | undefined;
+            if (name && invocation.manager === 'pip') {
+                installedVersion = pythonVersions.get(normalizedPythonName(name));
+            } else if (name) {
+                const directory = invocation.manager === 'npm' ? 'node' : 'bun';
+                const root = path.join(submissionDir, '.optale-packages', directory);
+                const installed = await readBoundedJson(
+                    path.join(root, 'node_modules', ...name.split('/'), 'package.json'),
+                );
+                installedVersion = boundedPackageFact(installed?.version);
+                if (invocation.manager === 'npm') {
+                    const lockfile = await readBoundedJson(path.join(root, 'package-lock.json'));
+                    const packages =
+                        lockfile?.packages &&
+                        typeof lockfile.packages === 'object' &&
+                        !Array.isArray(lockfile.packages)
+                            ? (lockfile.packages as Record<string, unknown>)
+                            : undefined;
+                    const locked = packages?.[`node_modules/${name}`];
+                    const integrity =
+                        locked && typeof locked === 'object' && !Array.isArray(locked)
+                            ? (locked as Record<string, unknown>).integrity
+                            : undefined;
+                    if (
+                        typeof integrity === 'string' &&
+                        /^sha(?:256|384|512)-[A-Za-z0-9+/=]{32,256}$/.test(integrity)
+                    )
+                        artifactDigest = integrity;
+                }
+            }
+            summaries.push({
+                manager: invocation.manager,
+                requestedSpec,
+                ...(installedVersion ? { installedVersion } : {}),
+                ...(artifactDigest ? { artifactDigest } : {}),
+                durationMs: invocation.durationMs,
+                outcome: invocation.outcome,
+                gatewayRequestCount: Math.max(
+                    0,
+                    Math.min(8, Math.floor(transport.requestCount)),
+                ),
+                gatewayResponseBytes: Math.max(
+                    0,
+                    Math.min(52_428_800, Math.floor(transport.responseBytes)),
+                ),
+                policyDigest: transport.policyDigest,
+            });
+        }
+    }
+    return summaries;
+}
+
+export async function attachPackageSetupSummary(
+    result: NsJailResult,
+    submissionDir: string,
+): Promise<void> {
+    if (!result.package_transport) return;
+    result.package_setup = await collectPackageSetupSummary(
+        submissionDir,
+        result.package_transport,
+    );
+}
+
 const SUPPORTED_EXTENSIONS = new Set([
-  '.c', '.cs', '.cpp', '.go', '.java', '.js', '.kt', '.kts', '.lua',
-  '.php', '.pl', '.ps1', '.py', '.r', '.rb', '.rs', '.scala', '.sh',
-  '.sql', '.swift', '.ts', '.jsx', '.tsx', '.groovy',
-  '.css', '.htm', '.html', '.less', '.sass', '.scss', '.svg', '.svelte', '.vue',
-  '.adoc', '.asciidoc', '.md', '.rst', '.tex', '.txt', '.wiki',
-  '.csv', '.json', '.bson', '.json5', '.jsonl', '.parquet', '.tsv',
-  '.xml', '.yaml', '.yml',
-  '.ics', '.ical', '.ifb', '.icalendar',
-  '.conf', '.env', '.gitignore', '.ini', '.properties', '.toml',
-  '.doc', '.docx', '.pdf', '.ppt', '.pptx', '.xls', '.xlsx',
-  '.odt', '.ods', '.odp', '.rtf',
-  '.avif', '.bmp', '.gif', '.ico', '.jpeg', '.jpg', '.png',
-  '.tif', '.tiff', '.webp',
-  '.eot', '.ttf', '.woff', '.woff2',
-  '.7z', '.bz2', '.gz', '.gzip', '.rar', '.tar', '.zip',
-  '.tf', '.tfvars', '.tfstate', '.hcl',
-  '.dockerfile', '.Dockerfile', '.dockerignore',
-  '.helmignore', '.helmfile', '.jenkinsfile', '.vagrantfile',
-  '.eslintrc', '.prettierrc', '.editorconfig', '.nomad',
-  '.bat', '.cmd', '.deb', '.log', '.rpm', '.vbs',
+    '.c',
+    '.cs',
+    '.cpp',
+    '.go',
+    '.java',
+    '.js',
+    '.kt',
+    '.kts',
+    '.lua',
+    '.php',
+    '.pl',
+    '.ps1',
+    '.py',
+    '.r',
+    '.rb',
+    '.rs',
+    '.scala',
+    '.sh',
+    '.sql',
+    '.swift',
+    '.ts',
+    '.jsx',
+    '.tsx',
+    '.groovy',
+    '.css',
+    '.htm',
+    '.html',
+    '.less',
+    '.sass',
+    '.scss',
+    '.svg',
+    '.svelte',
+    '.vue',
+    '.adoc',
+    '.asciidoc',
+    '.md',
+    '.rst',
+    '.tex',
+    '.txt',
+    '.wiki',
+    '.csv',
+    '.json',
+    '.bson',
+    '.json5',
+    '.jsonl',
+    '.parquet',
+    '.tsv',
+    '.xml',
+    '.yaml',
+    '.yml',
+    '.ics',
+    '.ical',
+    '.ifb',
+    '.icalendar',
+    '.conf',
+    '.env',
+    '.gitignore',
+    '.ini',
+    '.properties',
+    '.toml',
+    '.doc',
+    '.docx',
+    '.pdf',
+    '.ppt',
+    '.pptx',
+    '.xls',
+    '.xlsx',
+    '.odt',
+    '.ods',
+    '.odp',
+    '.rtf',
+    '.avif',
+    '.bmp',
+    '.gif',
+    '.ico',
+    '.jpeg',
+    '.jpg',
+    '.png',
+    '.tif',
+    '.tiff',
+    '.webp',
+    '.eot',
+    '.ttf',
+    '.woff',
+    '.woff2',
+    '.7z',
+    '.bz2',
+    '.gz',
+    '.gzip',
+    '.rar',
+    '.tar',
+    '.zip',
+    '.tf',
+    '.tfvars',
+    '.tfstate',
+    '.hcl',
+    '.dockerfile',
+    '.Dockerfile',
+    '.dockerignore',
+    '.helmignore',
+    '.helmfile',
+    '.jenkinsfile',
+    '.vagrantfile',
+    '.eslintrc',
+    '.prettierrc',
+    '.editorconfig',
+    '.nomad',
+    '.bat',
+    '.cmd',
+    '.deb',
+    '.log',
+    '.rpm',
+    '.vbs',
 ]);
 
 function isSupportedOutputFilename(name: string): boolean {
@@ -566,10 +1009,9 @@ function isSupportedOutputFilename(name: string): boolean {
     (ext !== '' && SUPPORTED_EXTENSIONS.has(ext)) ||
     SUPPORTED_EXTENSIONS.has(basename) ||
     SUPPORTED_EXTENSIONS.has(basename.toLowerCase()) ||
-    (ext === '' && (
-      SUPPORTED_EXTENSIONS.has(dottedBasename) ||
-      SUPPORTED_EXTENSIONS.has(dottedBasename.toLowerCase())
-    ))
+        (ext === '' &&
+            (SUPPORTED_EXTENSIONS.has(dottedBasename) ||
+                SUPPORTED_EXTENSIONS.has(dottedBasename.toLowerCase())))
   );
 }
 
@@ -649,7 +1091,9 @@ export class SessionWorkspaceDirtyError extends Error {
   readonly code = 'session_workspace_dirty';
 
   constructor(cause?: unknown) {
-    super('Session input priming did not complete; the workspace must be restored');
+        super(
+            'Session input priming did not complete; the workspace must be restored',
+        );
     this.name = 'SessionWorkspaceDirtyError';
     this.cause = cause;
   }
@@ -672,7 +1116,9 @@ async function acquireJobIdentity(log: Logger): Promise<SandboxJobIdentity> {
     const identity = sandboxJobUidPool.acquire();
     if (identity) return identity;
     log.info('Awaiting job slot');
-    await new Promise<void>(resolve => { jobQueue.push(resolve); });
+        await new Promise<void>(resolve => {
+            jobQueue.push(resolve);
+        });
   }
 }
 
@@ -706,7 +1152,10 @@ export class Job {
    *  Recorded during the workspace scan but only committed to `session.surfaced`
    *  AFTER the file uploads, so a dropped upload doesn't permanently suppress an
    *  unchanged file on the next turn. */
-  private pendingSurfaced = new Map<string, { name: string; signature: string }>();
+    private pendingSurfaced = new Map<
+        string,
+        { name: string; signature: string }
+    >();
   private sessionFiles: FileRef[] = [];
   private inheritedRefs: FileRef[] = [];
   private inputFileHashes = new Map<string, InputFileInfo>();
@@ -753,7 +1202,9 @@ export class Job {
       input_cache_key: file.input_cache_key,
       name: file.name || `file${i}.code`,
       content: file.content,
-      encoding: (['base64', 'hex', 'utf8'] as const).includes(file.encoding as 'base64' | 'hex' | 'utf8')
+            encoding: (['base64', 'hex', 'utf8'] as const).includes(
+                file.encoding as 'base64' | 'hex' | 'utf8',
+            )
         ? file.encoding
         : 'utf8',
       /* Carry `entity_id` forward so `tryEchoUnchangedInput` and
@@ -779,7 +1230,9 @@ export class Job {
    * derivation in `safeCall` so the route and the jail cannot disagree about
    * whether the relay has to be up. */
   get externalFetchEnabled(): boolean {
-    return this.egressGrantToken !== undefined && this.egressGrantToken !== '';
+        return (
+            this.egressGrantToken !== undefined && this.egressGrantToken !== ''
+        );
   }
 
   /** Marks a persistent workspace unusable after a post-prime failure. Returns
@@ -796,10 +1249,15 @@ export class Job {
      * options want a string mode with no O_NOFOLLOW spelling, so open the
      * handle first and stream from it. */
     const handle = noFollow
-      ? await fsp.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
+            ? await fsp.open(
+                  filePath,
+                  fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+              )
       : undefined;
     try {
-      const stream = handle ? handle.createReadStream() : fs.createReadStream(filePath);
+            const stream = handle
+                ? handle.createReadStream()
+                : fs.createReadStream(filePath);
       for await (const chunk of stream) hash.update(chunk as Buffer);
       return hash.digest('hex');
     } finally {
@@ -833,10 +1291,19 @@ export class Job {
     identity = this.sandboxIdentity(),
   ): Promise<void> {
     if (noFollow) {
-      await applySandboxPathPermissionsNoFollow(filePath, identity, SANDBOX_FILE_MODE, 'file');
+            await applySandboxPathPermissionsNoFollow(
+                filePath,
+                identity,
+                SANDBOX_FILE_MODE,
+                'file',
+            );
       return;
     }
-    await applySandboxPathPermissions(filePath, identity, SANDBOX_FILE_MODE);
+        await applySandboxPathPermissions(
+            filePath,
+            identity,
+            SANDBOX_FILE_MODE,
+        );
   }
 
   /**
@@ -885,9 +1352,15 @@ export class Job {
        * per-job workspaces never contain one, so this is a no-op there. */
       const st = await fsp.lstat(cursor);
       if (st.isSymbolicLink()) {
-        throw new Error(`Refusing to prime through symlinked workspace path: ${path.relative(submissionDir, cursor)}`);
+                throw new Error(
+                    `Refusing to prime through symlinked workspace path: ${path.relative(submissionDir, cursor)}`,
+                );
       }
-      await applySandboxPathPermissions(cursor, identity, SANDBOX_DIR_MODE);
+            await applySandboxPathPermissions(
+                cursor,
+                identity,
+                SANDBOX_DIR_MODE,
+            );
       this.chmoddedDirs.add(cursor);
     }
   }
@@ -901,12 +1374,10 @@ export class Job {
   private reserveInputDestination(file: TFile, destination: string): void {
     const conflict = [...this.inputDestinations.entries()].find(
       ([reserved, owner]) =>
-        owner !== file
-        && (
-          reserved === destination
-          || reserved.startsWith(`${destination}/`)
-          || destination.startsWith(`${reserved}/`)
-        ),
+                owner !== file &&
+                (reserved === destination ||
+                    reserved.startsWith(`${destination}/`) ||
+                    destination.startsWith(`${reserved}/`)),
     );
     if (conflict) {
       throw new ValidationError(
@@ -929,11 +1400,9 @@ export class Job {
       const conflict = [...requestedDestinations.entries()].find(
         ([destination, owner]) =>
           owner !== file &&
-          (
-            destination === file.name ||
+                    (destination === file.name ||
             destination.startsWith(`${file.name}/`) ||
-            file.name.startsWith(`${destination}/`)
-          ),
+                        file.name.startsWith(`${destination}/`)),
       );
       if (conflict) {
         throw new ValidationError(
@@ -954,7 +1423,9 @@ export class Job {
       this.jobIdentity = this.workspaceLease.identity;
     } else {
       this.jobIdentity = await acquireJobIdentity(this.log);
-      this.workspaceLease = await createSandboxWorkspace(this.jobIdentity);
+            this.workspaceLease = await createSandboxWorkspace(
+                this.jobIdentity,
+            );
     }
     this.submissionDir = this.workspaceLease.dir;
 
@@ -965,13 +1436,18 @@ export class Job {
           workspaceId: this.workspaceLease.workspaceId,
           uid: this.jobIdentity.uid,
           gid: this.jobIdentity.gid,
-          session: this.session ? this.session.runtimeSessionId : undefined,
+                    session: this.session
+                        ? this.session.runtimeSessionId
+                        : undefined,
         },
         'Priming job',
       );
     }
 
-    if (this.fileEgressBaseUrl() && this.files.some(f => f.id && f.storage_session_id)) {
+        if (
+            this.fileEgressBaseUrl() &&
+            this.files.some(f => f.id && f.storage_session_id)
+        ) {
       await this.autoLoadDirkeep();
     }
 
@@ -987,7 +1463,9 @@ export class Job {
       identity: this.jobIdentity,
     };
     let firstFailure: { error: unknown } | undefined;
-    const runFileOperation = async (operation: () => Promise<void>): Promise<void> => {
+        const runFileOperation = async (
+            operation: () => Promise<void>,
+        ): Promise<void> => {
       try {
         await operation();
       } catch (error) {
@@ -1006,9 +1484,17 @@ export class Job {
         signal: controller.signal,
       };
       if (file.id) {
-        fileOps.push(() => runFileOperation(() => this.primeInputFile(file, operationContext)));
+                fileOps.push(() =>
+                    runFileOperation(() =>
+                        this.primeInputFile(file, operationContext),
+                    ),
+                );
       } else if (file.content !== undefined) {
-        fileOps.push(() => runFileOperation(() => this.writeFile(file, operationContext)));
+                fileOps.push(() =>
+                    runFileOperation(() =>
+                        this.writeFile(file, operationContext),
+                    ),
+                );
       }
     }
     let nextOperation = 0;
@@ -1029,7 +1515,9 @@ export class Job {
          * workspace now matches neither the previous checkpoint nor the full
          * request, so keeping this VM would silently preserve partial input
          * state. Fail closed and give the control plane a stable recycle signal. */
-        this.session.markDirty('input priming failed after file operations began');
+                this.session.markDirty(
+                    'input priming failed after file operations began',
+                );
         throw new SessionWorkspaceDirtyError(firstFailure.error);
       }
       throw firstFailure.error;
@@ -1046,7 +1534,11 @@ export class Job {
     context: PrimeOperationContext,
   ): Promise<void> {
     throwIfAborted(context.signal);
-    if (this.session && file.id && (await this.reusePrimedInput(file, context))) {
+        if (
+            this.session &&
+            file.id &&
+            (await this.reusePrimedInput(file, context))
+        ) {
       /* Reuse has no response header to pass through downloadAndWriteFile, so
        * its requested name becomes authoritative only after the on-disk copy
        * has been verified. Reserve it before another concurrent ref can claim
@@ -1077,7 +1569,8 @@ export class Job {
     const session = this.session;
     if (!session || !file.id) return false;
     throwIfAborted(context?.signal);
-    if (session.primedInputId(file.name) !== this.inputIdentity(file)) return false;
+        if (session.primedInputId(file.name) !== this.inputIdentity(file))
+            return false;
     const submissionDir = context?.submissionDir ?? this.submissionDir;
     const filePath = path.join(submissionDir, file.name);
     /* lstat/O_NOFOLLOW protect only their final path component. A prior
@@ -1095,7 +1588,9 @@ export class Job {
        * place, and re-hashing would bank the mutation as pristine and let the
        * walker echo the original ref as unchanged. Falls back to hashing on
        * disk if no original hash was retained. */
-      const hash = this.session?.primedHash(file.name) ?? (await this.computeFileHash(filePath, true));
+            const hash =
+                this.session?.primedHash(file.name) ??
+                (await this.computeFileHash(filePath, true));
       this.inputFileHashes.set(file.name, {
         originalId: file.id,
         originalSessionId: file.storage_session_id,
@@ -1117,12 +1612,16 @@ export class Job {
     return config.egress_gateway_url || config.file_server_url;
   }
 
-  private fileEgressHeaders(headers: Record<string, string> = {}): Record<string, string> {
+    private fileEgressHeaders(
+        headers: Record<string, string> = {},
+    ): Record<string, string> {
     if (!config.egress_gateway_url) {
       return injectTraceHeaders(internalServiceHeaders(headers));
     }
     if (!this.egressGrantToken) {
-      throw new Error('EGRESS_GATEWAY_URL is configured but the sandbox request has no egress grant');
+            throw new Error(
+                'EGRESS_GATEWAY_URL is configured but the sandbox request has no egress grant',
+            );
     }
     return injectTraceHeaders({
       ...headers,
@@ -1132,22 +1631,36 @@ export class Job {
 
   private async autoLoadDirkeep(): Promise<void> {
     const sessionIds = new Set(
-      this.files.filter(f => f.id && f.storage_session_id).map(f => f.storage_session_id!),
+            this.files
+                .filter(f => f.id && f.storage_session_id)
+                .map(f => f.storage_session_id!),
     );
     const existingNames = new Set(this.files.map(f => f.name));
     const explicitFilePaths = this.files
       .filter(f => !isDirkeep(f.name))
       .map(f => f.name);
 
-    const fetches = Array.from(sessionIds).map(sid => this.fetchSessionMarkers(sid));
+        const fetches = Array.from(sessionIds).map(sid =>
+            this.fetchSessionMarkers(sid),
+        );
     const results = await Promise.all(fetches);
 
     let added = 0;
     let hitCap = false;
     for (const objects of results) {
       for (const obj of objects) {
-        if (added >= config.max_output_files) { hitCap = true; break; }
-        if (this.tryRegisterInheritedMarker(obj, existingNames, explicitFilePaths)) added++;
+                if (added >= config.max_output_files) {
+                    hitCap = true;
+                    break;
+                }
+                if (
+                    this.tryRegisterInheritedMarker(
+                        obj,
+                        existingNames,
+                        explicitFilePaths,
+                    )
+                )
+                    added++;
       }
       if (hitCap) break;
     }
@@ -1170,9 +1683,14 @@ export class Job {
    */
   private async fetchSessionMarkers(
     sid: string,
-  ): Promise<Array<{ id: string; name: string; storage_session_id: string }>> {
+    ): Promise<
+        Array<{ id: string; name: string; storage_session_id: string }>
+    > {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), AUTO_LOAD_DIRKEEP_TIMEOUT_MS);
+        const timeout = setTimeout(
+            () => controller.abort(),
+            AUTO_LOAD_DIRKEEP_TIMEOUT_MS,
+        );
     try {
       const res = await fetch(
         `${this.fileEgressBaseUrl()}/sessions/${encodeURIComponent(sid)}/objects?detail=normalized`,
@@ -1186,7 +1704,10 @@ export class Job {
       if (!Array.isArray(data)) return [];
       return data.filter(isNormalizedObjectForSession(sid));
     } catch (err) {
-      this.log.warn({ sessionId: sid, err }, 'Failed to auto-load .dirkeep markers');
+            this.log.warn(
+                { sessionId: sid, err },
+                'Failed to auto-load .dirkeep markers',
+            );
       return [];
     } finally {
       clearTimeout(timeout);
@@ -1220,7 +1741,11 @@ export class Job {
       );
       return false;
     }
-    this.files.push({ id: obj.id, storage_session_id: obj.storage_session_id, name: obj.name });
+        this.files.push({
+            id: obj.id,
+            storage_session_id: obj.storage_session_id,
+            name: obj.name,
+        });
     existingNames.add(obj.name);
     return true;
   }
@@ -1237,7 +1762,9 @@ export class Job {
     };
     throwIfAborted(operation.signal);
     if (!file.id || !file.storage_session_id) {
-      throw new ValidationError('By-reference inputs require id and storage_session_id');
+            throw new ValidationError(
+                'By-reference inputs require id and storage_session_id',
+            );
     }
 
     validateFilePath(file.name, operation.submissionDir);
@@ -1259,7 +1786,10 @@ export class Job {
         if (response.status === 404 && attempt < maxRetries) {
           await response.body?.cancel().catch(() => {});
           const delay = retryDelay * Math.pow(2, attempt - 1);
-          this.log.info({ fileId: file.id, attempt, maxRetries, delay }, 'File not found, retrying');
+                    this.log.info(
+                        { fileId: file.id, attempt, maxRetries, delay },
+                        'File not found, retrying',
+                    );
           await sleep(delay, operation.signal);
           continue;
         }
@@ -1272,13 +1802,24 @@ export class Job {
         const originalName = resolveOriginalName(response, file);
         validateFilePath(originalName, operation.submissionDir);
         this.reserveInputDestination(file, originalName);
-        const finalPath = path.join(operation.submissionDir, originalName);
+                const finalPath = path.join(
+                    operation.submissionDir,
+                    originalName,
+                );
         const finalParent = path.dirname(finalPath);
         /* Persistent-session workspaces can hold a prior turn's symlink, so build
          * ancestors no-follow; a fresh per-job workspace can use plain mkdir -p. */
-        if (this.session) await this.ensureDirNoFollow(finalParent, operation.submissionDir);
+                if (this.session)
+                    await this.ensureDirNoFollow(
+                        finalParent,
+                        operation.submissionDir,
+                    );
         else await fsp.mkdir(finalParent, { recursive: true });
-        await this.secureAncestors(finalParent, operation.submissionDir, operation.identity);
+                await this.secureAncestors(
+                    finalParent,
+                    operation.submissionDir,
+                    operation.identity,
+                );
         /* Clear a symlink/dir a prior session turn may have squatted at the
          * target so streamToDisk's rename lands a fresh regular file rather than
          * following a link or failing on a directory. A regular file is LEFT in
@@ -1286,9 +1827,14 @@ export class Job {
          * download can't delete prior session state before the replacement is
          * safely written. */
         if (this.session) {
-          const existing = await fsp.lstat(finalPath).catch(() => null);
+                    const existing = await fsp
+                        .lstat(finalPath)
+                        .catch(() => null);
           if (existing && !existing.isFile()) {
-            await fsp.rm(finalPath, { force: true, recursive: true });
+                        await fsp.rm(finalPath, {
+                            force: true,
+                            recursive: true,
+                        });
           }
         }
 
@@ -1299,7 +1845,9 @@ export class Job {
           operation.identity,
           operation.signal,
         );
-        const readOnly = response.headers.get('x-read-only')?.toLowerCase() === 'true';
+                const readOnly =
+                    response.headers.get('x-read-only')?.toLowerCase() ===
+                    'true';
         this.inputFileHashes.set(originalName, {
           originalId: file.id,
           originalSessionId: file.storage_session_id!,
@@ -1320,14 +1868,21 @@ export class Job {
          * the file lives under originalName on disk. */
         if (originalName !== file.name) file.name = originalName;
 
-        this.log.info({ file: originalName, hash: hash.substring(0, 8) }, 'Downloaded file');
+                this.log.info(
+                    { file: originalName, hash: hash.substring(0, 8) },
+                    'Downloaded file',
+                );
         return originalName;
       } catch (error: unknown) {
         if (response?.body && !response.bodyUsed) {
           await response.body.cancel().catch(() => {});
         }
         if (operation.signal?.aborted) {
-          try { await fsp.unlink(tempPath); } catch { /* may not exist */ }
+                    try {
+                        await fsp.unlink(tempPath);
+                    } catch {
+                        /* may not exist */
+                    }
           throw abortReason(operation.signal);
         }
         /* ValidationError is deterministic — a bad Content-Disposition
@@ -1335,20 +1890,41 @@ export class Job {
          * (cleanup + rethrow) instead of burning ~7.5s on exponential
          * backoff and surfacing the error as a generic download failure. */
         if (error instanceof ValidationError) {
-          try { await fsp.unlink(tempPath); } catch { /* may not exist */ }
+                    try {
+                        await fsp.unlink(tempPath);
+                    } catch {
+                        /* may not exist */
+                    }
           throw error;
         }
-        lastError = error instanceof Error ? error : new Error(String(error));
+                lastError =
+                    error instanceof Error ? error : new Error(String(error));
         if (attempt < maxRetries) {
           const delay = retryDelay * Math.pow(2, attempt - 1);
-          this.log.warn({ fileId: file.id, attempt, maxRetries, delay, err: lastError }, 'Download failed, retrying');
+                    this.log.warn(
+                        {
+                            fileId: file.id,
+                            attempt,
+                            maxRetries,
+                            delay,
+                            err: lastError,
+                        },
+                        'Download failed, retrying',
+                    );
           await sleep(delay, operation.signal);
         }
       }
     }
 
-    this.log.error({ fileId: file.id, maxRetries, err: lastError }, 'Failed to download file');
-    try { await fsp.unlink(tempPath); } catch { /* may not exist */ }
+        this.log.error(
+            { fileId: file.id, maxRetries, err: lastError },
+            'Failed to download file',
+        );
+        try {
+            await fsp.unlink(tempPath);
+        } catch {
+            /* may not exist */
+        }
     throw lastError ?? new Error(`Failed to download input ${file.id}`);
   }
 
@@ -1360,7 +1936,10 @@ export class Job {
    * protection, hashing, ownership and priming all run identically for pushed
    * and pulled inputs — there is exactly one workspace writer.
    */
-  private async fetchInputObject(file: TFile, signal?: AbortSignal): Promise<Response> {
+    private async fetchInputObject(
+        file: TFile,
+        signal?: AbortSignal,
+    ): Promise<Response> {
     throwIfAborted(signal);
     const cached = await openCachedInput(
       file.storage_session_id!,
@@ -1372,7 +1951,10 @@ export class Job {
       throwIfAborted(signal);
     }
     if (cached) {
-      this.log.debug({ fileId: file.id }, 'Priming input from pushed cache');
+            this.log.debug(
+                { fileId: file.id },
+                'Priming input from pushed cache',
+            );
       return cachedInputResponse(cached);
     }
     if (!this.fileEgressBaseUrl()) {
@@ -1390,7 +1972,10 @@ export class Job {
   }
 
   private inputIdentity(file: TFile): string {
-    return file.input_cache_key ?? inputCacheKey(file.storage_session_id ?? '', file.id ?? '');
+        return (
+            file.input_cache_key ??
+            inputCacheKey(file.storage_session_id ?? '', file.id ?? '')
+        );
   }
 
   /**
@@ -1420,9 +2005,14 @@ export class Job {
 
     const hashStream = crypto.createHash('sha256');
     const hashTransform = new Transform({
-      transform(chunk, _enc, cb) { hashStream.update(chunk); cb(null, chunk); },
+            transform(chunk, _enc, cb) {
+                hashStream.update(chunk);
+                cb(null, chunk);
+            },
+        });
+        const fileStream = fs.createWriteStream(tempPath, {
+            mode: SANDBOX_FILE_MODE,
     });
-    const fileStream = fs.createWriteStream(tempPath, { mode: SANDBOX_FILE_MODE });
     const reader = toNodeReadable(body);
     const abort = (): void => {
       const error = abortReason(signal!);
@@ -1443,7 +2033,10 @@ export class Job {
     return hashStream.digest('hex');
   }
 
-  async writeFile(file: TFile, context?: PrimeOperationContext): Promise<void> {
+    async writeFile(
+        file: TFile,
+        context?: PrimeOperationContext,
+    ): Promise<void> {
     const operation: PrimeOperationContext = context ?? {
       submissionDir: this.submissionDir,
       identity: this.sandboxIdentity(),
@@ -1452,11 +2045,19 @@ export class Job {
     validateFilePath(file.name, operation.submissionDir);
     const filePath = path.join(operation.submissionDir, file.name);
 
-    const content = Buffer.from(file.content ?? '', (file.encoding as BufferEncoding) ?? 'utf8');
+        const content = Buffer.from(
+            file.content ?? '',
+            (file.encoding as BufferEncoding) ?? 'utf8',
+        );
     const parentDir = path.dirname(filePath);
-    if (this.session) await this.ensureDirNoFollow(parentDir, operation.submissionDir);
+        if (this.session)
+            await this.ensureDirNoFollow(parentDir, operation.submissionDir);
     else await fsp.mkdir(parentDir, { recursive: true });
-    await this.secureAncestors(parentDir, operation.submissionDir, operation.identity);
+        await this.secureAncestors(
+            parentDir,
+            operation.submissionDir,
+            operation.identity,
+        );
     throwIfAborted(operation.signal);
     if (this.session) {
       /* Mirrors the by-reference prime above. A prior turn could have left a
@@ -1470,25 +2071,39 @@ export class Job {
       if (existing && !existing.isFile()) {
         await fsp.rm(filePath, { force: true, recursive: true });
       }
-      const tempPath = path.join(operation.submissionDir, `.tmp-${nanoid()}`);
+            const tempPath = path.join(
+                operation.submissionDir,
+                `.tmp-${nanoid()}`,
+            );
       try {
-        await fsp.writeFile(tempPath, content, { mode: SANDBOX_FILE_MODE });
+                await fsp.writeFile(tempPath, content, {
+                    mode: SANDBOX_FILE_MODE,
+                });
         await fsp.rename(tempPath, filePath);
       } catch (error) {
-        try { await fsp.unlink(tempPath); } catch { /* may not exist */ }
+                try {
+                    await fsp.unlink(tempPath);
+                } catch {
+                    /* may not exist */
+                }
         throw error;
       }
     } else {
       await fsp.writeFile(filePath, content);
     }
-    await this.applySandboxFilePermissions(filePath, false, operation.identity);
+        await this.applySandboxFilePermissions(
+            filePath,
+            false,
+            operation.identity,
+        );
 
     const hash = crypto.createHash('sha256').update(content).digest('hex');
     this.inputFileHashes.set(file.name, { hash, path: filePath });
     /* Track inline source files as session inputs too (not just downloaded
      * ones), so a later turn that switches entrypoint (e.g. main.py -> script.sh)
      * doesn't re-surface the prior turn's source as a generated output. */
-    if (this.session) this.session.markPrimed(file.name, file.id ?? '', false, hash);
+        if (this.session)
+            this.session.markPrimed(file.name, file.id ?? '', false, hash);
   }
 
   async safeCall(
@@ -1499,7 +2114,11 @@ export class Job {
     memoryLimit: number,
     stdin?: string,
   ): Promise<NsJailResult> {
-    const command = ['/bin/bash', path.join(this.runtime.pkgdir, script), ...args];
+        const command = [
+            '/bin/bash',
+            path.join(this.runtime.pkgdir, script),
+            ...args,
+        ];
 
     const filteredExtra = filterExtraEnvVars(this.extra_env_vars);
 
@@ -1512,7 +2131,8 @@ export class Job {
       SANDBOX_LANGUAGE: this.runtime.language,
       HOME: '/mnt/data',
     };
-    const externalFetchGrant = script === 'run' && this.egressGrantToken
+        const externalFetchGrant =
+            script === 'run' && this.egressGrantToken
       ? this.egressGrantToken
       : undefined;
     if (externalFetchGrant) {
@@ -1525,11 +2145,20 @@ export class Job {
     let extraPkgdirs: string[] | undefined;
     if (this.runtime.language === 'bash') {
       const linkTarget: { nodeModulesPath?: string } = {};
-      extraPkgdirs = aggregateBashExtras(this.runtime.pkgdir, envVars, undefined, linkTarget);
-      ensureNodeModulesSymlink(this.submissionDir, linkTarget.nodeModulesPath);
+            extraPkgdirs = aggregateBashExtras(
+                this.runtime.pkgdir,
+                envVars,
+                undefined,
+                linkTarget,
+            );
+            ensureNodeModulesSymlink(
+                this.submissionDir,
+                linkTarget.nodeModulesPath,
+            );
     }
 
-    return execute({
+        if (externalFetchGrant) applyPackageManagerEnvironment(envVars);
+        const result = await execute({
       command,
       envVars,
       submissionDir: this.submissionDir,
@@ -1540,15 +2169,25 @@ export class Job {
       stdin,
       extraPkgdirs,
       identity: this.sandboxIdentity(),
-      enableToolCallSocket: this.toolCallSocketEnabled && script === 'run',
+            enableToolCallSocket:
+                this.toolCallSocketEnabled && script === 'run',
       externalFetchGrant,
       suppressSuccessLogs: this.isSynthetic,
     });
+        if (externalFetchGrant)
+            await attachPackageSetupSummary(result, this.submissionDir);
+        return result;
   }
 
   async execute(): Promise<ExecuteResult> {
     if (!this.isSynthetic) {
-      this.log.info({ runtime: this.runtime.language, version: this.runtime.version.raw }, 'Executing');
+            this.log.info(
+                {
+                    runtime: this.runtime.language,
+                    version: this.runtime.version.raw,
+                },
+                'Executing',
+            );
     }
 
     const codeFiles = this.files.filter(
@@ -1557,7 +2196,9 @@ export class Job {
     /* The request gate rejects this before priming (see hasRunnableSource);
      * this stays as the invariant for callers that build a Job directly. */
     if (!hasRunnableSource(this.files, this.runtime.language)) {
-      throw new ValidationError('files must include at least one runnable source file');
+            throw new ValidationError(
+                'files must include at least one runnable source file',
+            );
     }
     this.entryPointName = codeFiles[0]?.name;
     let compile: NsJailResult | undefined;
@@ -1615,7 +2256,10 @@ export class Job {
     try {
       await this.walkDir(this.submissionDir, 0, inputByName);
     } catch (error) {
-      this.log.error({ err: error }, 'Error scanning submission directory');
+            this.log.error(
+                { err: error },
+                'Error scanning submission directory',
+            );
     }
 
     /* Generated files get priority in sessionFiles; fill remaining slots up
@@ -1623,7 +2267,10 @@ export class Job {
      * and unchanged inherited .dirkeep markers). This bounds the response
      * at exactly max_output_files while preventing unchanged echoes from
      * crowding out real generated outputs. */
-    const remaining = Math.max(0, config.max_output_files - this.sessionFiles.length);
+        const remaining = Math.max(
+            0,
+            config.max_output_files - this.sessionFiles.length,
+        );
     if (remaining > 0 && this.inheritedRefs.length > 0) {
       this.sessionFiles.push(...this.inheritedRefs.slice(0, remaining));
     }
@@ -1649,7 +2296,10 @@ export class Job {
         isDir = st.isDirectory();
         isRegularFile = st.isFile();
       } catch (err) {
-        this.log.debug({ path: relativePath, err }, 'walkDir: failed to lstat entry');
+                this.log.debug(
+                    { path: relativePath, err },
+                    'walkDir: failed to lstat entry',
+                );
         return 'skip';
       }
     }
@@ -1670,7 +2320,8 @@ export class Job {
     inputByName: Map<string, TFile>,
   ): Promise<{ collected: boolean; truncated: boolean }> {
     const keepPath = path.join(relativePath, DIRKEEP);
-    if (!isValidPathShape(keepPath)) return { collected: false, truncated: false };
+        if (!isValidPathShape(keepPath))
+            return { collected: false, truncated: false };
     const keepFullPath = path.join(fullPath, DIRKEEP);
     const inheritedKeep = inputByName.get(keepPath);
 
@@ -1678,7 +2329,11 @@ export class Job {
       return this.handleInlineUserDirkeep(keepPath, keepFullPath);
     }
     if (inheritedKeep?.id && inheritedKeep.storage_session_id) {
-      return this.handleInheritedDirkeep(keepPath, keepFullPath, inheritedKeep);
+            return this.handleInheritedDirkeep(
+                keepPath,
+                keepFullPath,
+                inheritedKeep,
+            );
     }
     return this.createDirkeepMarker(keepPath, keepFullPath);
   }
@@ -1701,7 +2356,11 @@ export class Job {
       return { collected: false, truncated: true };
     }
     const id = nanoid();
-    this.sessionFiles.push({ id, name: keepPath, storage_session_id: this.outputSessionId });
+        this.sessionFiles.push({
+            id,
+            name: keepPath,
+            storage_session_id: this.outputSessionId,
+        });
     this.generatedFiles.push({ id, name: keepPath, path: keepFullPath });
     return { collected: true, truncated: false };
   }
@@ -1722,7 +2381,10 @@ export class Job {
       await fsp.access(keepFullPath);
       return false;
     } catch (err) {
-      this.log.debug({ keepPath, err }, 'walkDir: user .dirkeep no longer accessible');
+            this.log.debug(
+                { keepPath, err },
+                'walkDir: user .dirkeep no longer accessible',
+            );
       return true;
     }
   }
@@ -1738,19 +2400,28 @@ export class Job {
     inheritedKeep: TFile,
   ): Promise<{ collected: boolean; truncated: boolean }> {
     const keepInfo = this.inputFileHashes.get(keepPath);
-    const keepModified = await this.didInheritedKeepChange(keepPath, keepFullPath, keepInfo);
+        const keepModified = await this.didInheritedKeepChange(
+            keepPath,
+            keepFullPath,
+            keepInfo,
+        );
 
     /* Read-only inputs: see `tryEchoUnchangedInput` for the contract.
      * Modifications to a `read_only` `.dirkeep` are dropped on the floor —
      * we always echo the inherited ref so the caller sees the original
      * marker, never a refreshed/modified one. */
-    if (!keepModified || keepInfo?.readOnly === true) return this.echoInheritedKeep(keepPath, inheritedKeep);
+        if (!keepModified || keepInfo?.readOnly === true)
+            return this.echoInheritedKeep(keepPath, inheritedKeep);
 
     if (this.generatedFiles.length >= config.max_output_files) {
       return { collected: false, truncated: true };
     }
     const refreshedId = nanoid();
-    const refreshedRef: FileRef = { id: refreshedId, name: keepPath, storage_session_id: this.outputSessionId };
+        const refreshedRef: FileRef = {
+            id: refreshedId,
+            name: keepPath,
+            storage_session_id: this.outputSessionId,
+        };
     if (keepInfo?.originalId && keepInfo.originalSessionId) {
       refreshedRef.modified_from = {
         id: keepInfo.originalId,
@@ -1758,7 +2429,11 @@ export class Job {
       };
     }
     this.sessionFiles.push(refreshedRef);
-    this.generatedFiles.push({ id: refreshedId, name: keepPath, path: keepFullPath });
+        this.generatedFiles.push({
+            id: refreshedId,
+            name: keepPath,
+            path: keepFullPath,
+        });
     return { collected: true, truncated: false };
   }
 
@@ -1778,7 +2453,10 @@ export class Job {
       const currentHash = await this.computeFileHash(keepFullPath, true);
       return currentHash !== keepInfo.hash;
     } catch (err) {
-      this.log.debug({ keepPath, err }, 'walkDir: failed to hash inherited .dirkeep');
+            this.log.debug(
+                { keepPath, err },
+                'walkDir: failed to hash inherited .dirkeep',
+            );
       return false;
     }
   }
@@ -1820,19 +2498,32 @@ export class Job {
       await fsp.writeFile(keepFullPath, '', { flag: 'wx' });
       await this.applySandboxFilePermissions(keepFullPath, true);
     } catch (err) {
-      this.log.debug({ keepPath, err }, 'walkDir: failed to write .dirkeep marker');
+            this.log.debug(
+                { keepPath, err },
+                'walkDir: failed to write .dirkeep marker',
+            );
       return { collected: false, truncated: false };
     }
     const id = nanoid();
-    this.sessionFiles.push({ id, name: keepPath, storage_session_id: this.outputSessionId });
+        this.sessionFiles.push({
+            id,
+            name: keepPath,
+            storage_session_id: this.outputSessionId,
+        });
     this.generatedFiles.push({ id, name: keepPath, path: keepFullPath });
     /* A synthesized marker is a generated session output just like a regular
      * file. Record its known empty-file digest so a successful upload commits
      * it to the surfaced set; otherwise the persistent marker is re-uploaded
      * on every later turn. */
     if (this.session) {
-      const emptyHash = crypto.createHash('sha256').update('').digest('hex');
-      this.pendingSurfaced.set(id, { name: keepPath, signature: emptyHash });
+            const emptyHash = crypto
+                .createHash('sha256')
+                .update('')
+                .digest('hex');
+            this.pendingSurfaced.set(id, {
+                name: keepPath,
+                signature: emptyHash,
+            });
     }
     return { collected: true, truncated: false };
   }
@@ -1930,7 +2621,10 @@ export class Job {
       const st = await fsp.lstat(fullPath);
       size = st.size;
     } catch (err) {
-      this.log.debug({ path: relativePath, err }, 'walkDir: unable to stat file');
+            this.log.debug(
+                { path: relativePath, err },
+                'walkDir: unable to stat file',
+            );
       return { collected: false, truncated: false, stopLoop: false };
     }
     if (size > this.runtime.max_file_size) {
@@ -1950,7 +2644,10 @@ export class Job {
       try {
         contentHash = await this.computeFileHash(fullPath, true);
       } catch (err) {
-        this.log.debug({ path: relativePath, err }, 'walkDir: failed to hash file');
+                this.log.debug(
+                    { path: relativePath, err },
+                    'walkDir: failed to hash file',
+                );
       }
     }
 
@@ -1959,8 +2656,11 @@ export class Job {
      * bytes were surfaced: reuse populates inputFileInfo for modification
      * detection, but must not upload the same modified bytes every turn.
      * Fresh primes call markPrimed and clear stale surfaced lineage first. */
-    if (this.session && contentHash != null
-      && this.session.isSurfaced(relativePath, contentHash)) {
+        if (
+            this.session &&
+            contentHash != null &&
+            this.session.isSurfaced(relativePath, contentHash)
+        ) {
       return { collected: false, truncated: false, stopLoop: false };
     }
 
@@ -1972,9 +2672,16 @@ export class Job {
      * upload-retry path recover a modified input whose earlier upload was
      * pruned). Read-only inputs never surface modifications (dropped by
      * contract), so always suppress those. */
-    if (this.session && inputFileInfo == null && this.session.isPrimedInput(relativePath)) {
+        if (
+            this.session &&
+            inputFileInfo == null &&
+            this.session.isPrimedInput(relativePath)
+        ) {
       const primedHash = this.session.primedHash(relativePath);
-      const unchanged = contentHash != null && primedHash != null && contentHash === primedHash;
+            const unchanged =
+                contentHash != null &&
+                primedHash != null &&
+                contentHash === primedHash;
       if (unchanged || this.session.isPrimedReadOnly(relativePath)) {
         return { collected: false, truncated: false, stopLoop: false };
       }
@@ -1983,7 +2690,11 @@ export class Job {
     let wasModified = false;
     if (inputFileInfo && contentHash != null) {
       wasModified = contentHash !== inputFileInfo.hash;
-      if (wasModified) this.log.info({ file: relativePath }, 'Input file was modified');
+            if (wasModified)
+                this.log.info(
+                    { file: relativePath },
+                    'Input file was modified',
+                );
     }
 
     const echoed = this.tryEchoUnchangedInput({
@@ -2000,20 +2711,35 @@ export class Job {
 
     await this.applySandboxFilePermissions(fullPath, true);
     const newId = nanoid();
-    const fileData: FileRef = { id: newId, name: relativePath, storage_session_id: this.outputSessionId };
-    if (wasModified && inputFileInfo?.originalId && inputFileInfo.originalSessionId) {
+        const fileData: FileRef = {
+            id: newId,
+            name: relativePath,
+            storage_session_id: this.outputSessionId,
+        };
+        if (
+            wasModified &&
+            inputFileInfo?.originalId &&
+            inputFileInfo.originalSessionId
+        ) {
       fileData.modified_from = {
         id: inputFileInfo.originalId,
         storage_session_id: inputFileInfo.originalSessionId,
       };
     }
     this.sessionFiles.push(fileData);
-    this.generatedFiles.push({ id: newId, name: relativePath, path: fullPath });
+        this.generatedFiles.push({
+            id: newId,
+            name: relativePath,
+            path: fullPath,
+        });
     /* Defer the surfaced-mark until the upload succeeds (flushed in
      * uploadGeneratedFiles) — marking here would suppress the file forever if
      * its upload later fails and the route prunes it from the response. */
     if (this.session && contentHash != null) {
-      this.pendingSurfaced.set(newId, { name: relativePath, signature: contentHash });
+            this.pendingSurfaced.set(newId, {
+                name: relativePath,
+                signature: contentHash,
+            });
     }
     return { collected: true, truncated: false, stopLoop: false };
   }
@@ -2029,11 +2755,23 @@ export class Job {
     parentDepth: number,
     inputByName: Map<string, TFile>,
   ): Promise<{ collected: boolean; truncated: boolean }> {
-    await applySandboxPathPermissionsNoFollow(fullPath, this.sandboxIdentity(), SANDBOX_DIR_MODE, 'directory');
-    const childStatus = await this.walkDir(fullPath, parentDepth + 1, inputByName);
-    if (childStatus === 'collected') return { collected: true, truncated: false };
-    if (childStatus === 'skipped') return { collected: false, truncated: true };
-    if (this.isOutputCapFull()) return { collected: false, truncated: true };
+        await applySandboxPathPermissionsNoFollow(
+            fullPath,
+            this.sandboxIdentity(),
+            SANDBOX_DIR_MODE,
+            'directory',
+        );
+        const childStatus = await this.walkDir(
+            fullPath,
+            parentDepth + 1,
+            inputByName,
+        );
+        if (childStatus === 'collected')
+            return { collected: true, truncated: false };
+        if (childStatus === 'skipped')
+            return { collected: false, truncated: true };
+        if (this.isOutputCapFull())
+            return { collected: false, truncated: true };
     return this.handleEmptyDirectory(relativePath, fullPath, inputByName);
   }
 
@@ -2075,7 +2813,8 @@ export class Job {
      * is asserted-equal in `service/scripts/test-ptc-sentinel.ts` to catch
      * accidental drift in CI. */
     const PTC_HISTORY_FILENAME = '_ptc_history.json';
-    const isPtcReserved = (name: string): boolean => name === PTC_HISTORY_FILENAME;
+        const isPtcReserved = (name: string): boolean =>
+            name === PTC_HISTORY_FILENAME;
 
     const nonDirkeepCount = entries.reduce(
       (n, e) => (e.name === DIRKEEP || isPtcReserved(e.name) ? n : n + 1),
@@ -2094,14 +2833,21 @@ export class Job {
     let skippedHiddenDirs = 0;
 
     for (const entry of entries) {
-      if (this.isOutputCapFull()) { truncated = true; break; }
+            if (this.isOutputCapFull()) {
+                truncated = true;
+                break;
+            }
       if (isPtcReserved(entry.name)) continue;
 
       const fullPath = path.join(dir, entry.name);
       const relativePath = path.relative(this.submissionDir, fullPath);
       if (!isValidPathShape(relativePath)) continue;
 
-      const kind = await this.classifyDirent(entry, fullPath, relativePath);
+            const kind = await this.classifyDirent(
+                entry,
+                fullPath,
+                relativePath,
+            );
       if (kind === 'skip') continue;
 
       if (kind === 'dir') {
@@ -2112,18 +2858,34 @@ export class Job {
          * runtime plumbing, not user artifacts, and surfacing them back as
          * "Generated files" pollutes the chip list and the next prime().
          * `.dirkeep` is a file, not a directory, so it's unaffected. */
-        if (isHiddenDirectory(entry.name) && !inputsLiveUnder(inputByName, relativePath)) {
-          this.log.debug({ path: relativePath }, 'walkDir: skipping hidden directory');
+                if (
+                    isHiddenDirectory(entry.name) &&
+                    !inputsLiveUnder(inputByName, relativePath)
+                ) {
+                    this.log.debug(
+                        { path: relativePath },
+                        'walkDir: skipping hidden directory',
+                    );
           skippedHiddenDirs++;
           continue;
         }
-        const res = await this.walkSubdirectory(relativePath, fullPath, depth, inputByName);
+                const res = await this.walkSubdirectory(
+                    relativePath,
+                    fullPath,
+                    depth,
+                    inputByName,
+                );
         if (res.collected) hasCollectedChild = true;
         if (res.truncated) truncated = true;
         continue;
       }
 
-      const res = await this.handleRegularFile(entry, relativePath, fullPath, inputByName);
+            const res = await this.handleRegularFile(
+                entry,
+                relativePath,
+                fullPath,
+                inputByName,
+            );
       if (res.collected) hasCollectedChild = true;
       if (res.truncated) truncated = true;
       if (res.stopLoop) break;
@@ -2186,7 +2948,8 @@ export class Job {
     if (this.session) {
       for (const id of uploaded) {
         const pending = this.pendingSurfaced.get(id);
-        if (pending) this.session.markSurfaced(pending.name, pending.signature);
+                if (pending)
+                    this.session.markSurfaced(pending.name, pending.signature);
       }
     }
 
@@ -2224,7 +2987,10 @@ export class Job {
     try {
       const lstat = await fsp.lstat(file.path);
       if (lstat.isSymbolicLink()) {
-        this.log.error({ file: file.name }, 'Refusing to upload a symlink');
+                this.log.error(
+                    { file: file.name },
+                    'Refusing to upload a symlink',
+                );
         return null;
       }
       if (!lstat.isFile()) {
@@ -2236,7 +3002,10 @@ export class Job {
       }
       size = lstat.size;
     } catch (error) {
-      this.log.error({ file: file.name, err: error }, 'Error stat-ing file before upload');
+            this.log.error(
+                { file: file.name, err: error },
+                'Error stat-ing file before upload',
+            );
       return null;
     }
 
@@ -2261,10 +3030,16 @@ export class Job {
         'Content-Length': String(size),
       });
       /* See computeFileHash: numeric O_NOFOLLOW is only typed via fsp.open. */
-      uploadHandle = await fsp.open(file.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+            uploadHandle = await fsp.open(
+                file.path,
+                fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+            );
       stream = uploadHandle.createReadStream();
-      stream.on('error', (error) => {
-        this.log.warn({ file: file.name, err: error }, 'Upload file stream error');
+            stream.on('error', error => {
+                this.log.warn(
+                    { file: file.name, err: error },
+                    'Upload file stream error',
+                );
       });
       const controller = new AbortController();
       timeout = setTimeout(() => controller.abort(), 30000);
@@ -2284,10 +3059,16 @@ export class Job {
       if (!response.ok) {
         throw new Error(`Upload HTTP error: ${response.status}`);
       }
-      this.log.debug({ file: file.name, id: file.id, size }, 'Uploaded file');
+            this.log.debug(
+                { file: file.name, id: file.id, size },
+                'Uploaded file',
+            );
       return file.id;
     } catch (error) {
-      this.log.error({ file: file.name, err: error }, 'Error uploading file');
+            this.log.error(
+                { file: file.name, err: error },
+                'Error uploading file',
+            );
       return null;
     } finally {
       if (timeout) clearTimeout(timeout);
@@ -2328,10 +3109,14 @@ export class Job {
 
     if (workspaceLease) {
       try {
-        workspaceRemoved = await cleanupSandboxWorkspace(workspaceLease);
+                workspaceRemoved =
+                    await cleanupSandboxWorkspace(workspaceLease);
       } catch (error) {
         workspaceRemoved = false;
-        this.log.error({ submissionDir: this.submissionDir, err: error }, 'Failed to clean up');
+                this.log.error(
+                    { submissionDir: this.submissionDir, err: error },
+                    'Failed to clean up',
+                );
       } finally {
         this.workspaceLease = undefined;
         this.submissionDir = '';
@@ -2345,12 +3130,20 @@ export class Job {
         retainWorkspaceCleanupUntilRemoved(workspaceLease, () => {
           releaseJobIdentity(jobIdentity);
           this.log.info(
-            { uid: jobIdentity.uid, gid: jobIdentity.gid, slot: jobIdentity.slot },
+                        {
+                            uid: jobIdentity.uid,
+                            gid: jobIdentity.gid,
+                            slot: jobIdentity.slot,
+                        },
             'Released retained sandbox job UID slot after workspace cleanup',
           );
         });
         this.log.error(
-          { uid: jobIdentity.uid, gid: jobIdentity.gid, slot: jobIdentity.slot },
+                    {
+                        uid: jobIdentity.uid,
+                        gid: jobIdentity.gid,
+                        slot: jobIdentity.slot,
+                    },
           'Retaining sandbox job UID slot after failed workspace cleanup',
         );
       }

@@ -3,7 +3,12 @@ import * as fsp from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
 import { config } from './config';
-import { buildArgs, execute, renderJobConfigOverlay } from './nsjail';
+import {
+  buildArgs,
+  cleanupFailedPackageSandboxSpawn,
+  execute,
+  renderJobConfigOverlay,
+} from './nsjail';
 
 function valueAfter(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag);
@@ -151,11 +156,32 @@ describe('NsJail args', () => {
       expect(hasArgPair(args, '-B', '/tmp/tcs.sock:/tmp/tcs.sock')).toBe(true);
       expect(hasArgPair(args, '-R', '/tmp/nsjail-grant-random:/run/codeapi/egress-grant')).toBe(true);
       expect(args.join('\n')).not.toContain('opaque-grant');
+      expect(hasArgPair(
+        args,
+        '-E',
+        'NODE_OPTIONS=--require=/usr/local/lib/sandbox-fetch/https_passthrough_preload.cjs',
+      )).toBe(true);
       expect(args).not.toContain('--disable_clone_newnet');
       expect(args.join('\n')).toContain('domain == AF_INET || domain == AF_INET6');
     } finally {
       config.allowed_local_network_port = originalAllowedPort;
     }
+  });
+});
+
+describe('package namespace cleanup', () => {
+  test('stops the private network holder before cleaning an async spawn failure', async () => {
+    const holder = { pid: 1234 } as never;
+    const events: string[] = [];
+    await cleanupFailedPackageSandboxSpawn(
+      holder,
+      () => events.push('cleanup'),
+      async child => {
+        expect(child).toBe(holder);
+        events.push('stop');
+      },
+    );
+    expect(events).toEqual(['stop', 'cleanup']);
   });
 });
 

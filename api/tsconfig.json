@@ -7,12 +7,13 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "outDir": ".build",
+    "rootDir": "..",
     "baseUrl": ".",
     "types": ["bun-types"],
     "paths": {
       "@/*": ["src/*"]
     }
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "../shared/package-transport.ts"],
   "exclude": ["node_modules", ".build"]
 }

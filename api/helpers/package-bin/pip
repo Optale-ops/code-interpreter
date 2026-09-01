@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+wrapper_dir=/usr/local/lib/sandbox-fetch/package-bin
+real=
+old_ifs=$IFS
+IFS=:
+for dir in $PATH; do
+  if [ "$dir" != "$wrapper_dir" ] && [ -x "$dir/pip" ]; then real="$dir/pip"; break; fi
+done
+IFS=$old_ifs
+if [ -z "$real" ]; then echo "pip runtime is unavailable" >&2; exit 127; fi
+case "${1:-}" in
+  install)
+    started=$(date +%s%3N)
+    set +e
+    "$real" "$@"
+    status=$?
+    set -e
+    ended=$(date +%s%3N)
+    node /usr/local/lib/sandbox-fetch/package-invocation.cjs pip "$started" "$ended" "$status" "$@" || true
+    exit "$status"
+    ;;
+  *) exec "$real" "$@" ;;
+esac

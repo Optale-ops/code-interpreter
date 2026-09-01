@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+wrapper_dir=/usr/local/lib/sandbox-fetch/package-bin
+real=
+old_ifs=$IFS
+IFS=:
+for dir in $PATH; do
+  if [ "$dir" != "$wrapper_dir" ] && [ -x "$dir/npm" ]; then
+    real="$dir/npm"
+    break
+  fi
+done
+IFS=$old_ifs
+if [ -z "$real" ]; then
+  echo "npm runtime is unavailable" >&2
+  exit 127
+fi
+case "${1:-}" in
+  install|i|add|install-test|it)
+    root=/mnt/data/.optale-packages/node
+    mkdir -p "$root"
+    if [ ! -f "$root/package.json" ]; then
+      printf '%s\n' '{"name":"optale-job-packages","private":true}' > "$root/package.json"
+    fi
+    started=$(date +%s%3N)
+    set +e
+    env \
+      npm_config_proxy="${PACKAGE_PROXY_URL}" \
+      npm_config_https_proxy="${PACKAGE_PROXY_URL}" \
+      npm_config_cafile=/run/codeapi/package-ca.pem \
+      npm_config_audit=false \
+      npm_config_fund=false \
+      npm_config_save_exact=true \
+      "$real" --prefix "$root" "$@"
+    status=$?
+    set -e
+    ended=$(date +%s%3N)
+    node /usr/local/lib/sandbox-fetch/package-invocation.cjs npm "$started" "$ended" "$status" "$@" || true
+    exit "$status"
+    ;;
+  *) exec "$real" "$@" ;;
+esac

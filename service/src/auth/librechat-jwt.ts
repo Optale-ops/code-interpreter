@@ -10,6 +10,11 @@ import type { JsonWebKey, KeyObject } from 'crypto';
 import type { Request } from 'express';
 import type { AuthProvider } from './provider';
 import type { CodeApiPrincipal } from './principal';
+import {
+    externalFetchPolicyDigest,
+    parseExternalFetchPolicy,
+    type ExternalFetchPolicySnapshot,
+} from '../external-fetch-policy';
 
 type JwtAlg = 'EdDSA' | 'RS256' | 'HS256';
 type LibreChatPrincipalSource = 'librechat_jwt' | 'openid_reuse';
@@ -39,6 +44,8 @@ interface LibreChatJwtClaims {
   chc_user_id?: string; // leak-check:allow
   auth_context_hash?: string;
   plan_id?: string;
+    network_policy?: ExternalFetchPolicySnapshot;
+    network_policy_digest?: string;
 }
 
 interface PublicKeyEntry {
@@ -81,7 +88,10 @@ function base64UrlDecode(value: string): Buffer {
   try {
     return Buffer.from(value, 'base64url');
   } catch {
-    throw new CodeApiJwtAuthError('malformed', 'JWT segment is not valid base64url');
+        throw new CodeApiJwtAuthError(
+            'malformed',
+            'JWT segment is not valid base64url',
+        );
   }
 }
 
@@ -92,7 +102,10 @@ function parseJsonSegment<T>(segment: string, label: string): T {
     if (err instanceof CodeApiJwtAuthError) {
       throw err;
     }
-    throw new CodeApiJwtAuthError('malformed', `${label} is not valid JSON`);
+        throw new CodeApiJwtAuthError(
+            'malformed',
+            `${label} is not valid JSON`,
+        );
   }
 }
 
@@ -128,7 +141,11 @@ function parseClockSkew(): number {
   return Math.min(Math.floor(parsed), 30);
 }
 
-function parseCappedSeconds(value: string | undefined, fallback: number, max: number): number {
+function parseCappedSeconds(
+    value: string | undefined,
+    fallback: number,
+    max: number,
+): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     return fallback;
@@ -140,23 +157,37 @@ function publicKeyFromValue(value: string): KeyObject {
   const trimmed = value.replace(/\\n/g, '\n').trim();
   try {
     if (trimmed.startsWith('{')) {
-      return createPublicKey({ key: JSON.parse(trimmed) as JsonWebKey, format: 'jwk' });
+            return createPublicKey({
+                key: JSON.parse(trimmed) as JsonWebKey,
+                format: 'jwk',
+            });
     }
     return createPublicKey(trimmed);
   } catch {
-    throw new CodeApiJwtAuthError('config', 'CodeAPI JWT public key is invalid');
+        throw new CodeApiJwtAuthError(
+            'config',
+            'CodeAPI JWT public key is invalid',
+        );
   }
 }
 
 function loadJwks(keys: Map<string, PublicKeyEntry>, raw: string): void {
   let parsed: { keys?: Array<JsonWebKey & { kid?: string; alg?: string }> };
   try {
-    parsed = JSON.parse(raw) as { keys?: Array<JsonWebKey & { kid?: string; alg?: string }> };
+        parsed = JSON.parse(raw) as {
+            keys?: Array<JsonWebKey & { kid?: string; alg?: string }>;
+        };
   } catch {
-    throw new CodeApiJwtAuthError('config', 'CODEAPI_JWT_JWKS_JSON is not valid JSON');
+        throw new CodeApiJwtAuthError(
+            'config',
+            'CODEAPI_JWT_JWKS_JSON is not valid JSON',
+        );
   }
   if (!Array.isArray(parsed.keys)) {
-    throw new CodeApiJwtAuthError('config', 'CODEAPI_JWT_JWKS_JSON must contain a keys array');
+        throw new CodeApiJwtAuthError(
+            'config',
+            'CODEAPI_JWT_JWKS_JSON must contain a keys array',
+        );
   }
   for (const jwk of parsed.keys) {
     if (!jwk.kid) {
@@ -164,19 +195,31 @@ function loadJwks(keys: Map<string, PublicKeyEntry>, raw: string): void {
     }
     try {
       keys.set(jwk.kid, {
-        alg: jwk.alg === 'EdDSA' || jwk.alg === 'RS256' ? jwk.alg : undefined,
+                alg:
+                    jwk.alg === 'EdDSA' || jwk.alg === 'RS256'
+                        ? jwk.alg
+                        : undefined,
         key: createPublicKey({ key: jwk, format: 'jwk' }),
       });
     } catch {
-      throw new CodeApiJwtAuthError('config', `CodeAPI JWT public key ${jwk.kid} is invalid`);
+            throw new CodeApiJwtAuthError(
+                'config',
+                `CodeAPI JWT public key ${jwk.kid} is invalid`,
+            );
     }
   }
 }
 
-function loadPublicKeyDir(keys: Map<string, PublicKeyEntry>, dir: string): void {
+function loadPublicKeyDir(
+    keys: Map<string, PublicKeyEntry>,
+    dir: string,
+): void {
   try {
     if (!existsSync(dir) || !statSync(dir).isDirectory()) {
-      throw new CodeApiJwtAuthError('config', 'CODEAPI_JWT_PUBLIC_KEYS_DIR is not a directory');
+            throw new CodeApiJwtAuthError(
+                'config',
+                'CODEAPI_JWT_PUBLIC_KEYS_DIR is not a directory',
+            );
     }
     for (const file of readdirSync(dir)) {
       const fullPath = join(dir, file);
@@ -187,13 +230,18 @@ function loadPublicKeyDir(keys: Map<string, PublicKeyEntry>, dir: string): void 
       if (!kid) {
         continue;
       }
-      keys.set(kid, { key: publicKeyFromValue(readFileSync(fullPath, 'utf8')) });
+            keys.set(kid, {
+                key: publicKeyFromValue(readFileSync(fullPath, 'utf8')),
+            });
     }
   } catch (error) {
     if (error instanceof CodeApiJwtAuthError) {
       throw error;
     }
-    throw new CodeApiJwtAuthError('config', 'CODEAPI_JWT_PUBLIC_KEYS_DIR could not be read');
+        throw new CodeApiJwtAuthError(
+            'config',
+            'CODEAPI_JWT_PUBLIC_KEYS_DIR could not be read',
+        );
   }
 }
 
@@ -211,21 +259,31 @@ function loadKeys(): Map<string, PublicKeyEntry> {
 
   const publicKey = process.env.CODEAPI_JWT_PUBLIC_KEY;
   if (publicKey != null && publicKey.trim() !== '') {
-    const kid = process.env.CODEAPI_JWT_KID ?? process.env.CODEAPI_JWT_KEY_ID;
+        const kid =
+            process.env.CODEAPI_JWT_KID ?? process.env.CODEAPI_JWT_KEY_ID;
     if (!kid) {
-      throw new CodeApiJwtAuthError('config', 'CODEAPI_JWT_KID is required with CODEAPI_JWT_PUBLIC_KEY');
+            throw new CodeApiJwtAuthError(
+                'config',
+                'CODEAPI_JWT_KID is required with CODEAPI_JWT_PUBLIC_KEY',
+            );
     }
     keys.set(kid, { key: publicKeyFromValue(publicKey) });
   }
 
   const hsSecret = process.env.CODEAPI_JWT_HS256_SECRET;
   if (hsSecret != null && hsSecret !== '') {
-    const kid = process.env.CODEAPI_JWT_HS256_KID ?? process.env.CODEAPI_JWT_KID ?? 'hs256-dev';
+        const kid =
+            process.env.CODEAPI_JWT_HS256_KID ??
+            process.env.CODEAPI_JWT_KID ??
+            'hs256-dev';
     keys.set(kid, { alg: 'HS256', key: Buffer.from(hsSecret) });
   }
 
   if (keys.size === 0) {
-    throw new CodeApiJwtAuthError('config', 'No CodeAPI JWT verification keys configured');
+        throw new CodeApiJwtAuthError(
+            'config',
+            'No CodeAPI JWT verification keys configured',
+        );
   }
   return keys;
 }
@@ -286,8 +344,13 @@ function verifySignature(
     if (!Buffer.isBuffer(key.key)) {
       return false;
     }
-    const expected = createHmac('sha256', key.key).update(signingInput).digest();
-    return expected.length === signature.length && timingSafeEqual(expected, signature);
+        const expected = createHmac('sha256', key.key)
+            .update(signingInput)
+            .digest();
+        return (
+            expected.length === signature.length &&
+            timingSafeEqual(expected, signature)
+        );
   }
   if (Buffer.isBuffer(key.key)) {
     return false;
@@ -306,7 +369,10 @@ function verifySignature(
 
 function assertString(value: unknown, name: string): string {
   if (typeof value !== 'string' || value.trim() === '') {
-    throw new CodeApiJwtAuthError('malformed_claims', `${name} is required`);
+        throw new CodeApiJwtAuthError(
+            'malformed_claims',
+            `${name} is required`,
+        );
   }
   return value;
 }
@@ -314,19 +380,28 @@ function assertString(value: unknown, name: string): string {
 function assertAudience(value: unknown, expected: string): void {
   if (typeof value === 'string' && value.trim() !== '') {
     if (value !== expected) {
-      throw new CodeApiJwtAuthError('wrong_audience', 'JWT audience is not accepted');
+            throw new CodeApiJwtAuthError(
+                'wrong_audience',
+                'JWT audience is not accepted',
+            );
     }
     return;
   }
 
   if (Array.isArray(value) && value.length > 0) {
-    if (!value.every((audience) => typeof audience === 'string')) {
-      throw new CodeApiJwtAuthError('malformed_claims', 'aud must contain only strings');
+        if (!value.every(audience => typeof audience === 'string')) {
+            throw new CodeApiJwtAuthError(
+                'malformed_claims',
+                'aud must contain only strings',
+            );
     }
     if (value.includes(expected)) {
       return;
     }
-    throw new CodeApiJwtAuthError('wrong_audience', 'JWT audience is not accepted');
+        throw new CodeApiJwtAuthError(
+            'wrong_audience',
+            'JWT audience is not accepted',
+        );
   }
 
   throw new CodeApiJwtAuthError('malformed_claims', 'aud is required');
@@ -334,7 +409,10 @@ function assertAudience(value: unknown, expected: string): void {
 
 function assertNumericDate(value: unknown, name: string): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
-    throw new CodeApiJwtAuthError('malformed_claims', `${name} must be a number`);
+        throw new CodeApiJwtAuthError(
+            'malformed_claims',
+            `${name} must be a number`,
+        );
   }
   return value;
 }
@@ -344,9 +422,48 @@ function optionalString(value: unknown, name: string): string | undefined {
     return undefined;
   }
   if (typeof value !== 'string' || value.trim() === '') {
-    throw new CodeApiJwtAuthError('malformed_claims', `${name} must be a string`);
+        throw new CodeApiJwtAuthError(
+            'malformed_claims',
+            `${name} must be a string`,
+        );
   }
   return value;
+}
+
+function validatedNetworkPolicyBinding(claims: LibreChatJwtClaims): {
+    networkPolicy?: ExternalFetchPolicySnapshot;
+    networkPolicyDigest?: string;
+} {
+    const hasPolicy = claims.network_policy !== undefined;
+    const hasDigest = claims.network_policy_digest !== undefined;
+    if (!hasPolicy && !hasDigest) return {};
+    if (
+        !hasPolicy ||
+        !hasDigest ||
+        typeof claims.network_policy_digest !== 'string'
+    ) {
+        throw new CodeApiJwtAuthError(
+            'malformed_claims',
+            'network policy binding is incomplete',
+        );
+    }
+    try {
+        const parsed = parseExternalFetchPolicy(claims.network_policy);
+        if (
+            externalFetchPolicyDigest(parsed) !== claims.network_policy_digest
+        ) {
+            throw new Error('digest mismatch');
+        }
+    } catch {
+        throw new CodeApiJwtAuthError(
+            'malformed_claims',
+            'network policy binding is invalid',
+        );
+    }
+    return {
+        networkPolicy: claims.network_policy,
+        networkPolicyDigest: claims.network_policy_digest,
+    };
 }
 
 function strictTenantIsolation(): boolean {
@@ -367,12 +484,17 @@ function resolveTenantIdClaim(value: unknown): string {
     return tenantId;
   }
   if (strictTenantIsolation()) {
-    throw new CodeApiJwtAuthError('malformed_claims', 'tenant_id is required');
+        throw new CodeApiJwtAuthError(
+            'malformed_claims',
+            'tenant_id is required',
+        );
   }
   return resolveSingleTenantId();
 }
 
-function isTrustedPrincipalSource(value: string): value is LibreChatPrincipalSource {
+function isTrustedPrincipalSource(
+    value: string,
+): value is LibreChatPrincipalSource {
   return TRUSTED_PRINCIPAL_SOURCES.has(value as LibreChatPrincipalSource);
 }
 
@@ -381,10 +503,16 @@ function assertPrincipalSource(value: unknown): LibreChatPrincipalSource {
   if (isTrustedPrincipalSource(principalSource)) {
     return principalSource;
   }
-  throw new CodeApiJwtAuthError('malformed_claims', 'principal_source is not accepted');
+    throw new CodeApiJwtAuthError(
+        'malformed_claims',
+        'principal_source is not accepted',
+    );
 }
 
-function validateClaims(claims: LibreChatJwtClaims, config: VerificationConfig): CodeApiPrincipal {
+function validateClaims(
+    claims: LibreChatJwtClaims,
+    config: VerificationConfig,
+): CodeApiPrincipal {
   const now = Math.floor(Date.now() / 1000);
   const issuer = assertString(claims.iss, 'iss');
   const userId = assertString(claims.sub, 'sub');
@@ -395,13 +523,20 @@ function validateClaims(claims: LibreChatJwtClaims, config: VerificationConfig):
   const exp = assertNumericDate(claims.exp, 'exp');
   const planId = optionalString(claims.plan_id, 'plan_id');
   const principalSource = assertPrincipalSource(claims.principal_source);
-  const authContextHash = assertString(claims.auth_context_hash, 'auth_context_hash');
+    const authContextHash = assertString(
+        claims.auth_context_hash,
+        'auth_context_hash',
+    );
+    const networkPolicyBinding = validatedNetworkPolicyBinding(claims);
 
   if (jti.length > 256) {
     throw new CodeApiJwtAuthError('malformed_claims', 'jti is too long');
   }
   if (issuer !== config.issuer) {
-    throw new CodeApiJwtAuthError('wrong_issuer', 'JWT issuer is not trusted');
+        throw new CodeApiJwtAuthError(
+            'wrong_issuer',
+            'JWT issuer is not trusted',
+        );
   }
   assertAudience(claims.aud, config.audience);
   if (exp <= now - config.clockSkewSeconds) {
@@ -414,10 +549,16 @@ function validateClaims(claims: LibreChatJwtClaims, config: VerificationConfig):
     throw new CodeApiJwtAuthError('future_iat', 'JWT iat is in the future');
   }
   if (exp <= iat) {
-    throw new CodeApiJwtAuthError('malformed_claims', 'JWT exp must be after iat');
+        throw new CodeApiJwtAuthError(
+            'malformed_claims',
+            'JWT exp must be after iat',
+        );
   }
   if (exp - iat > config.maxTokenLifetimeSeconds) {
-    throw new CodeApiJwtAuthError('ttl_too_long', 'JWT lifetime exceeds CodeAPI maximum');
+        throw new CodeApiJwtAuthError(
+            'ttl_too_long',
+            'JWT lifetime exceeds CodeAPI maximum',
+        );
   }
 
   return {
@@ -425,14 +566,21 @@ function validateClaims(claims: LibreChatJwtClaims, config: VerificationConfig):
     tenantId,
     role: typeof claims.role === 'string' ? claims.role : undefined,
     orgId: typeof claims.org_id === 'string' ? claims.org_id : undefined,
-    serviceId: typeof claims.service_id === 'string' ? claims.service_id : undefined,
-    externalUserId: typeof claims.external_user_id === 'string'
+        serviceId:
+            typeof claims.service_id === 'string'
+                ? claims.service_id
+                : undefined,
+        externalUserId:
+            typeof claims.external_user_id === 'string'
       ? claims.external_user_id
-      // Legacy fallback until the token issuer emits external_user_id.
-      : typeof claims.chc_user_id === 'string' ? claims.chc_user_id : undefined, // leak-check:allow
+                : // Legacy fallback until the token issuer emits external_user_id.
+                  typeof claims.chc_user_id === 'string'
+                  ? claims.chc_user_id
+                  : undefined, // leak-check:allow
     principalSource,
     authContextHash,
     planId,
+        ...networkPolicyBinding,
   };
 }
 
@@ -444,11 +592,17 @@ export function verifyLibreChatJwt(token: string): CodeApiPrincipal {
   const config = getConfig();
   const parts = token.split('.');
   if (parts.length !== 3) {
-    throw new CodeApiJwtAuthError('malformed', 'JWT must have three segments');
+        throw new CodeApiJwtAuthError(
+            'malformed',
+            'JWT must have three segments',
+        );
   }
   const [encodedHeader, encodedPayload, encodedSignature] = parts;
   const header = parseJsonSegment<JwtHeader>(encodedHeader, 'JWT header');
-  const claims = parseJsonSegment<LibreChatJwtClaims>(encodedPayload, 'JWT payload');
+    const claims = parseJsonSegment<LibreChatJwtClaims>(
+        encodedPayload,
+        'JWT payload',
+    );
   const alg = header.alg;
   if (alg !== 'EdDSA' && alg !== 'RS256' && alg !== 'HS256') {
     throw new CodeApiJwtAuthError('wrong_alg', 'JWT alg is not supported');
@@ -462,15 +616,24 @@ export function verifyLibreChatJwt(token: string): CodeApiPrincipal {
   const kid = assertString(header.kid, 'kid');
   const key = config.keys.get(kid);
   if (!key) {
-    throw new CodeApiJwtAuthError('unknown_kid', 'JWT kid is not configured');
+        throw new CodeApiJwtAuthError(
+            'unknown_kid',
+            'JWT kid is not configured',
+        );
   }
   if (key.alg && key.alg !== alg) {
-    throw new CodeApiJwtAuthError('wrong_alg', 'JWT alg does not match key');
+        throw new CodeApiJwtAuthError(
+            'wrong_alg',
+            'JWT alg does not match key',
+        );
   }
   const signingInput = `${encodedHeader}.${encodedPayload}`;
   const signature = base64UrlDecode(encodedSignature);
   if (!verifySignature(alg, key, signingInput, signature)) {
-    throw new CodeApiJwtAuthError('bad_signature', 'JWT signature is invalid');
+        throw new CodeApiJwtAuthError(
+            'bad_signature',
+            'JWT signature is invalid',
+        );
   }
   return validateClaims(claims, config);
 }

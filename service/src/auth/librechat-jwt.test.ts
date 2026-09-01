@@ -5,6 +5,13 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import type { KeyObject } from 'crypto';
 import { CodeApiJwtAuthError, verifyLibreChatJwt } from './librechat-jwt';
+import {
+    HARD_EXTERNAL_FETCH_LIMITS,
+    externalFetchPolicyDigest,
+    parseExternalFetchPolicy,
+    serializeExternalFetchPolicy,
+    type ExternalFetchPolicySnapshot,
+} from '../external-fetch-policy';
 
 const ENV_KEYS = [
   'CODEAPI_JWT_ISSUER',
@@ -48,7 +55,24 @@ type JwtClaims = {
   chc_user_id?: string;
   auth_context_hash?: string;
   plan_id?: string;
+    network_policy?: ExternalFetchPolicySnapshot;
+    network_policy_digest?: string;
 };
+
+function networkBinding(): {
+    network_policy: ExternalFetchPolicySnapshot;
+    network_policy_digest: string;
+} {
+    const policy = parseExternalFetchPolicy({
+        version: 1,
+        limits: { ...HARD_EXTERNAL_FETCH_LIMITS },
+        hosts: { 'registry.npmjs.org': { packageTransport: true } },
+    });
+    return {
+        network_policy: serializeExternalFetchPolicy(policy),
+        network_policy_digest: externalFetchPolicyDigest(policy),
+    };
+}
 
 const originalEnv = new Map<string, string | undefined>();
 let privateKey: KeyObject;
@@ -118,7 +142,8 @@ beforeEach(() => {
     }
   }
 
-  const { publicKey, privateKey: generatedPrivateKey } = generateKeyPairSync('ed25519');
+    const { publicKey, privateKey: generatedPrivateKey } =
+        generateKeyPairSync('ed25519');
   privateKey = generatedPrivateKey;
   const jwk = publicKey.export({ format: 'jwk' });
 
@@ -171,14 +196,24 @@ describe('LibreChat JWT auth provider', () => {
 
   test('accepts the legacy chc_user_id claim as externalUserId', () => {
     const principal = verifyLibreChatJwt(
-      signJwt(baseClaims({ external_user_id: undefined, chc_user_id: 'chc_legacy_456' })),
+            signJwt(
+                baseClaims({
+                    external_user_id: undefined,
+                    chc_user_id: 'chc_legacy_456',
+                }),
+            ),
     );
     expect(principal.externalUserId).toBe('chc_legacy_456');
   });
 
   test('prefers external_user_id over the legacy claim when both are present', () => {
     const principal = verifyLibreChatJwt(
-      signJwt(baseClaims({ external_user_id: 'ext_789', chc_user_id: 'chc_legacy_456' })),
+            signJwt(
+                baseClaims({
+                    external_user_id: 'ext_789',
+                    chc_user_id: 'chc_legacy_456',
+                }),
+            ),
     );
     expect(principal.externalUserId).toBe('ext_789');
   });
@@ -190,13 +225,19 @@ describe('LibreChat JWT auth provider', () => {
 
   test('rejects future nbf and future iat beyond the 30 second skew', () => {
     const now = Math.floor(Date.now() / 1000);
-    expectJwtReason(signJwt(baseClaims({ nbf: now + 31 })), 'not_yet_valid');
+        expectJwtReason(
+            signJwt(baseClaims({ nbf: now + 31 })),
+            'not_yet_valid',
+        );
     expectJwtReason(signJwt(baseClaims({ iat: now + 31 })), 'future_iat');
   });
 
   test('rejects tokens whose lifetime exceeds the CodeAPI maximum', () => {
     const now = Math.floor(Date.now() / 1000);
-    expectJwtReason(signJwt(baseClaims({ iat: now, nbf: now, exp: now + 301 })), 'ttl_too_long');
+        expectJwtReason(
+            signJwt(baseClaims({ iat: now, nbf: now, exp: now + 301 })),
+            'ttl_too_long',
+        );
   });
 
   test('rejects invalid allowed algorithm configuration instead of defaulting open', () => {
@@ -205,20 +246,33 @@ describe('LibreChat JWT auth provider', () => {
   });
 
   test('rejects wrong audience and issuer', () => {
-    expectJwtReason(signJwt(baseClaims({ aud: 'other-api' })), 'wrong_audience');
-    expectJwtReason(signJwt(baseClaims({ aud: ['other-api'] })), 'wrong_audience');
-    expectJwtReason(signJwt(baseClaims({ iss: 'other-issuer' })), 'wrong_issuer');
+        expectJwtReason(
+            signJwt(baseClaims({ aud: 'other-api' })),
+            'wrong_audience',
+        );
+        expectJwtReason(
+            signJwt(baseClaims({ aud: ['other-api'] })),
+            'wrong_audience',
+        );
+        expectJwtReason(
+            signJwt(baseClaims({ iss: 'other-issuer' })),
+            'wrong_issuer',
+        );
   });
 
   test('accepts standard JWT audience arrays when they contain CodeAPI', () => {
-    const principal = verifyLibreChatJwt(signJwt(baseClaims({ aud: ['account', 'codeapi'] })));
+        const principal = verifyLibreChatJwt(
+            signJwt(baseClaims({ aud: ['account', 'codeapi'] })),
+        );
 
     expect(principal.userId).toBe('user_123');
     expect(principal.tenantId).toBe('tenant_abc');
   });
 
   test('defaults missing tenant_id to the single-tenant namespace outside strict mode', () => {
-    const principal = verifyLibreChatJwt(signJwt(baseClaims({ tenant_id: undefined })));
+        const principal = verifyLibreChatJwt(
+            signJwt(baseClaims({ tenant_id: undefined })),
+        );
 
     expect(principal.tenantId).toBe('legacy');
   });
@@ -226,7 +280,9 @@ describe('LibreChat JWT auth provider', () => {
   test('uses configured single-tenant namespace when tenant_id is absent outside strict mode', () => {
     process.env.CODEAPI_JWT_SINGLE_TENANT_ID = 'local-single-tenant';
 
-    const principal = verifyLibreChatJwt(signJwt(baseClaims({ tenant_id: undefined })));
+        const principal = verifyLibreChatJwt(
+            signJwt(baseClaims({ tenant_id: undefined })),
+        );
 
     expect(principal.tenantId).toBe('local-single-tenant');
   });
@@ -234,7 +290,10 @@ describe('LibreChat JWT auth provider', () => {
   test('requires tenant_id when strict tenant isolation is enabled', () => {
     process.env.CODEAPI_TENANT_ISOLATION_STRICT = 'true';
 
-    expectJwtReason(signJwt(baseClaims({ tenant_id: undefined })), 'malformed_claims');
+        expectJwtReason(
+            signJwt(baseClaims({ tenant_id: undefined })),
+            'malformed_claims',
+        );
   });
 
   test('reloads public key directory entries after the configured cache TTL', () => {
@@ -253,26 +312,41 @@ describe('LibreChat JWT auth provider', () => {
 
       writeFileSync(
         keyPath,
-        first.publicKey.export({ format: 'pem', type: 'spki' }) as string,
+                first.publicKey.export({
+                    format: 'pem',
+                    type: 'spki',
+                }) as string,
       );
       const oldToken = signJwt(baseClaims(), {}, first.privateKey);
       expect(verifyLibreChatJwt(oldToken).userId).toBe('user_123');
 
       writeFileSync(
         keyPath,
-        second.publicKey.export({ format: 'pem', type: 'spki' }) as string,
+                second.publicKey.export({
+                    format: 'pem',
+                    type: 'spki',
+                }) as string,
       );
       expect(verifyLibreChatJwt(oldToken).userId).toBe('user_123');
       expectJwtReason(
-        signJwt(baseClaims({ jti: 'jti_before_reload' }), {}, second.privateKey),
+                signJwt(
+                    baseClaims({ jti: 'jti_before_reload' }),
+                    {},
+                    second.privateKey,
+                ),
         'bad_signature',
       );
 
       nowMs += 1001;
       expectJwtReason(oldToken, 'bad_signature');
       expect(
-        verifyLibreChatJwt(signJwt(baseClaims({ jti: 'jti_rotated' }), {}, second.privateKey))
-          .userId,
+                verifyLibreChatJwt(
+                    signJwt(
+                        baseClaims({ jti: 'jti_rotated' }),
+                        {},
+                        second.privateKey,
+                    ),
+                ).userId,
       ).toBe('user_123');
     } finally {
       Date.now = originalNow;
@@ -295,25 +369,38 @@ describe('LibreChat JWT auth provider', () => {
   });
 
   test('rejects unknown kid and disallowed alg', () => {
-    expectJwtReason(signJwt(baseClaims(), { kid: 'rotated-away' }), 'unknown_kid');
-    expectJwtReason(signJwt(baseClaims(), { alg: 'HS256', kid: 'test-kid' }), 'wrong_alg');
+        expectJwtReason(
+            signJwt(baseClaims(), { kid: 'rotated-away' }),
+            'unknown_kid',
+        );
+        expectJwtReason(
+            signJwt(baseClaims(), { alg: 'HS256', kid: 'test-kid' }),
+            'wrong_alg',
+        );
   });
 
   test('rejects tampered signatures and malformed required claims', () => {
     const token = signJwt(baseClaims());
-    const [encodedHeader, encodedPayload, encodedSignature] = token.split('.') as [
-      string,
-      string,
-      string,
-    ];
+        const [encodedHeader, encodedPayload, encodedSignature] = token.split(
+            '.',
+        ) as [string, string, string];
     const signature = Buffer.from(encodedSignature, 'base64url');
     signature[0] ^= 0xff;
     const tampered = `${encodedHeader}.${encodedPayload}.${base64Url(signature)}`;
 
     expectJwtReason(tampered, 'bad_signature');
-    expectJwtReason(signJwt(baseClaims({ tenant_id: '' })), 'malformed_claims');
-    expectJwtReason(signJwt(baseClaims({ auth_context_hash: undefined })), 'malformed_claims');
-    expectJwtReason(signJwt(baseClaims({ principal_source: undefined })), 'malformed_claims');
+        expectJwtReason(
+            signJwt(baseClaims({ tenant_id: '' })),
+            'malformed_claims',
+        );
+        expectJwtReason(
+            signJwt(baseClaims({ auth_context_hash: undefined })),
+            'malformed_claims',
+        );
+        expectJwtReason(
+            signJwt(baseClaims({ principal_source: undefined })),
+            'malformed_claims',
+        );
     expectJwtReason(
       signJwt(baseClaims({ principal_source: 'api_key' })),
       'malformed_claims',
@@ -323,4 +410,35 @@ describe('LibreChat JWT auth provider', () => {
       'malformed_claims',
     );
   });
+
+    test('carries one verified network policy binding into the principal', () => {
+        const binding = networkBinding();
+        const principal = verifyLibreChatJwt(signJwt(baseClaims(binding)));
+        expect(principal.networkPolicy).toEqual(binding.network_policy);
+        expect(principal.networkPolicyDigest).toBe(
+            binding.network_policy_digest,
+        );
+    });
+
+    test('rejects a missing or mismatched network policy digest', () => {
+        const binding = networkBinding();
+        expectJwtReason(
+            signJwt(
+                baseClaims({
+                    network_policy: binding.network_policy,
+                    network_policy_digest: undefined,
+                }),
+            ),
+            'malformed_claims',
+        );
+        expectJwtReason(
+            signJwt(
+                baseClaims({
+                    ...binding,
+                    network_policy_digest: 'A'.repeat(43),
+                }),
+            ),
+            'malformed_claims',
+        );
+    });
 });

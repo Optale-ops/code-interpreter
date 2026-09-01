@@ -1,6 +1,10 @@
 import type { Response } from 'express';
 import type * as t from '../types';
-import { applyExecutionIdentity, executionIdentityFromPrincipal } from '../execution-identity';
+import {
+    applyExecutionIdentity,
+    executionIdentityFromPrincipal,
+} from '../execution-identity';
+import type { ExternalFetchPolicySnapshot } from '../external-fetch-policy';
 
 export type CodeApiPrincipal = {
   userId: string;
@@ -13,9 +17,14 @@ export type CodeApiPrincipal = {
   authContextHash?: string;
   credentialId?: string;
   planId?: string;
+    networkPolicy?: ExternalFetchPolicySnapshot;
+    networkPolicyDigest?: string;
 };
 
-export function applyPrincipal(req: t.AuthenticatedRequest, principal: CodeApiPrincipal): void {
+export function applyPrincipal(
+    req: t.AuthenticatedRequest,
+    principal: CodeApiPrincipal,
+): void {
   req.codeApiPrincipal = principal;
   applyExecutionIdentity(req, executionIdentityFromPrincipal(principal));
   if (principal.planId) {
@@ -29,10 +38,14 @@ export function applyPrincipal(req: t.AuthenticatedRequest, principal: CodeApiPr
     externalUserId: principal.externalUserId,
     principalSource: principal.principalSource,
     authContextHash: principal.authContextHash,
+        networkPolicy: principal.networkPolicy,
+        networkPolicyDigest: principal.networkPolicyDigest,
   };
 }
 
-export function getPrincipal(req: t.AuthenticatedRequest): CodeApiPrincipal | undefined {
+export function getPrincipal(
+    req: t.AuthenticatedRequest,
+): CodeApiPrincipal | undefined {
   if (req.codeApiPrincipal) {
     return req.codeApiPrincipal;
   }
@@ -48,6 +61,8 @@ export function getPrincipal(req: t.AuthenticatedRequest): CodeApiPrincipal | un
     externalUserId: ctx.externalUserId,
     principalSource: ctx.principalSource ?? 'librechat_jwt',
     authContextHash: ctx.authContextHash,
+        networkPolicy: ctx.networkPolicy,
+        networkPolicyDigest: ctx.networkPolicyDigest,
   };
 }
 
