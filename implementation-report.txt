@@ -1,4 +1,4 @@
-Deviations from brief: Fix round 1 moved the Compose credential requirement from a W799 service override into canonical docker-compose.yaml because Compose include rejects imported-service overrides; fix round 2 made the Redis server password an exact exec-list argument and strengthened missing/blank rendering isolation.
+Deviations from brief: Fix round 1 moved the Compose credential requirement from a W799 service override into canonical docker-compose.yaml; fix round 2 made the Redis password an exact exec-list argument; fix round 3 compares Compose-rendered credentials because Compose escapes dollar signs during rendering.
 
 Status: DONE (built; validation intentionally unrun as instructed)
 
@@ -11,6 +11,7 @@ Implementation commits
 - b116c12 fix(compose): require W799 Redis credential
 - fix(compose): require shared Redis credential (fix round 1; this report is committed with it)
 - fix(compose): preserve Redis password argv (fix round 2; this report is committed with it)
+- fix(compose): compare rendered Redis credential (fix round 3; this report is committed with it)
 
 Changed files
 - service/src/secure-startup.test.ts
@@ -31,7 +32,7 @@ Self-review findings
 - Existing fresh-gateway tests receive a test-only Redis value so they continue to exercise their intended earlier validation failures.
 - The base-to-head source/test review contains the original four files plus the Primary-authorized canonical docker-compose.yaml fix; no external-fetch file or behavior changed.
 - The reviewed diff contains no real credential or secret material. All test values are explicit test-only placeholders.
-- git diff --check completed without findings for the initial implementation and both fix rounds before their commits.
+- git diff --check completed without findings for the initial implementation and all three fix rounds before their commits.
 
 Validation intentionally not run
 cd /mnt/data/scratch/ci-redis-permanent/service && bun test src/secure-startup.test.ts
@@ -51,3 +52,10 @@ Fix round 2
 - Canonical and W799 rendering must fail for both unset and explicitly blank REDIS_PASSWORD.
 - Missing and blank password checks use --env-file /dev/null so an automatic project .env cannot satisfy the contract accidentally.
 - Tests remain unrun by instruction.
+
+Fix round 3
+- Parent validation showed Compose renders a dollar sign from the metacharacter fixture as two dollar signs in both client environment values and Redis argv.
+- The contract now derives the rendered password from egress_gateway, proves it is a nonblank string, and requires every other Redis client to use that exact rendered value.
+- Redis argv must still equal exactly [redis-server, --requirepass, rendered password], so duplicate or conflicting arguments remain rejected.
+- The metacharacter fixture and isolated unset/blank checks remain unchanged.
+- This lane did not run tests, as instructed.

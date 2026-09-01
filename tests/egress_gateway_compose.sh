@@ -56,15 +56,18 @@ external_fixture="$(
         docker compose -f "$ROOT/docker-compose.external-fetch-test.yml" config --format json
 )"
 
-if ! jq -e --arg redis_password "$TEST_REDIS_PASSWORD" '
+if ! jq -e '
     . as $root
-    | .services.egress_gateway.environment.CODEAPI_HARDENED_SANDBOX_MODE == "true"
+    | .services.egress_gateway.environment.REDIS_PASSWORD as $rendered_password
+    | ($rendered_password | type) == "string"
+      and ($rendered_password | length) > 0
+      and .services.egress_gateway.environment.CODEAPI_HARDENED_SANDBOX_MODE == "true"
       and .services.egress_gateway.environment.CODEAPI_EGRESS_LEDGER_REQUIRED == "true"
       and .services.egress_gateway.environment.REDIS_HOST == "redis"
       and all(["api", "service-worker", "egress_gateway", "tool_call_server", "file_server"][];
         . as $service
-        | $root.services[$service].environment.REDIS_PASSWORD == $redis_password)
-      and $root.services.redis.command == ["redis-server", "--requirepass", $redis_password]
+        | $root.services[$service].environment.REDIS_PASSWORD == $rendered_password)
+      and $root.services.redis.command == ["redis-server", "--requirepass", $rendered_password]
 ' <<<"$canonical" >/dev/null; then
     echo "docker-compose.yaml: hardened gateway or shared Redis credential wiring is incomplete" >&2
     exit 1
