@@ -1,4 +1,8 @@
-# The AX41 gateway deployment used this filename. Keep no service definitions here.
-# Compose the canonical stack so recreating egress_gateway receives its full environment contract.
+# The AX41 gateway deployment used this filename. Keep the canonical stack as the source of service definitions.
+# Require the production Redis credential before recreating egress_gateway.
 include:
   - docker-compose.yaml
+services:
+  egress_gateway:
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}

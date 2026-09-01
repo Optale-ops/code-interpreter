@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_GRANT_SECRET='test-egress-grant-secret-at-least-32-bytes'
 TEST_INTERNAL_TOKEN='test-internal-service-token-at-least-32-bytes'
+TEST_REDIS_PASSWORD='test-only-redis-password'
 SHIPPED_GRANT_SECRET='localdev-egress-grant-secret-change-me-32b'
 SHIPPED_INTERNAL_TOKEN='localdev-internal-service-token'
 
@@ -27,6 +28,7 @@ render_gateway() {
     local internal_token="${3:-$TEST_INTERNAL_TOKEN}"
     CODEAPI_EGRESS_GRANT_SECRET="$grant_secret" \
     CODEAPI_INTERNAL_SERVICE_TOKEN="$internal_token" \
+    REDIS_PASSWORD="$TEST_REDIS_PASSWORD" \
     CODEAPI_HARDENED_SANDBOX_MODE=false \
     CODEAPI_EGRESS_LEDGER_REQUIRED=false \
         docker compose -f "$compose_file" config --format json
@@ -92,14 +94,27 @@ if auth_values_are_deployable "$(render_gateway "$ROOT/docker-compose.yaml" "$TE
     exit 1
 fi
 
-if [[ "$(jq -S . <<<"$canonical")" != "$(jq -S . <<<"$w799")" ]]; then
-    echo "docker-compose.w799-egress.yml must render exactly the canonical compose model" >&2
+expected_w799="$(
+    jq --arg redis_password "$TEST_REDIS_PASSWORD" \
+        '.services.egress_gateway.environment.REDIS_PASSWORD = $redis_password' \
+        <<<"$canonical"
+)"
+if [[ "$(jq -S . <<<"$expected_w799")" != "$(jq -S . <<<"$w799")" ]]; then
+    echo "docker-compose.w799-egress.yml must match the canonical model except for the required gateway Redis password" >&2
     exit 1
 fi
 
 wrapper_model="$(sed -E '/^[[:space:]]*(#|$)/d' "$ROOT/docker-compose.w799-egress.yml")"
-if [[ "$wrapper_model" != $'include:\n  - docker-compose.yaml' ]]; then
-    echo "docker-compose.w799-egress.yml must only include docker-compose.yaml" >&2
+if [[ "$wrapper_model" != $'include:\n  - docker-compose.yaml\nservices:\n  egress_gateway:\n    environment:\n      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}' ]]; then
+    echo "docker-compose.w799-egress.yml must retain the canonical include and only override the gateway Redis password" >&2
+    exit 1
+fi
+
+if env -u REDIS_PASSWORD \
+    CODEAPI_EGRESS_GRANT_SECRET="$TEST_GRANT_SECRET" \
+    CODEAPI_INTERNAL_SERVICE_TOKEN="$TEST_INTERNAL_TOKEN" \
+    docker compose -f "$ROOT/docker-compose.w799-egress.yml" config >/dev/null 2>&1; then
+    echo "docker-compose.w799-egress.yml must require REDIS_PASSWORD" >&2
     exit 1
 fi
 
