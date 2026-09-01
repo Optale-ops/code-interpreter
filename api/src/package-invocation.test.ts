@@ -40,6 +40,23 @@ describe('package invocation requested-spec sanitization', () => {
         expect(invocation.sanitizeRequestedSpec(manager, spec)).toBeUndefined();
     });
 
+    test('pip wrapper capture skips option values and preserves safe top-level specs', () => {
+        expect(
+            invocation.invocationRecord('pip', 200, 225, 0, [
+                'install',
+                '--index-url',
+                'https://user:secret@example.test/simple',
+                'requests[security]>=2',
+                'urllib3!=2.2.0,<3',
+            ]),
+        ).toEqual({
+            manager: 'pip',
+            requestedSpecs: ['requests[security]>=2', 'urllib3!=2.2.0,<3'],
+            durationMs: 25,
+            outcome: 'success',
+        });
+    });
+
     test('failed invocations retain only sanitized requested specs', () => {
         expect(
             invocation.invocationRecord('pip', 100, 117, 1, [

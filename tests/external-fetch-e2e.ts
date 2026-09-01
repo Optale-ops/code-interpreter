@@ -328,7 +328,7 @@ function assertPackageSummary(
 const pipInstall = `
 import os, subprocess, sys
 subprocess.run([
-    sys.executable, '-m', 'pip', 'install', '--no-deps',
+    'pip', 'install', '--no-deps',
     '--index-url', 'https://allowed.test/simple',
     'optale-fixture-py==1.0.0',
     'optale-fixture-source==1.0.0',
