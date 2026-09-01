@@ -23,6 +23,8 @@ services:
       context: .
       dockerfile: service/Dockerfile
       target: production
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-unknown}
     environment:
       MINIO_BUCKET: test-bucket
       MINIO_ENDPOINT: minio
@@ -46,6 +48,8 @@ services:
       context: .
       dockerfile: service/Dockerfile.tool-call-server
       target: production
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-unknown}
     environment:
       TOOL_CALL_SERVER_PORT: '3033'
       TOOL_CALL_REQUEST_TIMEOUT: '300000'
@@ -65,6 +69,7 @@ services:
       - ./tests/external-fetch-origin.ts:/fixtures/external-fetch-origin.ts:ro
       - ./service/test-fixtures/external-fetch/key.pem:/fixtures/key.pem:ro
       - ./service/test-fixtures/external-fetch/cert.pem:/fixtures/cert.pem:ro
+      - ./tests/package-fixtures:/fixtures/package-fixtures:ro
     networks:
       default:
         ipv4_address: 93.184.216.34
@@ -87,6 +92,8 @@ services:
       context: .
       dockerfile: service/Dockerfile.egress-gateway
       target: production
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-unknown}
     environment:
       SERVICE_NAME: egress-gateway
       CODEAPI_HARDENED_SANDBOX_MODE: 'true'
@@ -130,11 +137,14 @@ services:
       context: .
       dockerfile: api/Dockerfile
       target: sandbox-api-baked-test
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-unknown}
     privileged: false
     cgroup: host
     cap_add:
       - SYS_ADMIN
       - SYS_CHROOT
+      - NET_ADMIN
     security_opt:
       - apparmor:unconfined
       - seccomp:unconfined
@@ -182,6 +192,8 @@ services:
       context: .
       dockerfile: service/Dockerfile
       target: worker
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-unknown}
     environment:
       LOCAL_MODE: 'true'
       CODEAPI_HARDENED_SANDBOX_MODE: 'true'
@@ -207,11 +219,14 @@ services:
       context: .
       dockerfile: service/Dockerfile
       target: api
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-unknown}
     environment:
       LOCAL_MODE: 'true'
       CODEAPI_HARDENED_SANDBOX_MODE: 'true'
       CODEAPI_AUTH_PROVIDER: none
       CODEAPI_ALLOW_AUTH_PROVIDER_NONE: 'true'
+      CODEAPI_LOCAL_NETWORK_POLICY_FILE: /run/codeapi/external-fetch-policy.json
       CODEAPI_HTTP_JSON_LIMIT: 50mb
       SERVICE_PORT: '3112'
       SANDBOX_ENDPOINT: http://sandbox-runner:2000/api/v2
@@ -223,6 +238,8 @@ services:
       REDIS_PORT: '6379'
       REDIS_PASSWORD: localdev
       PTC_MODE: replay
+    volumes:
+      - ./tests/external-fetch-policy.json:/run/codeapi/external-fetch-policy.json:ro
     depends_on:
       redis:
         condition: service_healthy
@@ -232,12 +249,14 @@ services:
   e2e:
     image: oven/bun:1.3.14
     command: ['bun', 'run', '/tests/external-fetch-e2e.ts']
+    volumes:
+      - ./tests/external-fetch-e2e.ts:/tests/external-fetch-e2e.ts:ro
+      - ./service/test-fixtures/external-fetch/cert.pem:/run/codeapi/test-ca.pem:ro
     environment:
       SERVICE_URL: http://api:3112
       CODEAPI_EGRESS_GRANT_SECRET: ${CODEAPI_EGRESS_GRANT_SECRET:?CODEAPI_EGRESS_GRANT_SECRET is required}
       CODEAPI_INTERNAL_SERVICE_TOKEN: ${CODEAPI_INTERNAL_SERVICE_TOKEN:?CODEAPI_INTERNAL_SERVICE_TOKEN is required}
-    volumes:
-      - ./tests/external-fetch-e2e.ts:/tests/external-fetch-e2e.ts:ro
+      NODE_EXTRA_CA_CERTS: /run/codeapi/test-ca.pem
     depends_on:
       api:
         condition: service_started

@@ -247,6 +247,26 @@ describe('sandbox error formatting', () => {
     expect(JSON.stringify(failure)).not.toContain('mvm-secret-123');
   });
 
+  test('maps gateway environment limits to public bad requests', () => {
+    const error = new Error('env_vars exceeds maximum count of 256');
+
+    expect(publicExecutionFailure(error)).toEqual({
+      status: 400,
+      body: {
+        error: 'bad_request',
+        message: 'env_vars exceeds maximum count of 256',
+      },
+    });
+    expect(publicExecutionFailure(new Error('env_vars exceeds maximum total size of 1000000 bytes')))
+      .toEqual({
+        status: 400,
+        body: {
+          error: 'bad_request',
+          message: 'env_vars exceeds maximum total size of 1000000 bytes',
+        },
+      });
+  });
+
   test('maps sandbox request guard failures to public bad requests', () => {
     const axiosErr = {
       message: 'Request failed with status code 400',

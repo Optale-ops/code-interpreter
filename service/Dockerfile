@@ -1,3 +1,4 @@
+ARG SOURCE_REVISION=unknown
 # File Server Dockerfile
 FROM oven/bun:1.3.14 AS base
 WORKDIR /app
@@ -25,6 +26,8 @@ RUN bun build ./src/egress-gateway.ts --minify --outdir .build-egress-gateway --
 
 # File server production
 FROM oven/bun:1.3.14 AS production
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=install /temp/prod/node_modules ./node_modules
@@ -33,6 +36,8 @@ CMD ["bun", "run", ".build/file-server.js"]
 
 # API server (HTTP on port 3112)
 FROM oven/bun:1.3.14 AS api
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=install /temp/prod/node_modules ./node_modules
@@ -42,6 +47,8 @@ CMD ["bun", "run", ".build-api/api-server.js"]
 
 # Worker server (job processor, health on port 3113)
 FROM oven/bun:1.3.14 AS worker
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=install /temp/prod/node_modules ./node_modules
@@ -51,6 +58,8 @@ CMD ["bun", "run", ".build-worker/worker-server.js"]
 
 # Egress gateway (sandbox outbound delegation)
 FROM oven/bun:1.3.14 AS egress-gateway
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=install /temp/prod/node_modules ./node_modules

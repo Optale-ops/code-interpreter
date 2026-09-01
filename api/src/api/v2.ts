@@ -25,6 +25,13 @@ import {
   parseSessionBindingFromHeader,
 } from '../session-workspace';
 import { streamSessionCheckpoint, restoreSessionCheckpoint } from '../session-checkpoint';
+import { sanitizeEnvVars } from '../../../shared/env-vars.js';
+export {
+  ENV_VAR_KEY_RE,
+  MAX_ENV_VAR_BYTES,
+  MAX_ENV_VAR_COUNT,
+  sanitizeEnvVars,
+} from '../../../shared/env-vars.js';
 import {
   ensureToolCallSocketProxyReady,
   relayReadinessRequired,
@@ -149,26 +156,6 @@ export interface ExecuteRequestBody {
   egress_grant?: string;
   execution_manifest?: string;
   tool_call_socket?: boolean;
-}
-
-export const ENV_VAR_KEY_RE = /^[A-Z_][A-Z0-9_]*$/i;
-export const MAX_ENV_VAR_BYTES = 1_000_000;
-
-export function sanitizeEnvVars(raw: Record<string, string> | undefined): Record<string, string> | undefined {
-  if (!raw || typeof raw !== 'object') return undefined;
-  const out: Record<string, string> = {};
-  let totalBytes = 0;
-  for (const [key, value] of Object.entries(raw)) {
-    if (typeof key !== 'string' || typeof value !== 'string') continue;
-    if (!ENV_VAR_KEY_RE.test(key)) continue;
-    const entryBytes = Buffer.byteLength(key) + Buffer.byteLength(value);
-    if (totalBytes + entryBytes > MAX_ENV_VAR_BYTES) {
-      throw new Error(`env_vars exceeds maximum total size of ${MAX_ENV_VAR_BYTES} bytes`);
-    }
-    totalBytes += entryBytes;
-    out[key] = value;
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /**

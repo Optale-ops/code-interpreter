@@ -11,7 +11,13 @@
   },
   "hosts": {
     "temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com": {
-      "contentTypes": ["application/pdf"]
+      "contentTypes": [
+        "application/pdf"
+      ]
+    },
+    "console-staging.optale.com": {
+      "httpsPassthrough": true,
+      "httpsPassthroughTotalTimeoutMs": 300000
     }
   }
 }

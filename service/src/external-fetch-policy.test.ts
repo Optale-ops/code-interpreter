@@ -3,6 +3,7 @@ import {
   HARD_EXTERNAL_FETCH_LIMITS,
   parseExternalFetchPolicy,
   validateExternalFetchUrl,
+  validateHttpsPassthroughUrl,
   validateResolvedAddresses,
 } from './external-fetch-policy';
 import { ExternalFetchError } from './external-fetch-errors';
@@ -41,9 +42,134 @@ describe('external fetch policy parser', () => {
     expect(policy.limits).toEqual(HARD_EXTERNAL_FETCH_LIMITS);
     expect(policy.hosts.get(FROZEN_HOST)).toEqual({
       contentTypes: new Set(['application/pdf']),
+      httpsPassthrough: false,
+            packageTransport: false,
       limits: HARD_EXTERNAL_FETCH_LIMITS,
     });
   });
+
+  test('accepts a passthrough-only exact host without widening typed fetch', () => {
+    const consoleHost = 'console-staging.optale.com';
+    const policy = parseExternalFetchPolicy(
+      frozenPolicy({
+        hosts: {
+          [FROZEN_HOST]: { contentTypes: ['application/pdf'] },
+          [consoleHost]: { httpsPassthrough: true },
+        },
+      }),
+    );
+
+    expect(policy.hosts.get(consoleHost)).toEqual({
+      contentTypes: new Set(),
+      httpsPassthrough: true,
+      httpsPassthroughTotalTimeoutMs: 300_000,
+            packageTransport: false,
+      limits: HARD_EXTERNAL_FETCH_LIMITS,
+    });
+    expectCode(
+            () =>
+                validateExternalFetchUrl(
+                    `https://${consoleHost}/api/optale/mcp`,
+                    policy,
+                ),
+      'HOST_NOT_ALLOWED',
+    );
+    expect(
+            validateHttpsPassthroughUrl(
+                `https://${consoleHost}/api/optale/mcp`,
+                policy,
+            ).host,
+    ).toBe(consoleHost);
+  });
+
+  test('bounds the passthrough lifetime separately from PDF fetch limits', () => {
+        expect(() =>
+            parseExternalFetchPolicy(
+      frozenPolicy({
+        hosts: {
+          'console-staging.optale.com': {
+            httpsPassthrough: true,
+            httpsPassthroughTotalTimeoutMs: 300_001,
+          },
+        },
+      }),
+            ),
+        ).toThrow();
+    const policy = parseExternalFetchPolicy(
+      frozenPolicy({
+        hosts: {
+          'console-staging.optale.com': {
+            httpsPassthrough: true,
+            httpsPassthroughTotalTimeoutMs: 25_000,
+          },
+        },
+      }),
+    );
+        expect(
+            policy.hosts.get('console-staging.optale.com')
+                ?.httpsPassthroughTotalTimeoutMs,
+        ).toBe(25_000);
+  });
+
+    test.each([{}, { httpsPassthrough: false }, { httpsPassthrough: 'true' }])(
+        'rejects a host without one enabled egress scope %#',
+        hostPolicy => {
+    expect(() =>
+      parseExternalFetchPolicy(
+                    frozenPolicy({
+                        hosts: { 'console-staging.optale.com': hostPolicy },
+                    }),
+      ),
+    ).toThrow();
+        },
+    );
+
+  test.each([
+    ['policy', frozenPolicy({ unexpected: true })],
+    [
+      'host',
+      frozenPolicy({
+        hosts: {
+          [FROZEN_HOST]: {
+            contentTypes: ['application/pdf'],
+            unexpected: true,
+          },
+        },
+      }),
+    ],
+  ])('rejects unknown fields on the %s shape', (_scope, value) => {
+    expect(() => parseExternalFetchPolicy(value)).toThrow(/unsupported key/);
+  });
+
+  test('requires content types for an ordinary fetch host', () => {
+    expect(() =>
+      parseExternalFetchPolicy(
+        frozenPolicy({
+          hosts: {
+            [FROZEN_HOST]: {
+              limits: { maxResponseBytes: 1024 },
+            },
+          },
+        }),
+      ),
+    ).toThrow(/must enable at least one egress scope/);
+  });
+
+  test.each([9, 64])(
+    'rejects maxFetchesPerGrant=%d above the hard ceiling of 8',
+    maxFetchesPerGrant => {
+      expect(() =>
+        parseExternalFetchPolicy(
+          frozenPolicy({
+            limits: {
+              ...HARD_EXTERNAL_FETCH_LIMITS,
+              maxFetchesPerGrant,
+            },
+          }),
+        ),
+      ).toThrow(/maxFetchesPerGrant must be an integer from 1 through 8/);
+    },
+  );
 
   test('accepts an empty host map as deny-all', () => {
     const policy = parseExternalFetchPolicy(frozenPolicy({ hosts: {} }));
@@ -87,7 +213,8 @@ describe('external fetch policy parser', () => {
               contentTypes: ['application/pdf'],
               limits: {
                 maxResponseBytes:
-                  HARD_EXTERNAL_FETCH_LIMITS.maxResponseBytes + 1,
+                                    HARD_EXTERNAL_FETCH_LIMITS.maxResponseBytes +
+                                    1,
               },
             },
           },
@@ -152,7 +279,9 @@ describe('external fetch URL validation', () => {
     expect(parsed.host).toBe(FROZEN_HOST);
     expect(parsed.queryPresent).toBe(true);
     expect(parsed.pathHash).toMatch(/^[A-Za-z0-9_-]{16}$/);
-    expect(parsed.policy.contentTypes).toEqual(new Set(['application/pdf']));
+        expect(parsed.policy.contentTypes).toEqual(
+            new Set(['application/pdf']),
+        );
   });
 
   test.each([
@@ -179,7 +308,10 @@ describe('external fetch URL validation', () => {
   test('distinguishes a valid but unlisted exact host', () => {
     expectCode(
       () =>
-        validateExternalFetchUrl('https://unlisted.example/file.pdf', policy),
+                validateExternalFetchUrl(
+                    'https://unlisted.example/file.pdf',
+                    policy,
+                ),
       'HOST_NOT_ALLOWED',
     );
   });
