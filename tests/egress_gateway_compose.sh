@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_GRANT_SECRET='test-egress-grant-secret-at-least-32-bytes'
 TEST_INTERNAL_TOKEN='test-internal-service-token-at-least-32-bytes'
+TEST_REDIS_PASSWORD='test only:$redis#password&--flag'
 SHIPPED_GRANT_SECRET='localdev-egress-grant-secret-change-me-32b'
 SHIPPED_INTERNAL_TOKEN='localdev-internal-service-token'
 
@@ -27,6 +28,7 @@ render_gateway() {
     local internal_token="${3:-$TEST_INTERNAL_TOKEN}"
     CODEAPI_EGRESS_GRANT_SECRET="$grant_secret" \
     CODEAPI_INTERNAL_SERVICE_TOKEN="$internal_token" \
+    REDIS_PASSWORD="$TEST_REDIS_PASSWORD" \
     CODEAPI_HARDENED_SANDBOX_MODE=false \
     CODEAPI_EGRESS_LEDGER_REQUIRED=false \
         docker compose -f "$compose_file" config --format json
@@ -55,11 +57,19 @@ external_fixture="$(
 )"
 
 if ! jq -e '
-    .services.egress_gateway.environment.CODEAPI_HARDENED_SANDBOX_MODE == "true"
-    and .services.egress_gateway.environment.CODEAPI_EGRESS_LEDGER_REQUIRED == "true"
-    and .services.egress_gateway.environment.REDIS_HOST == "redis"
+    . as $root
+    | .services.egress_gateway.environment.REDIS_PASSWORD as $rendered_password
+    | ($rendered_password | type) == "string"
+      and ($rendered_password | length) > 0
+      and .services.egress_gateway.environment.CODEAPI_HARDENED_SANDBOX_MODE == "true"
+      and .services.egress_gateway.environment.CODEAPI_EGRESS_LEDGER_REQUIRED == "true"
+      and .services.egress_gateway.environment.REDIS_HOST == "redis"
+      and all(["api", "service-worker", "egress_gateway", "tool_call_server", "file_server"][];
+        . as $service
+        | $root.services[$service].environment.REDIS_PASSWORD == $rendered_password)
+      and $root.services.redis.command == ["redis-server", "--requirepass", $rendered_password]
 ' <<<"$canonical" >/dev/null; then
-    echo "docker-compose.yaml: egress_gateway lost pinned hardened mode, required ledger mode, or Redis host wiring" >&2
+    echo "docker-compose.yaml: hardened gateway or shared Redis credential wiring is incomplete" >&2
     exit 1
 fi
 
@@ -103,14 +113,33 @@ if [[ "$wrapper_model" != $'include:\n  - docker-compose.yaml' ]]; then
     exit 1
 fi
 
+for compose_file in docker-compose.yaml docker-compose.w799-egress.yml; do
+    if env -u REDIS_PASSWORD \
+        CODEAPI_EGRESS_GRANT_SECRET="$TEST_GRANT_SECRET" \
+        CODEAPI_INTERNAL_SERVICE_TOKEN="$TEST_INTERNAL_TOKEN" \
+        docker compose --env-file /dev/null -f "$ROOT/$compose_file" config >/dev/null 2>&1; then
+        echo "$compose_file must require REDIS_PASSWORD when it is unset" >&2
+        exit 1
+    fi
+    if REDIS_PASSWORD='' \
+        CODEAPI_EGRESS_GRANT_SECRET="$TEST_GRANT_SECRET" \
+        CODEAPI_INTERNAL_SERVICE_TOKEN="$TEST_INTERNAL_TOKEN" \
+        docker compose --env-file /dev/null -f "$ROOT/$compose_file" config >/dev/null 2>&1; then
+        echo "$compose_file must require REDIS_PASSWORD when it is blank" >&2
+        exit 1
+    fi
+done
+
 if env -u CODEAPI_EGRESS_GRANT_SECRET \
     CODEAPI_INTERNAL_SERVICE_TOKEN="$TEST_INTERNAL_TOKEN" \
+    REDIS_PASSWORD="$TEST_REDIS_PASSWORD" \
     docker compose -f "$ROOT/docker-compose.yaml" config >/dev/null 2>&1; then
     echo "docker-compose.yaml must require CODEAPI_EGRESS_GRANT_SECRET independently" >&2
     exit 1
 fi
 if env -u CODEAPI_INTERNAL_SERVICE_TOKEN \
     CODEAPI_EGRESS_GRANT_SECRET="$TEST_GRANT_SECRET" \
+    REDIS_PASSWORD="$TEST_REDIS_PASSWORD" \
     docker compose -f "$ROOT/docker-compose.yaml" config >/dev/null 2>&1; then
     echo "docker-compose.yaml must require CODEAPI_INTERNAL_SERVICE_TOKEN independently" >&2
     exit 1

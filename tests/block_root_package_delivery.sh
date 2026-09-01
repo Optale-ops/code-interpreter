@@ -68,6 +68,7 @@ assert_compose_mode() {
     KVM_ENABLED="$kvm_enabled" \
     CODEAPI_EGRESS_GRANT_SECRET='test-egress-grant-secret-at-least-32-bytes' \
     CODEAPI_INTERNAL_SERVICE_TOKEN='test-internal-service-token-at-least-32-bytes' \
+    REDIS_PASSWORD='test-only-redis-password' \
         docker compose -f "$compose_file" config --format json > "$output"
 
     local target

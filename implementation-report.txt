@@ -1,0 +1,69 @@
+Deviations from brief: Fix rounds 1-3 corrected canonical Compose placement, exact Redis argv, and rendered-value comparison; fix round 4 supplies the new required test credential to an existing deployment-config renderer outside the original four-file scope.
+
+Status: DONE (built; validation intentionally unrun as instructed)
+
+Base and branch
+- Base: adf1ba60c9e423b11b0a1e67ced8a91931b95026
+- Branch: fix/redis-permanent
+
+Implementation commits
+- 062104a fix(egress): require Redis auth in hardened mode
+- b116c12 fix(compose): require W799 Redis credential
+- fix(compose): require shared Redis credential (fix round 1; this report is committed with it)
+- fix(compose): preserve Redis password argv (fix round 2; this report is committed with it)
+- fix(compose): compare rendered Redis credential (fix round 3; this report is committed with it)
+- test(compose): supply Redis credential in delivery config (fix round 4; this report is committed with it)
+
+Changed files
+- service/src/secure-startup.test.ts
+- service/src/secure-startup.ts
+- docker-compose.w799-egress.yml
+- docker-compose.yaml
+- tests/egress_gateway_compose.sh
+- tests/block_root_package_delivery.sh
+- implementation-report.txt
+
+Implemented behavior
+- Hardened egress-gateway startup now rejects missing or blank REDIS_PASSWORD with the exact required-value error and accepts a configured value.
+- Canonical Compose requires one shared REDIS_PASSWORD for every Redis client and passes the authenticated Redis server password as one exact exec-list argument.
+- The W799 Compose wrapper remains a pure canonical include. The Compose contract proves canonical and W799 rendering both fail without REDIS_PASSWORD and render identically with the configured test-only value.
+
+Self-review findings
+- Tests were written before production changes.
+- The runtime change reuses the existing whitespace-aware requireValue helper and remains limited to hardened mode.
+- Existing fresh-gateway tests receive a test-only Redis value so they continue to exercise their intended earlier validation failures.
+- The base-to-head source/test review contains the original files plus Primary-authorized canonical Compose and deployment-config helper fixes; no external-fetch file or behavior changed.
+- The reviewed diff contains no real credential or secret material. All test values are explicit test-only placeholders.
+- git diff --check completed without findings for the initial implementation and all four fix rounds before their commits.
+
+Validation intentionally not run
+cd /mnt/data/scratch/ci-redis-permanent/service && bun test src/secure-startup.test.ts
+cd /mnt/data/scratch/ci-redis-permanent && tests/egress_gateway_compose.sh
+
+Fix round 1
+- Focused parent validation found that Compose include rejects redefining an imported service, so the first W799 override could not render.
+- The W799 wrapper was restored to a pure include.
+- The required interpolation moved to all five canonical Redis clients and the Redis server command so every process uses the same supplied credential.
+- The Compose contract now checks all shared-password consumers, exact canonical/W799 model equality, and missing-password failure for both entry points.
+- The root .env.example already documents REDIS_PASSWORD, so no environment-example or README change was required.
+- Tests remain unrun by instruction.
+
+Fix round 2
+- The Redis server command now uses the exact argv list [redis-server, --requirepass, password], so whitespace and shell metacharacters stay inside one password argument.
+- The Compose test password contains spaces and metacharacters, and the contract requires exact Redis-server argv equality rather than substring presence.
+- Canonical and W799 rendering must fail for both unset and explicitly blank REDIS_PASSWORD.
+- Missing and blank password checks use --env-file /dev/null so an automatic project .env cannot satisfy the contract accidentally.
+- Tests remain unrun by instruction.
+
+Fix round 3
+- Parent validation showed Compose renders a dollar sign from the metacharacter fixture as two dollar signs in both client environment values and Redis argv.
+- The contract now derives the rendered password from egress_gateway, proves it is a nonblank string, and requires every other Redis client to use that exact rendered value.
+- Redis argv must still equal exactly [redis-server, --requirepass, rendered password], so duplicate or conflicting arguments remain rejected.
+- The metacharacter fixture and isolated unset/blank checks remain unchanged.
+- This lane did not run tests, as instructed.
+
+Fix round 4
+- Hosted CI job 99869699076 reached an existing canonical Compose renderer without the newly required REDIS_PASSWORD, so interpolation failed before that test could inspect package-delivery mode.
+- assert_compose_mode now supplies a synthetic, non-secret Redis password beside its existing synthetic grant and internal-service credentials.
+- The helper's package-delivery assertions are unchanged; no additional coverage was needed.
+- This lane did not run tests, as instructed.
