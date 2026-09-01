@@ -136,6 +136,48 @@ for (const [network, prefix] of [
   IPV6_DENY.addSubnet(network, prefix, 'ipv6');
 }
 
+let configuredDenyCidrsRaw: string | undefined;
+let configuredIpv4Deny = new BlockList();
+let configuredIpv6Deny = new BlockList();
+
+function configuredExternalFetchDenyLists(): {
+  ipv4: BlockList;
+  ipv6: BlockList;
+} {
+  const raw = process.env.CODEAPI_EXTERNAL_FETCH_DENY_CIDRS ?? '';
+  if (raw === configuredDenyCidrsRaw) {
+    return { ipv4: configuredIpv4Deny, ipv6: configuredIpv6Deny };
+  }
+  const ipv4 = new BlockList();
+  const ipv6 = new BlockList();
+  for (const token of raw.split(',').map(value => value.trim()).filter(Boolean)) {
+    const separator = token.lastIndexOf('/');
+    const address = separator > 0 ? token.slice(0, separator) : '';
+    const rawPrefix = separator > 0 ? token.slice(separator + 1) : '';
+    const family = isIP(address);
+    const prefix = Number(rawPrefix);
+    const maxPrefix = family === 4 ? 32 : family === 6 ? 128 : 0;
+    if (!/^\d{1,3}$/.test(rawPrefix) || !Number.isInteger(prefix) || prefix < 0 || prefix > maxPrefix) {
+      throw new Error(`CODEAPI_EXTERNAL_FETCH_DENY_CIDRS contains invalid CIDR ${token}`);
+    }
+    try {
+      if (family === 4) ipv4.addSubnet(address, prefix, 'ipv4');
+      else if (family === 6) ipv6.addSubnet(address, prefix, 'ipv6');
+      else throw new Error('invalid address');
+    } catch {
+      throw new Error(`CODEAPI_EXTERNAL_FETCH_DENY_CIDRS contains invalid CIDR ${token}`);
+    }
+  }
+  configuredDenyCidrsRaw = raw;
+  configuredIpv4Deny = ipv4;
+  configuredIpv6Deny = ipv6;
+  return { ipv4, ipv6 };
+}
+
+export function validateExternalFetchDenyCidrsConfiguration(): void {
+  configuredExternalFetchDenyLists();
+}
+
 function objectValue(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`${label} must be an object`);
@@ -347,6 +389,7 @@ export function parseExternalFetchPolicy(value: unknown): ExternalFetchPolicy {
 export function loadExternalFetchPolicy(filePath: string): ExternalFetchPolicy {
   if (!filePath.trim())
     throw new Error('CODEAPI_EXTERNAL_FETCH_POLICY_FILE is required');
+  validateExternalFetchDenyCidrsConfiguration();
   const raw = fs.readFileSync(filePath, 'utf8');
   return parseExternalFetchPolicy(JSON.parse(raw));
 }
@@ -583,15 +626,20 @@ export function effectiveExternalFetchPolicy(
 export function validateResolvedAddresses(
   addresses: ResolvedExternalAddress[],
 ): ResolvedExternalAddress[] {
+  const configuredDeny = configuredExternalFetchDenyLists();
   if (addresses.length < 1 || addresses.length > 16) {
     throw new ExternalFetchError('FETCH_FAILED');
   }
   for (const { address, family } of addresses) {
     if (
       (family === 4 &&
-        (isIP(address) !== 4 || IPV4_DENY.check(address, 'ipv4'))) ||
+        (isIP(address) !== 4 ||
+          IPV4_DENY.check(address, 'ipv4') ||
+          configuredDeny.ipv4.check(address, 'ipv4'))) ||
       (family === 6 &&
-        (isIP(address) !== 6 || IPV6_DENY.check(address, 'ipv6'))) ||
+        (isIP(address) !== 6 ||
+          IPV6_DENY.check(address, 'ipv6') ||
+          configuredDeny.ipv6.check(address, 'ipv6'))) ||
       (family !== 4 && family !== 6)
     ) {
       throw new ExternalFetchError('ADDRESS_NOT_GLOBAL');

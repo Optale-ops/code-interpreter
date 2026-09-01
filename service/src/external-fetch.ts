@@ -105,7 +105,7 @@ export interface OpenExternalFetchArgs {
   url: string;
   policy: ExternalFetchPolicy;
   resolver?: ExternalFetchResolver;
-  fetchCount?: number;
+  beforeRequest?: (target: ValidatedExternalFetchUrl) => Promise<void>;
 }
 
 export interface OpenExternalFetchResponse {
@@ -224,12 +224,6 @@ export async function openExternalFetch(
       throw error;
     }
     let addresses: ResolvedExternalAddress[];
-    if (
-      args.fetchCount !== undefined &&
-      args.fetchCount > target.policy.limits.maxFetchesPerGrant
-    ) {
-      throw new ExternalFetchError('FETCH_BUDGET_EXCEEDED');
-    }
     try {
       addresses = await resolveExternalFetchAddresses(
         target.host,
@@ -243,6 +237,7 @@ export async function openExternalFetch(
     const deadlineAt = startedAt + target.policy.limits.totalTimeoutMs;
         if (Date.now() >= deadlineAt)
             throw new ExternalFetchError('FETCH_TIMEOUT');
+    await args.beforeRequest?.(target);
     const hop = await requestPinnedHop(target, addresses, deadlineAt);
     const status = hop.response.statusCode ?? 0;
     if ([301, 302, 303, 307, 308].includes(status)) {
@@ -309,7 +304,7 @@ export interface OpenHttpsPassthroughArgs {
   headers: Record<string, string>;
   body: Buffer;
   resolver?: ExternalFetchResolver;
-  fetchCount?: number;
+  beforeRequest?: (target: ValidatedExternalFetchUrl) => Promise<void>;
 }
 
 export interface OpenHttpsPassthroughResponse {
@@ -434,6 +429,7 @@ export async function openHttpsPassthrough(
         target.host,
         args.resolver,
     );
+  await args.beforeRequest?.(target);
   return requestPinnedPassthrough(target, addresses, args);
 }
 
@@ -509,7 +505,7 @@ export interface OpenPackageTransportArgs {
     method: string;
     headers: Record<string, string>;
     resolver?: ExternalFetchResolver;
-    fetchCount?: number;
+    beforeRequest?: (target: ValidatedExternalFetchUrl) => Promise<void>;
 }
 
 export interface OpenPackageTransportResponse {
@@ -608,12 +604,6 @@ export async function openPackageTransport(
                 throw new ExternalFetchError('REDIRECT_REJECTED');
             throw error;
         }
-        if (
-            args.fetchCount !== undefined &&
-            args.fetchCount > target.policy.limits.maxFetchesPerGrant
-        ) {
-            throw new ExternalFetchError('FETCH_BUDGET_EXCEEDED');
-        }
         let addresses: ResolvedExternalAddress[];
         try {
             addresses = await resolveExternalFetchAddresses(
@@ -628,6 +618,7 @@ export async function openPackageTransport(
         const deadlineAt = startedAt + target.policy.limits.totalTimeoutMs;
         if (Date.now() >= deadlineAt)
             throw new ExternalFetchError('FETCH_TIMEOUT');
+        await args.beforeRequest?.(target);
         const hop = await requestPinnedPackageHop(
             target,
             addresses,

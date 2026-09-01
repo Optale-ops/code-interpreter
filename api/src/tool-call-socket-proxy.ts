@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import type net from 'node:net';
+import { writeWithBackpressure } from './http-backpressure';
 
 export interface ToolCallSocketProxyOptions {
   socketPath: string;
@@ -748,7 +749,14 @@ export async function startToolCallSocketProxy(
           upstreamRes.pipe(res);
           return;
         }
-        upstreamRes.on('data', chunk => res.write(chunk));
+        upstreamRes.on('data', chunk => {
+          writeWithBackpressure(upstreamRes, res, chunk);
+        });
+        const abortControlledResponse = (): void => {
+          if (!res.destroyed) res.destroy();
+        };
+        upstreamRes.on('aborted', abortControlledResponse);
+        upstreamRes.on('error', abortControlledResponse);
         upstreamRes.on('end', () => {
                         const outcome =
                             upstreamRes.trailers['x-codeapi-egress-outcome'];

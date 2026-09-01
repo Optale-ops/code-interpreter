@@ -50,6 +50,8 @@ spec:
               value: "http://{{ include "codeapi.fullname" . }}-tool-call-server:{{ .Values.toolCallServer.service.port }}"
             - name: CODEAPI_EXTERNAL_FETCH_POLICY_FILE
               value: /run/codeapi/external-fetch-policy.json
+            - name: CODEAPI_EXTERNAL_FETCH_DENY_CIDRS
+              value: {{ join "," .Values.egressGateway.config.externalFetchDenyCIDRs | quote }}
             - name: EGRESS_GATEWAY_MAX_TOOL_CALL_BYTES
               value: {{ printf "%.0f" (.Values.egressGateway.config.maxToolCallBytes | float64) | quote }}
             - name: CODEAPI_EGRESS_GRANT_SECRET

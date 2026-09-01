@@ -264,6 +264,35 @@ describe('external fetch policy parser', () => {
   );
 });
 
+describe('configured external fetch CIDR exclusions', () => {
+  test('rejects a globally routable address covered by production configuration', () => {
+    const original = process.env.CODEAPI_EXTERNAL_FETCH_DENY_CIDRS;
+    try {
+      process.env.CODEAPI_EXTERNAL_FETCH_DENY_CIDRS = '93.184.216.0/24';
+      expectCode(
+        () => validateResolvedAddresses([{ address: '93.184.216.34', family: 4 }]),
+        'ADDRESS_NOT_GLOBAL',
+      );
+    } finally {
+      if (original === undefined) delete process.env.CODEAPI_EXTERNAL_FETCH_DENY_CIDRS;
+      else process.env.CODEAPI_EXTERNAL_FETCH_DENY_CIDRS = original;
+    }
+  });
+
+  test('fails closed when a configured CIDR is malformed', () => {
+    const original = process.env.CODEAPI_EXTERNAL_FETCH_DENY_CIDRS;
+    try {
+      process.env.CODEAPI_EXTERNAL_FETCH_DENY_CIDRS = '93.184.216.0/99';
+      expect(() =>
+        validateResolvedAddresses([{ address: '93.184.216.34', family: 4 }]),
+      ).toThrow(/CODEAPI_EXTERNAL_FETCH_DENY_CIDRS/);
+    } finally {
+      if (original === undefined) delete process.env.CODEAPI_EXTERNAL_FETCH_DENY_CIDRS;
+      else process.env.CODEAPI_EXTERNAL_FETCH_DENY_CIDRS = original;
+    }
+  });
+});
+
 describe('external fetch URL validation', () => {
   const policy = parseExternalFetchPolicy(frozenPolicy());
 

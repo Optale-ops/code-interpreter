@@ -34,13 +34,20 @@ import {
 import type * as t from './types';
 import { validateExternalFetchResponseHeaders } from './external-fetch';
 import logger from './logger';
-import { validateExternalFetchUrl } from './external-fetch-policy';
+import {
+  validateExternalFetchUrl,
+  validateHttpsPassthroughUrl,
+  validatePackageTransportUrl,
+} from './external-fetch-policy';
 
 const {
   app,
   setEgressFetchCommitForTest,
   setEgressFetchReserveForTest,
+  setEgressFetchReleaseForTest,
   setExternalFetchOpenForTest,
+  setHttpsPassthroughOpenForTest,
+  setPackageTransportOpenForTest,
 } = await import('./egress-gateway');
 
 const SECRET = 'test-egress-gateway-secret-32-bytes';
@@ -320,7 +327,10 @@ afterAll(() => {
 afterEach(() => {
   setEgressFetchCommitForTest(null);
   setEgressFetchReserveForTest(null);
+  setEgressFetchReleaseForTest(null);
   setExternalFetchOpenForTest(null);
+  setHttpsPassthroughOpenForTest(null);
+  setPackageTransportOpenForTest(null);
 });
 
 describe('egress gateway routes', () => {
@@ -1923,4 +1933,125 @@ describe('egress gateway routes', () => {
         });
         expect(nonPost.status).toBe(404);
     });
+
+    test('charges every package redirect hop before the far-side request', async () => {
+        const policyPath = path.resolve(__dirname, '../../tests/external-fetch-policy.json');
+        env.EXTERNAL_FETCH_POLICY_FILE = policyPath;
+        const policy = parseExternalFetchPolicy(JSON.parse(fs.readFileSync(policyPath, 'utf8')));
+        const binding = {
+            network_policy: serializeExternalFetchPolicy(policy),
+            network_policy_digest: externalFetchPolicyDigest(policy),
+        };
+        const grant = claims({ ...binding, grant_id: 'grant_package_hops' });
+        const redis = new RedisMock();
+        env.EGRESS_LEDGER_REQUIRED = true;
+        setEgressLedgerRedisForTest(redis);
+        await createEgressLedger(grant);
+        setPackageTransportOpenForTest(async args => {
+            const target = validatePackageTransportUrl('https://allowed.test/pkg.tgz', args.policy);
+            for (let hop = 0; hop < 9; hop += 1) await args.beforeRequest?.(target);
+            throw new Error('unreachable after budget rejection');
+        });
+        try {
+            const response = await gatewayFetch('/package-transport', {
+                method: 'POST',
+                headers: { ...grantHeader(grant), 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    url: 'https://allowed.test/pkg.tgz',
+                    method: 'GET',
+                    headers: {},
+                }),
+            });
+            expect(response.status).toBe(429);
+            const ledger = await assertEgressGrantActive(grant);
+            expect(ledger.fetch_count).toBe(8);
+            expect(ledger.request_count).toBe(8);
+        } finally {
+            env.EGRESS_LEDGER_REQUIRED = false;
+            setEgressLedgerRedisForTest(null);
+            await redis.quit();
+        }
+    });
+
+    test.each(['package', 'passthrough'] as const)(
+        'keeps the %s reservation charged when primary and retry settlement both fail',
+        async route => {
+            const policyPath = path.resolve(__dirname, '../../tests/external-fetch-policy.json');
+            env.EXTERNAL_FETCH_POLICY_FILE = policyPath;
+            const policy = parseExternalFetchPolicy(JSON.parse(fs.readFileSync(policyPath, 'utf8')));
+            const binding = {
+                network_policy: serializeExternalFetchPolicy(policy),
+                network_policy_digest: externalFetchPolicyDigest(policy),
+            };
+            const grant = claims({ ...binding, grant_id: `grant_${route}_settlement` });
+            const redis = new RedisMock();
+            env.EGRESS_LEDGER_REQUIRED = true;
+            setEgressLedgerRedisForTest(redis);
+            await createEgressLedger(grant);
+            const body = Buffer.from('delivered-package-bytes');
+            const response = Object.assign(Readable.from([body]), {
+                statusCode: 200,
+                headers: { 'content-type': 'application/octet-stream' },
+                rawHeaders: ['Content-Type', 'application/octet-stream'],
+                complete: false,
+            }) as unknown as IncomingMessage;
+            if (route === 'package') {
+                setPackageTransportOpenForTest(async args => {
+                    const target = validatePackageTransportUrl('https://allowed.test/pkg.tgz', args.policy);
+                    await args.beforeRequest?.(target);
+                    return {
+                        response,
+                        target,
+                        responseBytes: 0,
+                        redirects: 0,
+                        timedOut: () => false,
+                        close: () => response.destroy(),
+                    };
+                });
+            } else {
+                setHttpsPassthroughOpenForTest(async args => {
+                    const target = validateHttpsPassthroughUrl('https://allowed.test/pkg.tgz', args.policy);
+                    await args.beforeRequest?.(target);
+                    return {
+                        response,
+                        target,
+                        responseBytes: 0,
+                        redirects: 0,
+                        timedOut: () => false,
+                        close: () => response.destroy(),
+                    };
+                });
+            }
+            let commits = 0;
+            let releases = 0;
+            setEgressFetchCommitForTest(async () => {
+                commits += 1;
+                throw new Error('lost settlement reply');
+            });
+            setEgressFetchReleaseForTest(async () => {
+                releases += 1;
+            });
+            try {
+                const endpoint = route === 'package' ? '/package-transport' : '/https-passthrough';
+                const envelope = route === 'package'
+                    ? { url: 'https://allowed.test/pkg.tgz', method: 'GET', headers: {} }
+                    : { url: 'https://allowed.test/pkg.tgz', method: 'GET', headers: {}, bodyBase64: '' };
+                await gatewayPostWithTrailers(
+                    endpoint,
+                    { ...grantHeader(grant), 'Content-Type': 'application/json' },
+                    JSON.stringify(envelope),
+                );
+                expect(commits).toBe(2);
+                expect(releases).toBe(0);
+                const ledger = await assertEgressGrantActive(grant);
+                expect(ledger.fetched_bytes).toBeGreaterThanOrEqual(body.length);
+                expect(Object.keys(ledger.fetch_reservations)).toHaveLength(1);
+            } finally {
+                env.EGRESS_LEDGER_REQUIRED = false;
+                setEgressLedgerRedisForTest(null);
+                await redis.quit();
+            }
+        },
+    );
+
 });

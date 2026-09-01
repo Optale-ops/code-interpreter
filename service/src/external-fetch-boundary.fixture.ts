@@ -10,6 +10,7 @@ import type { RemoteInfo } from 'node:dgram';
 import {
   openExternalFetch,
   openHttpsPassthrough,
+  openPackageTransport,
   pipeExternalFetchBody,
 } from './external-fetch';
 import { ExternalFetchError } from './external-fetch-errors';
@@ -109,6 +110,7 @@ function policy(timeoutOverrides: Record<string, number> = {}) {
       [HOST]: {
         contentTypes: ['application/pdf'],
         httpsPassthrough: true,
+        packageTransport: true,
       },
     },
   });
@@ -252,10 +254,12 @@ async function main(): Promise<void> {
     );
 
     const passthroughRequestCount = requests.length;
+    let passthroughAttempts = 0;
     const passthrough = await openHttpsPassthrough({
       url: `https://${HOST}/passthrough`,
       policy: policy(),
       resolver: dns.resolver,
+      beforeRequest: async () => { passthroughAttempts += 1; },
       method: 'POST',
       headers: {
         Authorization: 'Bearer presence-only',
@@ -268,6 +272,7 @@ async function main(): Promise<void> {
     for await (const chunk of passthrough.response)
       passthroughChunks.push(Buffer.from(chunk));
     passthrough.close();
+    assert.equal(passthroughAttempts, 1);
     assert.equal(passthrough.response.statusCode, 201);
     assert.equal(passthrough.response.headers['x-upstream-marker'], 'preserved');
     assert.deepEqual(JSON.parse(Buffer.concat(passthroughChunks).toString('utf8')), {
@@ -310,12 +315,15 @@ async function main(): Promise<void> {
     ]);
     assert.equal(disconnectOutcome, 'FETCH_FAILED');
 
+    let redirectAttempts = 0;
     const redirected = await openExternalFetch({
       url: `https://${HOST}/redirect`,
       policy: policy(),
       resolver: dns.resolver,
+      beforeRequest: async () => { redirectAttempts += 1; },
     });
     assert.equal(redirected.redirects, 1);
+    assert.equal(redirectAttempts, 2);
     await pipeExternalFetchBody(
       redirected,
       new Writable({
@@ -324,6 +332,20 @@ async function main(): Promise<void> {
         },
       }),
     );
+
+    let packageAttempts = 0;
+    const packageRedirect = await openPackageTransport({
+      url: `https://${HOST}/redirect`,
+      policy: policy(),
+      resolver: dns.resolver,
+      method: 'GET',
+      headers: {},
+      beforeRequest: async () => { packageAttempts += 1; },
+    });
+    for await (const _chunk of packageRedirect.response) { /* drain */ }
+    packageRedirect.close();
+    assert.equal(packageRedirect.redirects, 1);
+    assert.equal(packageAttempts, 2);
 
     const queryCount = dns.queries.length;
     await expectCode(

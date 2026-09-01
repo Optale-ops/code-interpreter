@@ -22,7 +22,9 @@ case "${1:-}" in
     if [ ! -f "$root/package.json" ]; then
       printf '%s\n' '{"name":"optale-job-packages","private":true}' > "$root/package.json"
     fi
-    exec env \
+    started=$(date +%s%3N)
+    set +e
+    env \
       npm_config_proxy="${PACKAGE_PROXY_URL}" \
       npm_config_https_proxy="${PACKAGE_PROXY_URL}" \
       npm_config_cafile=/run/codeapi/package-ca.pem \
@@ -30,6 +32,11 @@ case "${1:-}" in
       npm_config_fund=false \
       npm_config_save_exact=true \
       "$real" --prefix "$root" "$@"
+    status=$?
+    set -e
+    ended=$(date +%s%3N)
+    node /usr/local/lib/sandbox-fetch/package-invocation.cjs npm "$started" "$ended" "$status" "$@" || true
+    exit "$status"
     ;;
   *) exec "$real" "$@" ;;
 esac

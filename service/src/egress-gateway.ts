@@ -89,7 +89,10 @@ app.use(httpMetricsMiddleware);
 
 let egressFetchCommit = commitEgressFetchBytes;
 let egressFetchReserve = reserveEgressFetchBytes;
+let egressFetchRelease = releaseEgressFetchBytes;
 let externalFetchOpen = openExternalFetch;
+let httpsPassthroughOpen = openHttpsPassthrough;
+let packageTransportOpen = openPackageTransport;
 
 export function setEgressFetchCommitForTest(
   commit: typeof commitEgressFetchBytes | null,
@@ -107,6 +110,24 @@ export function setExternalFetchOpenForTest(
   open: typeof openExternalFetch | null,
 ): void {
   externalFetchOpen = open ?? openExternalFetch;
+}
+
+export function setEgressFetchReleaseForTest(
+  release: typeof releaseEgressFetchBytes | null,
+): void {
+  egressFetchRelease = release ?? releaseEgressFetchBytes;
+}
+
+export function setHttpsPassthroughOpenForTest(
+  open: typeof openHttpsPassthrough | null,
+): void {
+  httpsPassthroughOpen = open ?? openHttpsPassthrough;
+}
+
+export function setPackageTransportOpenForTest(
+  open: typeof openPackageTransport | null,
+): void {
+  packageTransportOpen = open ?? openPackageTransport;
 }
 
 const SUPPORTED_OUTPUT_EXTENSIONS = new Set([
@@ -1631,16 +1652,18 @@ app.post('/package-transport', async (req, res) => {
             }
             throw error;
         }
-        grant = await getGrant(req, res);
-        const policy = effectivePolicyForGrant(grant);
-        const ledger = await consumeEgressFetchAttempt({
-            grant,
-            maxFetches: policy.limits.maxFetchesPerGrant,
-        });
-        opened = await openPackageTransport({
+        const activeGrant = await getGrant(req, res);
+        grant = activeGrant;
+        const policy = effectivePolicyForGrant(activeGrant);
+        opened = await packageTransportOpen({
             ...envelope,
             policy,
-            fetchCount: ledger.fetch_count,
+            beforeRequest: async target => {
+                await consumeEgressFetchAttempt({
+                    grant: activeGrant,
+                    maxFetches: target.policy.limits.maxFetchesPerGrant,
+                });
+            },
         });
         const fields = auditFields(res);
         fields.destinationHost = opened.target.host;
@@ -1655,7 +1678,7 @@ app.post('/package-transport', async (req, res) => {
         res.locals.egressAuditFields = fields;
 
         reservationId = nanoid();
-        reservedBytes = await reserveEgressFetchBytes({
+        reservedBytes = await egressFetchReserve({
             grant,
             reservationId,
             maxBytes:
@@ -1689,7 +1712,7 @@ app.post('/package-transport', async (req, res) => {
             res,
             reservedBytes,
         );
-        await commitEgressFetchBytes({
+        await egressFetchCommit({
             grant,
             reservationId,
             reservedBytes,
@@ -1713,7 +1736,7 @@ app.post('/package-transport', async (req, res) => {
                 reservedBytes,
             );
             try {
-                await commitEgressFetchBytes({
+                await egressFetchCommit({
                     grant,
                     reservationId,
                     reservedBytes,
@@ -1721,8 +1744,9 @@ app.post('/package-transport', async (req, res) => {
                 });
                 reservedBytes = 0;
             } catch {
+                reservedBytes = 0;
                 logger.error(
-                    'Failed to settle package transport byte reservation',
+                    'Failed to settle package transport byte reservation; reservation remains charged',
                     {
                         grantHash: hashLabel(grant.grant_id),
                         outcome: 'ledger_commit_failed',
@@ -1746,7 +1770,7 @@ app.post('/package-transport', async (req, res) => {
     } finally {
         if (grant && reservationId && reservedBytes > 0) {
             try {
-                await releaseEgressFetchBytes({
+                await egressFetchRelease({
                     grant,
                     reservationId,
                     reservedBytes,
@@ -1793,16 +1817,18 @@ app.post('/https-passthrough', async (req, res) => {
       }
       throw error;
     }
-    grant = await getGrant(req, res);
-        const policy = effectivePolicyForGrant(grant);
-    const ledger = await consumeEgressFetchAttempt({
-      grant,
-      maxFetches: policy.limits.maxFetchesPerGrant,
-    });
-    opened = await openHttpsPassthrough({
+    const activeGrant = await getGrant(req, res);
+    grant = activeGrant;
+        const policy = effectivePolicyForGrant(activeGrant);
+    opened = await httpsPassthroughOpen({
       ...envelope,
       policy,
-      fetchCount: ledger.fetch_count,
+      beforeRequest: async target => {
+        await consumeEgressFetchAttempt({
+          grant: activeGrant,
+          maxFetches: target.policy.limits.maxFetchesPerGrant,
+        });
+      },
     });
     const fields = auditFields(res);
     fields.destinationHost = opened.target.host;
@@ -1831,7 +1857,7 @@ app.post('/https-passthrough', async (req, res) => {
     }
     const declaredBytes = declaredPassthroughBytes(opened);
     reservationId = nanoid();
-    reservedBytes = await reserveEgressFetchBytes({
+    reservedBytes = await egressFetchReserve({
       grant,
       reservationId,
             maxBytes:
@@ -1855,7 +1881,7 @@ app.post('/https-passthrough', async (req, res) => {
             res,
             reservedBytes,
         );
-    await commitEgressFetchBytes({
+    await egressFetchCommit({
       grant,
       reservationId,
       reservedBytes,
@@ -1874,7 +1900,7 @@ app.post('/https-passthrough', async (req, res) => {
                 reservedBytes,
             );
       try {
-                await commitEgressFetchBytes({
+                await egressFetchCommit({
                     grant,
                     reservationId,
                     reservedBytes,
@@ -1882,8 +1908,9 @@ app.post('/https-passthrough', async (req, res) => {
                 });
         reservedBytes = 0;
       } catch {
+        reservedBytes = 0;
                 logger.error(
-                    'Failed to settle HTTPS passthrough byte reservation',
+                    'Failed to settle HTTPS passthrough byte reservation; reservation remains charged',
                     {
           grantHash: hashLabel(grant.grant_id),
           outcome: 'ledger_commit_failed',
@@ -1910,7 +1937,7 @@ app.post('/https-passthrough', async (req, res) => {
   } finally {
     if (grant && reservationId && reservedBytes > 0) {
       try {
-        await releaseEgressFetchBytes({ grant, reservationId, reservedBytes });
+        await egressFetchRelease({ grant, reservationId, reservedBytes });
       } catch {
                 logger.error(
                     'Failed to release HTTPS passthrough byte reservation',
@@ -1954,23 +1981,26 @@ app.post('/external-fetch', async (req, res) => {
       }
       throw error;
     }
-    grant = await getGrant(req, res);
-        const policy = effectivePolicyForGrant(grant);
-    const ledger = await consumeEgressFetchAttempt({
-      grant,
-      maxFetches: policy.limits.maxFetchesPerGrant,
-    });
+    const activeGrant = await getGrant(req, res);
+    grant = activeGrant;
+        const policy = effectivePolicyForGrant(activeGrant);
     const initial = validateExternalFetchUrl(url, policy);
-    if (ledger.fetch_count > initial.policy.limits.maxFetchesPerGrant) {
-      throw new ExternalFetchError('FETCH_BUDGET_EXCEEDED');
-    }
     const fields = auditFields(res);
     fields.destinationHost = initial.host;
     fields.pathHash = initial.pathHash;
     fields.queryPresent = initial.queryPresent;
     res.locals.egressAuditFields = fields;
 
-    opened = await externalFetchOpen({ url, policy, fetchCount: ledger.fetch_count });
+    opened = await externalFetchOpen({
+      url,
+      policy,
+      beforeRequest: async target => {
+        await consumeEgressFetchAttempt({
+          grant: activeGrant,
+          maxFetches: target.policy.limits.maxFetchesPerGrant,
+        });
+      },
+    });
     fields.destinationHost = opened.target.host;
     fields.pathHash = opened.target.pathHash;
     fields.queryPresent = opened.target.queryPresent;
@@ -2066,7 +2096,7 @@ app.post('/external-fetch', async (req, res) => {
     opened?.close();
     if (grant && reservationId && reservedBytes > 0) {
       try {
-        await releaseEgressFetchBytes({ grant, reservationId, reservedBytes });
+        await egressFetchRelease({ grant, reservationId, reservedBytes });
       } catch {
                 logger.error(
                     'Failed to release external fetch byte reservation',

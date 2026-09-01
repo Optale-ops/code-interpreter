@@ -7,7 +7,7 @@ export interface PackageTransportSummary {
 export interface PackageSetupSummary {
     manager: 'pip' | 'npm' | 'bun';
     requestedSpec: string;
-    installedVersion: string;
+    installedVersion?: string;
     artifactDigest?: string;
     durationMs: number;
     outcome: 'success' | 'failed';

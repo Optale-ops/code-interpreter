@@ -25,13 +25,20 @@ case "${1:-}" in
       printf '%s\n' '{"name":"optale-job-packages","private":true}' > "$root/package.json"
     fi
     cd "$root"
-    exec env \
+    started=$(date +%s%3N)
+    set +e
+    env \
       HTTP_PROXY="${PACKAGE_PROXY_URL}" \
       HTTPS_PROXY="${PACKAGE_PROXY_URL}" \
       NO_PROXY=127.0.0.1,localhost \
       NODE_EXTRA_CA_CERTS=/run/codeapi/package-ca.pem \
       SSL_CERT_FILE=/run/codeapi/package-ca.pem \
       "$real" "$command" --exact --cafile /run/codeapi/package-ca.pem "$@"
+    status=$?
+    set -e
+    ended=$(date +%s%3N)
+    node /usr/local/lib/sandbox-fetch/package-invocation.cjs bun "$started" "$ended" "$status" "$command" "$@" || true
+    exit "$status"
     ;;
   *) exec "$real" "$@" ;;
 esac

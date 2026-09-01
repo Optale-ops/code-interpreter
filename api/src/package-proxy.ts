@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import tls from 'node:tls';
 import { spawnSync } from 'node:child_process';
 import type net from 'node:net';
+import { writeWithBackpressure } from './http-backpressure';
 import type { PackageTransportSummary } from '../../shared/package-transport';
 export type { PackageTransportSummary } from '../../shared/package-transport';
 
@@ -349,9 +350,24 @@ export async function startPackageProxy(
                         res.destroy();
                         return;
                     }
-                    if (method !== 'HEAD') res.write(buffer);
+                    if (method !== 'HEAD')
+                        writeWithBackpressure(upstreamResponse, res, buffer);
                 });
+                const abortDownstream = (): void => {
+                    if (!res.destroyed) res.destroy();
+                };
+                upstreamResponse.on('aborted', abortDownstream);
+                upstreamResponse.on('error', abortDownstream);
                 upstreamResponse.on('end', () => {
+                    const outcome =
+                        upstreamResponse.trailers['x-codeapi-egress-outcome'];
+                    if (outcome !== 'OK') {
+                        log.warn(
+                            `package proxy rejected incomplete gateway response: ${String(outcome ?? 'missing outcome')}`,
+                        );
+                        abortDownstream();
+                        return;
+                    }
                     updateSummaryFromResponse(
                         upstreamResponse,
                         summary,

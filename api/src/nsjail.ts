@@ -399,6 +399,16 @@ async function stopPackageProxy(
         child.kill('SIGKILL');
 }
 
+export async function cleanupFailedPackageSandboxSpawn(
+    holder: ChildProcessWithoutNullStreams | undefined,
+    cleanup: () => void,
+    stop: (child: ChildProcessWithoutNullStreams | undefined) => Promise<void> =
+        stopPackageProxy,
+): Promise<void> {
+    await stop(holder);
+    cleanup();
+}
+
 interface ExecuteOptions {
   command: string[];
   envVars: Record<string, string>;
@@ -729,7 +739,10 @@ export async function execute(
    * fired" warning + metric increment. Cleanup mirrors the
    * synchronous-spawn-failure catch above. */
   if (spawnError) {
-    cleanupTemporaryFiles();
+    await cleanupFailedPackageSandboxSpawn(
+        packageNetworkHolder,
+        cleanupTemporaryFiles,
+    );
     const errno: NodeJS.ErrnoException = spawnError;
         throw new Error(
             `Failed to spawn nsjail: ${errno.code ?? 'UNKNOWN'}: ${errno.message}`,
