@@ -2,6 +2,7 @@ process.env.CODEAPI_EGRESS_GATEWAY_AUTOSTART = 'false';
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import crypto from 'crypto';
+import fs from 'fs';
 import RedisMock from 'ioredis-mock';
 import { request as httpRequest, type IncomingMessage, type Server } from 'http';
 import type { AddressInfo } from 'net';
@@ -25,6 +26,11 @@ import {
   type EgressGrantClaims,
 } from './egress-grant';
 import { INTERNAL_SERVICE_TOKEN_HEADER } from './internal-service-auth';
+import {
+    externalFetchPolicyDigest,
+    parseExternalFetchPolicy,
+    serializeExternalFetchPolicy,
+} from './external-fetch-policy';
 import type * as t from './types';
 import { validateExternalFetchResponseHeaders } from './external-fetch';
 import logger from './logger';
@@ -42,6 +48,18 @@ const INTERNAL_TOKEN = 'internal-token';
 const TOKEN_PREFIX = 'ceg1';
 const AAD = Buffer.from('codeapi-egress-grant:v1', 'utf8');
 const originalFetch = globalThis.fetch;
+const deploymentPolicy = parseExternalFetchPolicy(
+    JSON.parse(
+        fs.readFileSync(
+            path.resolve(__dirname, '../config/external-fetch-policy.json'),
+            'utf8',
+        ),
+    ),
+);
+const policyBinding = {
+    network_policy: serializeExternalFetchPolicy(deploymentPolicy),
+    network_policy_digest: externalFetchPolicyDigest(deploymentPolicy),
+};
 
 type UpstreamCall = {
   url: string;
@@ -67,7 +85,13 @@ function claims(overrides: Partial<EgressGrantClaims> = {}): EgressGrantClaims {
     tenant_id: 'tenant_abc',
     user_id: 'user_123',
     session_key: 'tenant:tenant_abc:user:user_123',
-    input_files: [{ id: 'file_123', session_id: 'sess_input', name: 'inputs/data.csv' }],
+        input_files: [
+            {
+                id: 'file_123',
+                session_id: 'sess_input',
+                name: 'inputs/data.csv',
+            },
+        ],
     read_sessions: ['sess_input'],
     output_session_id: 'sess_output',
     max_upload_bytes: 1024,
@@ -77,11 +101,14 @@ function claims(overrides: Partial<EgressGrantClaims> = {}): EgressGrantClaims {
     exp: now + 300,
     principal_source: 'librechat',
     auth_context_hash: 'hash_123',
+        ...policyBinding,
     ...overrides,
   };
 }
 
-function grantHeader(grant: EgressGrantClaims = claims()): Record<string, string> {
+function grantHeader(
+    grant: EgressGrantClaims = claims(),
+): Record<string, string> {
   return { [EGRESS_GRANT_HEADER]: sealEgressGrant(grant, SECRET) };
 }
 
@@ -124,13 +151,25 @@ function payload(): t.PayloadBody {
     language: 'python',
     version: '3.14.4',
     session_id: 'sess_output',
-    files: [{ id: 'file_123', storage_session_id: 'sess_input', name: 'inputs/data.csv' }],
+        files: [
+            {
+                id: 'file_123',
+                storage_session_id: 'sess_input',
+                name: 'inputs/data.csv',
+            },
+        ],
   };
 }
 
-function sessionHandle(args: { dir: 'read' | 'write'; sessionId: string; execId?: string; grantId?: string }): string {
+function sessionHandle(args: {
+    dir: 'read' | 'write';
+    sessionId: string;
+    execId?: string;
+    grantId?: string;
+}): string {
   const now = nowSeconds();
-  return sealEgressHandle({
+    return sealEgressHandle(
+        {
     typ: 'session',
     dir: args.dir,
     grant_id: args.grantId ?? 'grant_123',
@@ -138,24 +177,40 @@ function sessionHandle(args: { dir: 'read' | 'write'; sessionId: string; execId?
     session_id: args.sessionId,
     iat: now - 10,
     exp: now + 300,
-  }, SECRET);
+        },
+        SECRET,
+    );
 }
 
-function legacySessionHandle(args: { dir: 'read' | 'write'; sessionId: string; execId?: string }): string {
+function legacySessionHandle(args: {
+    dir: 'read' | 'write';
+    sessionId: string;
+    execId?: string;
+}): string {
   const now = nowSeconds();
-  return sealEgressHandle({
+    return sealEgressHandle(
+        {
     typ: 'session',
     dir: args.dir,
     exec_id: args.execId ?? 'exec_123',
     session_id: args.sessionId,
     iat: now - 10,
     exp: now + 300,
-  }, SECRET);
+        },
+        SECRET,
+    );
 }
 
-function objectHandle(args: { fileId?: string; sessionId?: string; name?: string; execId?: string; grantId?: string }): string {
+function objectHandle(args: {
+    fileId?: string;
+    sessionId?: string;
+    name?: string;
+    execId?: string;
+    grantId?: string;
+}): string {
   const now = nowSeconds();
-  return sealEgressHandle({
+    return sealEgressHandle(
+        {
     typ: 'object',
     dir: 'read',
     grant_id: args.grantId ?? 'grant_123',
@@ -165,12 +220,20 @@ function objectHandle(args: { fileId?: string; sessionId?: string; name?: string
     name: args.name ?? 'inputs/data.csv',
     iat: now - 10,
     exp: now + 300,
-  }, SECRET);
+        },
+        SECRET,
+    );
 }
 
-function legacyObjectHandle(args: { fileId?: string; sessionId?: string; name?: string; execId?: string }): string {
+function legacyObjectHandle(args: {
+    fileId?: string;
+    sessionId?: string;
+    name?: string;
+    execId?: string;
+}): string {
   const now = nowSeconds();
-  return sealEgressHandle({
+    return sealEgressHandle(
+        {
     typ: 'object',
     dir: 'read',
     exec_id: args.execId ?? 'exec_123',
@@ -179,7 +242,9 @@ function legacyObjectHandle(args: { fileId?: string; sessionId?: string; name?: 
     name: args.name ?? 'inputs/data.csv',
     iat: now - 10,
     exp: now + 300,
-  }, SECRET);
+        },
+        SECRET,
+    );
 }
 
 function header(init: RequestInit, name: string): string | undefined {
@@ -187,7 +252,10 @@ function header(init: RequestInit, name: string): string | undefined {
   return headers?.[name] ?? headers?.[name.toLowerCase()];
 }
 
-async function gatewayFetch(path: string, init: RequestInit = {}): Promise<globalThis.Response> {
+async function gatewayFetch(
+    path: string,
+    init: RequestInit = {},
+): Promise<globalThis.Response> {
   return originalFetch(`${baseUrl}${path}`, init);
 }
 
@@ -227,11 +295,17 @@ beforeEach(() => {
   env.EGRESS_GATEWAY_MAX_PATH_LENGTH = 256;
   env.EGRESS_GATEWAY_MAX_NESTING_DEPTH = 10;
   env.EGRESS_LEDGER_REQUIRED = false;
-  env.EXTERNAL_FETCH_POLICY_FILE = path.resolve(__dirname, '../config/external-fetch-policy.json');
+    env.EXTERNAL_FETCH_POLICY_FILE = path.resolve(
+        __dirname,
+        '../config/external-fetch-policy.json',
+    );
   process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = INTERNAL_TOKEN;
   upstreamCalls = [];
   upstreamResponse = new Response('ok', { status: 200 });
-  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = (async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+    ) => {
     upstreamCalls.push({ url: String(input), init: init ?? {} });
     return upstreamResponse;
   }) as typeof fetch;
@@ -251,7 +325,10 @@ afterEach(() => {
 
 describe('egress gateway routes', () => {
   test('protects internal grant create, restore, and revoke routes', async () => {
-    const createBody = JSON.stringify({ payload: payload(), claims: executionClaims() });
+        const createBody = JSON.stringify({
+            payload: payload(),
+            claims: executionClaims(),
+        });
     const unauthorized = await gatewayFetch('/internal/egress-grants', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -268,16 +345,25 @@ describe('egress gateway routes', () => {
       body: createBody,
     });
     expect(created.status).toBe(201);
-    const prepared = await created.json() as {
+        const prepared = (await created.json()) as {
       grant_id: string;
       payload: t.PayloadBody;
       egressGrantToken: string;
     };
-    expect(openEgressGrant(prepared.egressGrantToken, SECRET).grant_id).toBe(prepared.grant_id);
-    expect((prepared.payload.files[0] as { id: string }).id).not.toBe('file_123');
-    expect((prepared.payload.files[0] as { storage_session_id: string }).storage_session_id).not.toBe('sess_input');
+        expect(
+            openEgressGrant(prepared.egressGrantToken, SECRET).grant_id,
+        ).toBe(prepared.grant_id);
+        expect((prepared.payload.files[0] as { id: string }).id).not.toBe(
+            'file_123',
+        );
+        expect(
+            (prepared.payload.files[0] as { storage_session_id: string })
+                .storage_session_id,
+        ).not.toBe('sess_input');
 
-    const restored = await gatewayFetch(`/internal/egress-grants/${prepared.grant_id}/restore-result`, {
+        const restored = await gatewayFetch(
+            `/internal/egress-grants/${prepared.grant_id}/restore-result`,
+            {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -287,14 +373,23 @@ describe('egress gateway routes', () => {
         egressGrantToken: prepared.egressGrantToken,
         result: {
           session_id: prepared.payload.output_session_id,
-          files: [{
-            id: (prepared.payload.files[0] as { id: string }).id,
-            storage_session_id: (prepared.payload.files[0] as { storage_session_id: string }).storage_session_id,
+                        files: [
+                            {
+                                id: (
+                                    prepared.payload.files[0] as { id: string }
+                                ).id,
+                                storage_session_id: (
+                                    prepared.payload.files[0] as {
+                                        storage_session_id: string;
+                                    }
+                                ).storage_session_id,
             name: 'inputs/data.csv',
-          }],
+                            },
+                        ],
         },
       }),
-    });
+            },
+        );
     expect(restored.status).toBe(200);
     expect(await restored.json()).toMatchObject({
       result: {
@@ -303,7 +398,9 @@ describe('egress gateway routes', () => {
       },
     });
 
-    const tokenOnlyRestored = await gatewayFetch('/internal/egress-grants/restore-result', {
+        const tokenOnlyRestored = await gatewayFetch(
+            '/internal/egress-grants/restore-result',
+            {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -313,14 +410,23 @@ describe('egress gateway routes', () => {
         egressGrantToken: prepared.egressGrantToken,
         result: {
           session_id: prepared.payload.output_session_id,
-          files: [{
-            id: (prepared.payload.files[0] as { id: string }).id,
-            storage_session_id: (prepared.payload.files[0] as { storage_session_id: string }).storage_session_id,
+                        files: [
+                            {
+                                id: (
+                                    prepared.payload.files[0] as { id: string }
+                                ).id,
+                                storage_session_id: (
+                                    prepared.payload.files[0] as {
+                                        storage_session_id: string;
+                                    }
+                                ).storage_session_id,
             name: 'inputs/data.csv',
-          }],
+                            },
+                        ],
         },
       }),
-    });
+            },
+        );
     expect(tokenOnlyRestored.status).toBe(200);
     expect(await tokenOnlyRestored.json()).toMatchObject({
       result: {
@@ -329,7 +435,9 @@ describe('egress gateway routes', () => {
       },
     });
 
-    const tokenOnlyRevoked = await gatewayFetch('/internal/egress-grants/revoke', {
+        const tokenOnlyRevoked = await gatewayFetch(
+            '/internal/egress-grants/revoke',
+            {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -339,17 +447,21 @@ describe('egress gateway routes', () => {
         egressGrantToken: prepared.egressGrantToken,
         reason: 'completed',
       }),
-    });
+            },
+        );
     expect(tokenOnlyRevoked.status).toBe(204);
 
-    const revoked = await gatewayFetch(`/internal/egress-grants/${prepared.grant_id}/revoke`, {
+        const revoked = await gatewayFetch(
+            `/internal/egress-grants/${prepared.grant_id}/revoke`,
+            {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         [INTERNAL_SERVICE_TOKEN_HEADER]: INTERNAL_TOKEN,
       },
       body: JSON.stringify({ reason: 'completed' }),
-    });
+            },
+        );
     expect(revoked.status).toBe(204);
   });
 
@@ -361,7 +473,10 @@ describe('egress gateway routes', () => {
         'Content-Type': 'application/json',
         [INTERNAL_SERVICE_TOKEN_HEADER]: INTERNAL_TOKEN,
       },
-      body: JSON.stringify({ payload: payload(), claims: executionClaims() }),
+            body: JSON.stringify({
+                payload: payload(),
+                claims: executionClaims(),
+            }),
     });
     expect(create.status).toBe(503);
 
@@ -398,11 +513,17 @@ describe('egress gateway routes', () => {
       }),
     });
     expect(created.status).toBe(201);
-    const tokenBody = await created.json() as { callbackToken: string; grant_id: string };
+        const tokenBody = (await created.json()) as {
+            callbackToken: string;
+            grant_id: string;
+        };
     expect(tokenBody.grant_id).toBeTruthy();
 
     upstreamResponse = Response.json({ success: true, result: 'ok' });
-    const body = JSON.stringify({ tool_name: 'query_clickhouse', input: {} });
+        const body = JSON.stringify({
+            tool_name: 'query_clickhouse',
+            input: {},
+        });
     const response = await gatewayFetch('/tool-call', {
       method: 'POST',
       headers: {
@@ -416,7 +537,9 @@ describe('egress gateway routes', () => {
     });
 
     expect(response.status).toBe(200);
-    expect(header(upstreamCalls[0].init, 'X-Callback-Token')).toBe('raw-callback-token');
+        expect(header(upstreamCalls[0].init, 'X-Callback-Token')).toBe(
+            'raw-callback-token',
+        );
   });
 
   test('rejects malformed PTC callback token timeouts before minting', async () => {
@@ -435,7 +558,9 @@ describe('egress gateway routes', () => {
     });
 
     expect(invalid.status).toBe(400);
-    expect(await invalid.json()).toEqual({ error: 'timeoutSeconds must be a finite positive number' });
+        expect(await invalid.json()).toEqual({
+            error: 'timeoutSeconds must be a finite positive number',
+        });
 
     const nullTimeout = await gatewayFetch('/internal/ptc-callback-token', {
       method: 'POST',
@@ -460,7 +585,11 @@ describe('egress gateway routes', () => {
       },
     };
     env.EGRESS_LEDGER_REQUIRED = true;
-    setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
+        setEgressLedgerRedisForTest(
+            redis as unknown as Parameters<
+                typeof setEgressLedgerRedisForTest
+            >[0],
+        );
     try {
       const live = await gatewayFetch('/live');
       const health = await gatewayFetch('/health');
@@ -477,48 +606,104 @@ describe('egress gateway routes', () => {
 
   test('lists only scoped objects and injects internal credentials', async () => {
     upstreamResponse = Response.json([
-      { id: 'file_123', name: 'inputs/data.csv', storage_session_id: 'sess_input' },
-      { id: 'file_999', name: 'inputs/other.csv', storage_session_id: 'sess_input' },
-      { id: 'dirkeep_1', name: 'inputs/.dirkeep', storage_session_id: 'sess_input' },
-      { id: 'dirkeep_2', name: 'unrelated/.dirkeep', storage_session_id: 'sess_input' },
+            {
+                id: 'file_123',
+                name: 'inputs/data.csv',
+                storage_session_id: 'sess_input',
+            },
+            {
+                id: 'file_999',
+                name: 'inputs/other.csv',
+                storage_session_id: 'sess_input',
+            },
+            {
+                id: 'dirkeep_1',
+                name: 'inputs/.dirkeep',
+                storage_session_id: 'sess_input',
+            },
+            {
+                id: 'dirkeep_2',
+                name: 'unrelated/.dirkeep',
+                storage_session_id: 'sess_input',
+            },
     ]);
-    const readSession = sessionHandle({ dir: 'read', sessionId: 'sess_input' });
+        const readSession = sessionHandle({
+            dir: 'read',
+            sessionId: 'sess_input',
+        });
 
-    const response = await gatewayFetch(`/sessions/${readSession}/objects?detail=normalized`, {
+        const response = await gatewayFetch(
+            `/sessions/${readSession}/objects?detail=normalized`,
+            {
       headers: grantHeader(),
-    });
+            },
+        );
 
     expect(response.status).toBe(200);
-    const body = await response.json() as Array<{ id: string; storage_session_id: string; name: string }>;
+        const body = (await response.json()) as Array<{
+            id: string;
+            storage_session_id: string;
+            name: string;
+        }>;
     expect(body).toHaveLength(2);
     expect(body[0].name).toBe('inputs/data.csv');
     expect(body[0].storage_session_id).toBe(readSession);
-    expect(openEgressHandle(body[0].id, SECRET)).toMatchObject({ typ: 'object', object_id: 'file_123' });
+        expect(openEgressHandle(body[0].id, SECRET)).toMatchObject({
+            typ: 'object',
+            object_id: 'file_123',
+        });
     expect(body[1].name).toBe('inputs/.dirkeep');
-    expect(openEgressHandle(body[1].id, SECRET)).toMatchObject({ typ: 'object', object_id: 'dirkeep_1' });
-    expect(upstreamCalls[0].url).toBe('http://file-server/sessions/sess_input/objects?detail=normalized');
-    expect(header(upstreamCalls[0].init, INTERNAL_SERVICE_TOKEN_HEADER)).toBe(INTERNAL_TOKEN);
-    expect(header(upstreamCalls[0].init, EGRESS_GRANT_HEADER)).toBeUndefined();
+        expect(openEgressHandle(body[1].id, SECRET)).toMatchObject({
+            typ: 'object',
+            object_id: 'dirkeep_1',
+        });
+        expect(upstreamCalls[0].url).toBe(
+            'http://file-server/sessions/sess_input/objects?detail=normalized',
+        );
+        expect(
+            header(upstreamCalls[0].init, INTERNAL_SERVICE_TOKEN_HEADER),
+        ).toBe(INTERNAL_TOKEN);
+        expect(
+            header(upstreamCalls[0].init, EGRESS_GRANT_HEADER),
+        ).toBeUndefined();
   });
 
   test('accepts legacy rollout grants and handles while ledger-required mode is enabled', async () => {
     const redis = new RedisMock();
     env.EGRESS_LEDGER_REQUIRED = true;
-    setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
+        setEgressLedgerRedisForTest(
+            redis as unknown as Parameters<
+                typeof setEgressLedgerRedisForTest
+            >[0],
+        );
     try {
       const token = legacyGrantToken();
       const legacyGrant = openEgressGrant(token, SECRET);
-      const readSession = legacySessionHandle({ dir: 'read', sessionId: 'sess_input' });
+            const readSession = legacySessionHandle({
+                dir: 'read',
+                sessionId: 'sess_input',
+            });
       upstreamResponse = Response.json([
-        { id: 'file_123', name: 'inputs/data.csv', storage_session_id: 'sess_input' },
+                {
+                    id: 'file_123',
+                    name: 'inputs/data.csv',
+                    storage_session_id: 'sess_input',
+                },
       ]);
 
-      const listed = await gatewayFetch(`/sessions/${readSession}/objects?detail=normalized`, {
+            const listed = await gatewayFetch(
+                `/sessions/${readSession}/objects?detail=normalized`,
+                {
         headers: { [EGRESS_GRANT_HEADER]: token },
-      });
+                },
+            );
 
       expect(listed.status).toBe(200);
-      const body = await listed.json() as Array<{ id: string; storage_session_id: string; name: string }>;
+            const body = (await listed.json()) as Array<{
+                id: string;
+                storage_session_id: string;
+                name: string;
+            }>;
       expect(body).toHaveLength(1);
       expect(body[0].storage_session_id).toBe(readSession);
       expect(openEgressHandle(body[0].id, SECRET)).toMatchObject({
@@ -542,11 +727,17 @@ describe('egress gateway routes', () => {
   test('restores token-only legacy grants and creates ledger state before returning handles', async () => {
     const redis = new RedisMock();
     env.EGRESS_LEDGER_REQUIRED = true;
-    setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
+        setEgressLedgerRedisForTest(
+            redis as unknown as Parameters<
+                typeof setEgressLedgerRedisForTest
+            >[0],
+        );
     try {
       const token = legacyGrantToken();
       const legacyGrant = openEgressGrant(token, SECRET);
-      const response = await gatewayFetch('/internal/egress-grants/restore-result', {
+            const response = await gatewayFetch(
+                '/internal/egress-grants/restore-result',
+                {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -555,21 +746,32 @@ describe('egress gateway routes', () => {
         body: JSON.stringify({
           egressGrantToken: token,
           result: {
-            session_id: legacySessionHandle({ dir: 'write', sessionId: 'sess_output' }),
-            files: [{
+                            session_id: legacySessionHandle({
+                                dir: 'write',
+                                sessionId: 'sess_output',
+                            }),
+                            files: [
+                                {
               id: legacyObjectHandle({}),
-              storage_session_id: legacySessionHandle({ dir: 'read', sessionId: 'sess_input' }),
+                                    storage_session_id: legacySessionHandle({
+                                        dir: 'read',
+                                        sessionId: 'sess_input',
+                                    }),
               name: 'inputs/data.csv',
-            }],
+                                },
+                            ],
           },
         }),
-      });
+                },
+            );
 
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({
         result: {
           session_id: 'sess_output',
-          files: [{ id: 'file_123', storage_session_id: 'sess_input' }],
+                    files: [
+                        { id: 'file_123', storage_session_id: 'sess_input' },
+                    ],
         },
       });
       const record = await assertEgressGrantActive(legacyGrant);
@@ -585,16 +787,26 @@ describe('egress gateway routes', () => {
   test('rejects grantless handles for non-legacy grants in ledger-required mode', async () => {
     const redis = new RedisMock();
     env.EGRESS_LEDGER_REQUIRED = true;
-    setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
+        setEgressLedgerRedisForTest(
+            redis as unknown as Parameters<
+                typeof setEgressLedgerRedisForTest
+            >[0],
+        );
     try {
       const grant = claims();
       await createEgressLedger(grant);
-      const readSession = legacySessionHandle({ dir: 'read', sessionId: 'sess_input' });
+            const readSession = legacySessionHandle({
+                dir: 'read',
+                sessionId: 'sess_input',
+            });
       const object = legacyObjectHandle({});
 
-      const response = await gatewayFetch(`/sessions/${readSession}/objects/${object}`, {
+            const response = await gatewayFetch(
+                `/sessions/${readSession}/objects/${object}`,
+                {
         headers: grantHeader(grant),
-      });
+                },
+            );
 
       expect(response.status).toBe(403);
       expect(upstreamCalls).toHaveLength(0);
@@ -608,49 +820,104 @@ describe('egress gateway routes', () => {
   test('keeps read allowlists exact when user uploads and prior outputs share a turn', async () => {
     const grant = claims({
       input_files: [
-        { id: 'user_file', session_id: 'sess_user_uploads', name: 'uploads/source.csv' },
-        { id: 'generated_file', session_id: 'sess_turn_1_output', name: 'analysis/summary.json' },
+                {
+                    id: 'user_file',
+                    session_id: 'sess_user_uploads',
+                    name: 'uploads/source.csv',
+                },
+                {
+                    id: 'generated_file',
+                    session_id: 'sess_turn_1_output',
+                    name: 'analysis/summary.json',
+                },
       ],
       read_sessions: ['sess_user_uploads', 'sess_turn_1_output'],
     });
     upstreamResponse = Response.json([
-      { id: 'user_file', name: 'uploads/source.csv', storage_session_id: 'sess_user_uploads' },
-      { id: 'cross_turn_leak', name: 'uploads/other.csv', storage_session_id: 'sess_user_uploads' },
-      { id: 'dirkeep_uploads', name: 'uploads/.dirkeep', storage_session_id: 'sess_user_uploads' },
+            {
+                id: 'user_file',
+                name: 'uploads/source.csv',
+                storage_session_id: 'sess_user_uploads',
+            },
+            {
+                id: 'cross_turn_leak',
+                name: 'uploads/other.csv',
+                storage_session_id: 'sess_user_uploads',
+            },
+            {
+                id: 'dirkeep_uploads',
+                name: 'uploads/.dirkeep',
+                storage_session_id: 'sess_user_uploads',
+            },
     ]);
-    const uploadSession = sessionHandle({ dir: 'read', sessionId: 'sess_user_uploads' });
+        const uploadSession = sessionHandle({
+            dir: 'read',
+            sessionId: 'sess_user_uploads',
+        });
 
-    const uploadList = await gatewayFetch(`/sessions/${uploadSession}/objects?detail=normalized`, {
+        const uploadList = await gatewayFetch(
+            `/sessions/${uploadSession}/objects?detail=normalized`,
+            {
       headers: grantHeader(grant),
-    });
+            },
+        );
 
     expect(uploadList.status).toBe(200);
-    const uploadBody = await uploadList.json() as Array<{ name: string }>;
-    expect(uploadBody.map(file => file.name)).toEqual(['uploads/source.csv', 'uploads/.dirkeep']);
+        const uploadBody = (await uploadList.json()) as Array<{ name: string }>;
+        expect(uploadBody.map(file => file.name)).toEqual([
+            'uploads/source.csv',
+            'uploads/.dirkeep',
+        ]);
 
     upstreamResponse = Response.json([
-      { id: 'generated_file', name: 'analysis/summary.json', storage_session_id: 'sess_turn_1_output' },
-      { id: 'generated_other', name: 'analysis/private.json', storage_session_id: 'sess_turn_1_output' },
-      { id: 'dirkeep_analysis', name: 'analysis/.dirkeep', storage_session_id: 'sess_turn_1_output' },
+            {
+                id: 'generated_file',
+                name: 'analysis/summary.json',
+                storage_session_id: 'sess_turn_1_output',
+            },
+            {
+                id: 'generated_other',
+                name: 'analysis/private.json',
+                storage_session_id: 'sess_turn_1_output',
+            },
+            {
+                id: 'dirkeep_analysis',
+                name: 'analysis/.dirkeep',
+                storage_session_id: 'sess_turn_1_output',
+            },
     ]);
-    const priorOutputSession = sessionHandle({ dir: 'read', sessionId: 'sess_turn_1_output' });
+        const priorOutputSession = sessionHandle({
+            dir: 'read',
+            sessionId: 'sess_turn_1_output',
+        });
 
-    const priorOutputList = await gatewayFetch(`/sessions/${priorOutputSession}/objects?detail=normalized`, {
+        const priorOutputList = await gatewayFetch(
+            `/sessions/${priorOutputSession}/objects?detail=normalized`,
+            {
       headers: grantHeader(grant),
-    });
+            },
+        );
 
     expect(priorOutputList.status).toBe(200);
-    const priorOutputBody = await priorOutputList.json() as Array<{ name: string }>;
-    expect(priorOutputBody.map(file => file.name)).toEqual(['analysis/summary.json', 'analysis/.dirkeep']);
+        const priorOutputBody = (await priorOutputList.json()) as Array<{
+            name: string;
+        }>;
+        expect(priorOutputBody.map(file => file.name)).toEqual([
+            'analysis/summary.json',
+            'analysis/.dirkeep',
+        ]);
 
     const leakObject = objectHandle({
       fileId: 'generated_other',
       sessionId: 'sess_turn_1_output',
       name: 'analysis/private.json',
     });
-    const rejected = await gatewayFetch(`/sessions/${priorOutputSession}/objects/${leakObject}`, {
+        const rejected = await gatewayFetch(
+            `/sessions/${priorOutputSession}/objects/${leakObject}`,
+            {
       headers: grantHeader(grant),
-    });
+            },
+        );
     expect(rejected.status).toBe(403);
     expect(upstreamCalls.map(call => call.url)).toEqual([
       'http://file-server/sessions/sess_user_uploads/objects?detail=normalized',
@@ -659,11 +926,17 @@ describe('egress gateway routes', () => {
   });
 
   test('rejects unsupported list query params before delegation', async () => {
-    const readSession = sessionHandle({ dir: 'read', sessionId: 'sess_input' });
+        const readSession = sessionHandle({
+            dir: 'read',
+            sessionId: 'sess_input',
+        });
 
-    const response = await gatewayFetch(`/sessions/${readSession}/objects?detail=raw`, {
+        const response = await gatewayFetch(
+            `/sessions/${readSession}/objects?detail=raw`,
+            {
       headers: grantHeader(),
-    });
+            },
+        );
 
     expect(response.status).toBe(400);
     expect(upstreamCalls).toHaveLength(0);
@@ -674,17 +947,27 @@ describe('egress gateway routes', () => {
       status: 200,
       headers: { 'Content-Type': 'text/plain' },
     });
-    const readSession = sessionHandle({ dir: 'read', sessionId: 'sess_input' });
+        const readSession = sessionHandle({
+            dir: 'read',
+            sessionId: 'sess_input',
+        });
     const object = objectHandle({});
 
-    const response = await gatewayFetch(`/sessions/${readSession}/objects/${object}`, {
+        const response = await gatewayFetch(
+            `/sessions/${readSession}/objects/${object}`,
+            {
       headers: grantHeader(),
-    });
+            },
+        );
 
     expect(response.status).toBe(200);
     expect(await response.text()).toBe('file-body');
-    expect(upstreamCalls[0].url).toBe('http://file-server/sessions/sess_input/objects/file_123');
-    expect(header(upstreamCalls[0].init, INTERNAL_SERVICE_TOKEN_HEADER)).toBe(INTERNAL_TOKEN);
+        expect(upstreamCalls[0].url).toBe(
+            'http://file-server/sessions/sess_input/objects/file_123',
+        );
+        expect(
+            header(upstreamCalls[0].init, INTERNAL_SERVICE_TOKEN_HEADER),
+        ).toBe(INTERNAL_TOKEN);
   });
 
   test('downloads required dirkeep markers without allowing unrelated markers', async () => {
@@ -692,39 +975,67 @@ describe('egress gateway routes', () => {
       status: 200,
       headers: { 'Content-Type': 'text/plain' },
     });
-    const readSession = sessionHandle({ dir: 'read', sessionId: 'sess_input' });
-    const requiredMarker = objectHandle({ fileId: 'dirkeep_1', name: 'inputs/.dirkeep' });
-    const unrelatedMarker = objectHandle({ fileId: 'dirkeep_2', name: 'unrelated/.dirkeep' });
+        const readSession = sessionHandle({
+            dir: 'read',
+            sessionId: 'sess_input',
+        });
+        const requiredMarker = objectHandle({
+            fileId: 'dirkeep_1',
+            name: 'inputs/.dirkeep',
+        });
+        const unrelatedMarker = objectHandle({
+            fileId: 'dirkeep_2',
+            name: 'unrelated/.dirkeep',
+        });
 
-    const response = await gatewayFetch(`/sessions/${readSession}/objects/${requiredMarker}`, {
+        const response = await gatewayFetch(
+            `/sessions/${readSession}/objects/${requiredMarker}`,
+            {
       headers: grantHeader(),
-    });
+            },
+        );
     expect(response.status).toBe(200);
-    expect(upstreamCalls[0].url).toBe('http://file-server/sessions/sess_input/objects/dirkeep_1');
+        expect(upstreamCalls[0].url).toBe(
+            'http://file-server/sessions/sess_input/objects/dirkeep_1',
+        );
 
-    const rejected = await gatewayFetch(`/sessions/${readSession}/objects/${unrelatedMarker}`, {
+        const rejected = await gatewayFetch(
+            `/sessions/${readSession}/objects/${unrelatedMarker}`,
+            {
       headers: grantHeader(),
-    });
+            },
+        );
     expect(rejected.status).toBe(403);
     expect(upstreamCalls).toHaveLength(1);
   });
 
   test('rejects read object handles whose name does not match the exact allowlist tuple', async () => {
-    const readSession = sessionHandle({ dir: 'read', sessionId: 'sess_input' });
+        const readSession = sessionHandle({
+            dir: 'read',
+            sessionId: 'sess_input',
+        });
     const object = objectHandle({ name: 'inputs/renamed.csv' });
 
-    const response = await gatewayFetch(`/sessions/${readSession}/objects/${object}`, {
+        const response = await gatewayFetch(
+            `/sessions/${readSession}/objects/${object}`,
+            {
       headers: grantHeader(),
-    });
+            },
+        );
 
     expect(response.status).toBe(403);
     expect(upstreamCalls).toHaveLength(0);
   });
 
   test('enforces upload byte limits before delegation', async () => {
-    const writeSession = sessionHandle({ dir: 'write', sessionId: 'sess_output' });
+        const writeSession = sessionHandle({
+            dir: 'write',
+            sessionId: 'sess_output',
+        });
 
-    const response = await gatewayFetch(`/sessions/${writeSession}/objects/abcdefghijklmnopqrstu`, {
+        const response = await gatewayFetch(
+            `/sessions/${writeSession}/objects/abcdefghijklmnopqrstu`,
+            {
       method: 'PUT',
       headers: {
         ...grantHeader(claims({ max_upload_bytes: 3 })),
@@ -733,16 +1044,22 @@ describe('egress gateway routes', () => {
         'X-Original-Filename': 'out.txt',
       },
       body: 'abcd',
-    });
+            },
+        );
 
     expect(response.status).toBe(413);
     expect(upstreamCalls).toHaveLength(0);
   });
 
   test('rejects invalid output filenames before delegation', async () => {
-    const writeSession = sessionHandle({ dir: 'write', sessionId: 'sess_output' });
+        const writeSession = sessionHandle({
+            dir: 'write',
+            sessionId: 'sess_output',
+        });
 
-    const traversal = await gatewayFetch(`/sessions/${writeSession}/objects/abcdefghijklmnopqrstu`, {
+        const traversal = await gatewayFetch(
+            `/sessions/${writeSession}/objects/abcdefghijklmnopqrstu`,
+            {
       method: 'PUT',
       headers: {
         ...grantHeader(),
@@ -751,10 +1068,13 @@ describe('egress gateway routes', () => {
         'X-Original-Filename': encodeURIComponent('../secret.txt'),
       },
       body: 'abc',
-    });
+            },
+        );
     expect(traversal.status).toBe(400);
 
-    const unsupported = await gatewayFetch(`/sessions/${writeSession}/objects/abcdefghijklmnopqrstv`, {
+        const unsupported = await gatewayFetch(
+            `/sessions/${writeSession}/objects/abcdefghijklmnopqrstv`,
+            {
       method: 'PUT',
       headers: {
         ...grantHeader(),
@@ -763,15 +1083,21 @@ describe('egress gateway routes', () => {
         'X-Original-Filename': 'payload.exe',
       },
       body: 'abc',
-    });
+            },
+        );
     expect(unsupported.status).toBe(403);
     expect(upstreamCalls).toHaveLength(0);
   });
 
   test('allows supported extensionless output basenames before delegation', async () => {
-    const writeSession = sessionHandle({ dir: 'write', sessionId: 'sess_output' });
+        const writeSession = sessionHandle({
+            dir: 'write',
+            sessionId: 'sess_output',
+        });
 
-    const dockerfile = await gatewayFetch(`/sessions/${writeSession}/objects/abcdefghijklmnopqrstu`, {
+        const dockerfile = await gatewayFetch(
+            `/sessions/${writeSession}/objects/abcdefghijklmnopqrstu`,
+            {
       method: 'PUT',
       headers: {
         ...grantHeader(),
@@ -780,11 +1106,14 @@ describe('egress gateway routes', () => {
         'X-Original-Filename': 'Dockerfile',
       },
       body: 'abc',
-    });
+            },
+        );
     expect(dockerfile.status).toBe(200);
 
     upstreamResponse = new Response('ok', { status: 200 });
-    const jenkinsfile = await gatewayFetch(`/sessions/${writeSession}/objects/bcdefghijklmnopqrstuv`, {
+        const jenkinsfile = await gatewayFetch(
+            `/sessions/${writeSession}/objects/bcdefghijklmnopqrstuv`,
+            {
       method: 'PUT',
       headers: {
         ...grantHeader(),
@@ -793,11 +1122,14 @@ describe('egress gateway routes', () => {
         'X-Original-Filename': 'ci/Jenkinsfile',
       },
       body: 'abc',
-    });
+            },
+        );
     expect(jenkinsfile.status).toBe(200);
 
     upstreamResponse = new Response('ok', { status: 200 });
-    const vagrantfile = await gatewayFetch(`/sessions/${writeSession}/objects/cdefghijklmnopqrstuvw`, {
+        const vagrantfile = await gatewayFetch(
+            `/sessions/${writeSession}/objects/cdefghijklmnopqrstuvw`,
+            {
       method: 'PUT',
       headers: {
         ...grantHeader(),
@@ -806,16 +1138,25 @@ describe('egress gateway routes', () => {
         'X-Original-Filename': 'infra/Vagrantfile',
       },
       body: 'abc',
-    });
+            },
+        );
     expect(vagrantfile.status).toBe(200);
     expect(upstreamCalls).toHaveLength(3);
   });
 
   test('uploads scoped output files with injected internal credentials', async () => {
-    upstreamResponse = Response.json({ id: 'abcdefghijklmnopqrstu' }, { status: 201 });
-    const writeSession = sessionHandle({ dir: 'write', sessionId: 'sess_output' });
+        upstreamResponse = Response.json(
+            { id: 'abcdefghijklmnopqrstu' },
+            { status: 201 },
+        );
+        const writeSession = sessionHandle({
+            dir: 'write',
+            sessionId: 'sess_output',
+        });
 
-    const response = await gatewayFetch(`/sessions/${writeSession}/objects/abcdefghijklmnopqrstu`, {
+        const response = await gatewayFetch(
+            `/sessions/${writeSession}/objects/abcdefghijklmnopqrstu`,
+            {
       method: 'PUT',
       headers: {
         ...grantHeader(),
@@ -824,30 +1165,49 @@ describe('egress gateway routes', () => {
         'X-Original-Filename': 'out.txt',
       },
       body: 'abc',
-    });
+            },
+        );
 
     expect(response.status).toBe(201);
-    expect(upstreamCalls[0].url).toBe('http://file-server/sessions/sess_output/objects/abcdefghijklmnopqrstu');
-    expect(header(upstreamCalls[0].init, INTERNAL_SERVICE_TOKEN_HEADER)).toBe(INTERNAL_TOKEN);
-    expect(header(upstreamCalls[0].init, 'X-Original-Filename')).toBe('out.txt');
+        expect(upstreamCalls[0].url).toBe(
+            'http://file-server/sessions/sess_output/objects/abcdefghijklmnopqrstu',
+        );
+        expect(
+            header(upstreamCalls[0].init, INTERNAL_SERVICE_TOKEN_HEADER),
+        ).toBe(INTERNAL_TOKEN);
+        expect(header(upstreamCalls[0].init, 'X-Original-Filename')).toBe(
+            'out.txt',
+        );
   });
 
   test('rolls back upload reservations when upstream PUT throws', async () => {
     const redis = new RedisMock();
     env.EGRESS_LEDGER_REQUIRED = true;
-    setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
+        setEgressLedgerRedisForTest(
+            redis as unknown as Parameters<
+                typeof setEgressLedgerRedisForTest
+            >[0],
+        );
     const grant = claims({ max_output_files: 1, max_requests: 3 });
     await createEgressLedger(grant);
-    const writeSession = sessionHandle({ dir: 'write', sessionId: 'sess_output' });
+        const writeSession = sessionHandle({
+            dir: 'write',
+            sessionId: 'sess_output',
+        });
     const fileId = 'abcdefghijklmnopqrstu';
 
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        globalThis.fetch = (async (
+            input: RequestInfo | URL,
+            init?: RequestInit,
+        ) => {
       upstreamCalls.push({ url: String(input), init: init ?? {} });
       throw new Error('upstream connection reset');
     }) as unknown as typeof fetch;
 
     try {
-      const failed = await gatewayFetch(`/sessions/${writeSession}/objects/${fileId}`, {
+            const failed = await gatewayFetch(
+                `/sessions/${writeSession}/objects/${fileId}`,
+                {
         method: 'PUT',
         headers: {
           ...grantHeader(grant),
@@ -856,16 +1216,22 @@ describe('egress gateway routes', () => {
           'X-Original-Filename': 'out.txt',
         },
         body: 'abc',
-      });
+                },
+            );
       expect(failed.status).toBe(500);
 
       upstreamResponse = Response.json({ id: fileId }, { status: 201 });
-      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+            globalThis.fetch = (async (
+                input: RequestInfo | URL,
+                init?: RequestInit,
+            ) => {
         upstreamCalls.push({ url: String(input), init: init ?? {} });
         return upstreamResponse;
       }) as unknown as typeof fetch;
 
-      const retried = await gatewayFetch(`/sessions/${writeSession}/objects/${fileId}`, {
+            const retried = await gatewayFetch(
+                `/sessions/${writeSession}/objects/${fileId}`,
+                {
         method: 'PUT',
         headers: {
           ...grantHeader(grant),
@@ -874,7 +1240,8 @@ describe('egress gateway routes', () => {
           'X-Original-Filename': 'out.txt',
         },
         body: 'abc',
-      });
+                },
+            );
 
       expect(retried.status).toBe(201);
     } finally {
@@ -887,18 +1254,30 @@ describe('egress gateway routes', () => {
   test('does not roll back ledger state when upload reservation is rejected', async () => {
     const redis = new RedisMock();
     env.EGRESS_LEDGER_REQUIRED = true;
-    setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        setEgressLedgerRedisForTest(
+            redis as unknown as Parameters<
+                typeof setEgressLedgerRedisForTest
+            >[0],
+        );
+        globalThis.fetch = (async (
+            input: RequestInfo | URL,
+            init?: RequestInit,
+        ) => {
       upstreamCalls.push({ url: String(input), init: init ?? {} });
       return Response.json({ ok: true }, { status: 201 });
     }) as unknown as typeof fetch;
 
     const grant = claims({ max_output_files: 1, max_requests: 5 });
     await createEgressLedger(grant);
-    const writeSession = sessionHandle({ dir: 'write', sessionId: 'sess_output' });
+        const writeSession = sessionHandle({
+            dir: 'write',
+            sessionId: 'sess_output',
+        });
 
     async function upload(fileId: string): Promise<number> {
-      const response = await gatewayFetch(`/sessions/${writeSession}/objects/${fileId}`, {
+            const response = await gatewayFetch(
+                `/sessions/${writeSession}/objects/${fileId}`,
+                {
         method: 'PUT',
         headers: {
           ...grantHeader(grant),
@@ -907,7 +1286,8 @@ describe('egress gateway routes', () => {
           'X-Original-Filename': `${fileId}.txt`,
         },
         body: 'abc',
-      });
+                },
+            );
       return response.status;
     }
 
@@ -926,19 +1306,31 @@ describe('egress gateway routes', () => {
   test('enforces output budgets per turn when grants reuse an output session', async () => {
     const redis = new RedisMock();
     env.EGRESS_LEDGER_REQUIRED = true;
-    setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        setEgressLedgerRedisForTest(
+            redis as unknown as Parameters<
+                typeof setEgressLedgerRedisForTest
+            >[0],
+        );
+        globalThis.fetch = (async (
+            input: RequestInfo | URL,
+            init?: RequestInit,
+        ) => {
       upstreamCalls.push({ url: String(input), init: init ?? {} });
       return Response.json({ ok: true }, { status: 201 });
     }) as unknown as typeof fetch;
 
-    async function upload(grant: EgressGrantClaims, fileId: string): Promise<number> {
+        async function upload(
+            grant: EgressGrantClaims,
+            fileId: string,
+        ): Promise<number> {
       const writeSession = sessionHandle({
         dir: 'write',
         sessionId: 'sess_shared_output',
         grantId: grant.grant_id,
       });
-      const response = await gatewayFetch(`/sessions/${writeSession}/objects/${fileId}`, {
+            const response = await gatewayFetch(
+                `/sessions/${writeSession}/objects/${fileId}`,
+                {
         method: 'PUT',
         headers: {
           ...grantHeader(grant),
@@ -947,7 +1339,8 @@ describe('egress gateway routes', () => {
           'X-Original-Filename': `${fileId}.txt`,
         },
         body: 'abc',
-      });
+                },
+            );
       return response.status;
     }
 
@@ -981,7 +1374,10 @@ describe('egress gateway routes', () => {
 
   test('forwards PTC calls with unwrapped callback tokens', async () => {
     upstreamResponse = Response.json({ success: true, result: 'ok' });
-    const body = JSON.stringify({ tool_name: 'query_clickhouse', input: { sql: 'SELECT 1' } });
+        const body = JSON.stringify({
+            tool_name: 'query_clickhouse',
+            input: { sql: 'SELECT 1' },
+        });
     const callbackToken = sealPtcCallbackToken({
       executionId: 'exec_123',
       sessionId: 'tool_session',
@@ -1005,13 +1401,22 @@ describe('egress gateway routes', () => {
 
     expect(response.status).toBe(200);
     expect(upstreamCalls[0].url).toBe('http://tool-call-server/tool-call');
-    expect(header(upstreamCalls[0].init, 'X-Execution-ID')).toBe('exec_123');
-    expect(header(upstreamCalls[0].init, 'X-Tool-Call-ID')).toBe('call_001');
-    expect(header(upstreamCalls[0].init, 'X-Callback-Token')).toBe('raw-callback-token');
+        expect(header(upstreamCalls[0].init, 'X-Execution-ID')).toBe(
+            'exec_123',
+        );
+        expect(header(upstreamCalls[0].init, 'X-Tool-Call-ID')).toBe(
+            'call_001',
+        );
+        expect(header(upstreamCalls[0].init, 'X-Callback-Token')).toBe(
+            'raw-callback-token',
+        );
   });
 
   test('rejects PTC callbacks whose execution does not match the request', async () => {
-    const body = JSON.stringify({ tool_name: 'query_clickhouse', input: {} });
+        const body = JSON.stringify({
+            tool_name: 'query_clickhouse',
+            input: {},
+        });
     const callbackToken = sealPtcCallbackToken({
       executionId: 'exec_other',
       sessionId: 'tool_session',
@@ -1066,7 +1471,10 @@ describe('egress gateway routes', () => {
   });
 
   test('rejects PTC callbacks when the token carries an explicit empty tool allowlist', async () => {
-    const body = JSON.stringify({ tool_name: 'query_clickhouse', input: {} });
+        const body = JSON.stringify({
+            tool_name: 'query_clickhouse',
+            input: {},
+        });
     const callbackToken = sealPtcCallbackToken({
       executionId: 'exec_123',
       sessionId: 'tool_session',
@@ -1118,7 +1526,9 @@ describe('egress gateway routes', () => {
     });
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({ error: 'Malformed PTC tool-call JSON' });
+        expect(await response.json()).toEqual({
+            error: 'Malformed PTC tool-call JSON',
+        });
     expect(upstreamCalls).toHaveLength(0);
   });
 
@@ -1359,12 +1769,42 @@ describe('egress gateway routes', () => {
       const response = await gatewayFetch('/external-fetch', {
         method: 'POST',
         headers,
-        body: JSON.stringify({ url: 'https://unlisted.example/file.pdf' }),
+                body: JSON.stringify({
+                    url: 'https://unlisted.example/file.pdf',
+                }),
       });
       expect(response.status).toBe(404);
-      expect(response.headers.get('content-type')).toStartWith('text/plain');
+            expect(response.headers.get('content-type')).toStartWith(
+                'text/plain',
+            );
       expect(await response.text()).toBe('not found');
     }
+  });
+
+  test('keeps HTTPS passthrough opaque without a grant and denies an unlisted host', async () => {
+    const body = JSON.stringify({
+      url: 'https://unlisted.example/api/optale/mcp',
+      method: 'GET',
+      headers: { authorization: 'Bearer presence-only' },
+      bodyBase64: '',
+    });
+    const opaque = await gatewayFetch('/https-passthrough', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    expect(opaque.status).toBe(404);
+    expect(await opaque.text()).toBe('not found');
+
+    const denied = await gatewayFetch('/https-passthrough', {
+      method: 'POST',
+      headers: { ...grantHeader(), 'Content-Type': 'application/json' },
+      body,
+    });
+    expect(denied.status).toBe(403);
+        expect(await denied.json()).toMatchObject({
+            error: 'HOST_NOT_ALLOWED',
+        });
   });
 
   test('rejects non-POST external-fetch methods and caller-selected envelope fields', async () => {
@@ -1394,7 +1834,9 @@ describe('egress gateway routes', () => {
     const response = await gatewayFetch('/external-fetch', {
       method: 'POST',
       headers: { ...grantHeader(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: `https://${'a'.repeat(16_384)}.example/file.pdf` }),
+            body: JSON.stringify({
+                url: `https://${'a'.repeat(16_384)}.example/file.pdf`,
+            }),
     });
     expect(response.status).toBe(413);
     expect(upstreamCalls).toHaveLength(0);
@@ -1402,8 +1844,14 @@ describe('egress gateway routes', () => {
 
   test.each([
     ['https://unlisted.example/file.pdf', 'HOST_NOT_ALLOWED'],
-    ['http://temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com/file.pdf', 'URL_REJECTED'],
-    ['https://temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com:444/file.pdf', 'URL_REJECTED'],
+        [
+            'http://temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com/file.pdf',
+            'URL_REJECTED',
+        ],
+        [
+            'https://temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com:444/file.pdf',
+            'URL_REJECTED',
+        ],
   ])('fails closed before DNS for denied URL %s', async (url, code) => {
     const response = await gatewayFetch('/external-fetch', {
       method: 'POST',
@@ -1414,4 +1862,65 @@ describe('egress gateway routes', () => {
     expect(await response.json()).toMatchObject({ error: code });
     expect(upstreamCalls).toHaveLength(0);
   });
+
+    test('keeps package transport opaque and fails closed before DNS without a signed policy', async () => {
+        const envelope = JSON.stringify({
+            url: 'https://registry.npmjs.org/fixture',
+            method: 'GET',
+            headers: { accept: 'application/json' },
+        });
+        const opaque = await gatewayFetch('/package-transport', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: envelope,
+        });
+        expect(opaque.status).toBe(404);
+
+        const missingPolicy = await gatewayFetch('/package-transport', {
+            method: 'POST',
+            headers: {
+                ...grantHeader(
+                    claims({
+                        network_policy: undefined,
+                        network_policy_digest: undefined,
+                    }),
+                ),
+                'Content-Type': 'application/json',
+            },
+            body: envelope,
+        });
+        expect(missingPolicy.status).toBe(403);
+    });
+
+    test('rejects package transport bodies, arbitrary methods, and non-POST gateway calls', async () => {
+        for (const body of [
+            {
+                url: 'https://registry.npmjs.org/fixture',
+                method: 'POST',
+                headers: {},
+            },
+            {
+                url: 'https://registry.npmjs.org/fixture',
+                method: 'GET',
+                headers: {},
+                bodyBase64: 'c2VjcmV0',
+            },
+        ]) {
+            const response = await gatewayFetch('/package-transport', {
+                method: 'POST',
+                headers: {
+                    ...grantHeader(),
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(body),
+            });
+            expect(response.status).toBe(400);
+        }
+
+        const nonPost = await gatewayFetch('/package-transport', {
+            method: 'PUT',
+            headers: grantHeader(),
+        });
+        expect(nonPost.status).toBe(404);
+    });
 });

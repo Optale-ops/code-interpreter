@@ -43,10 +43,10 @@ describe('pinned external GET request', () => {
       `https://${HOST}/signed.pdf?token=secret`,
       POLICY,
     );
-    const options = buildPinnedRequestOptions(validated, {
+    const options = buildPinnedRequestOptions(validated, [{
       address: '93.184.216.34',
       family: 4,
-    });
+    }]);
 
     expect(options.method).toBe('GET');
     expect(options.hostname).toBe(HOST);
@@ -95,10 +95,10 @@ describe('pinned external GET request', () => {
       `https://${HOST}/file.pdf`,
       POLICY,
     );
-    const options = buildPinnedRequestOptions(validated, {
+    const options = buildPinnedRequestOptions(validated, [{
       address: '93.184.216.34',
       family: 4,
-    });
+    }]);
     expect(Object.keys(options)).not.toContainAnyValues([
       'body',
       'proxy',
@@ -109,6 +109,36 @@ describe('pinned external GET request', () => {
         .map(key => key.toLowerCase())
         .sort(),
     ).toEqual(['accept', 'accept-encoding', 'user-agent']);
+  });
+});
+
+describe('external address family selection', () => {
+  test('pins every validated address with IPv4 before IPv6', async () => {
+    const validated = validateExternalFetchUrl(
+      `https://${HOST}/file.pdf`,
+      POLICY,
+    );
+    const options = buildPinnedRequestOptions(validated, [
+      { address: '2606:4700:3032::ac43:80c6', family: 6 },
+      { address: '93.184.216.34', family: 4 },
+      { address: '2606:4700:3033::6815:149b', family: 6 },
+      { address: '93.184.216.35', family: 4 },
+    ]);
+    const selectedAddresses = Promise.withResolvers<LookupAddress[]>();
+    options.lookup?.(HOST, { all: true }, (error, addresses) => {
+      if (error) return selectedAddresses.reject(error);
+      if (!Array.isArray(addresses)) {
+        return selectedAddresses.reject(new Error('lookup returned one address'));
+      }
+      selectedAddresses.resolve(addresses);
+    });
+
+    await expect(selectedAddresses.promise).resolves.toEqual([
+      { address: '93.184.216.34', family: 4 },
+      { address: '93.184.216.35', family: 4 },
+      { address: '2606:4700:3032::ac43:80c6', family: 6 },
+      { address: '2606:4700:3033::6815:149b', family: 6 },
+    ]);
   });
 });
 

@@ -320,6 +320,66 @@ describeIfRuntime('tool-call-socket-proxy under Node runtime (production parity)
     }
   });
 
+  test('forwards HTTPS passthrough outcome trailers under the production Node runtime', async () => {
+    let rawRequest = '';
+    const upstream = net.createServer(socket => {
+      socket.on('data', chunk => {
+        rawRequest += chunk.toString('utf8');
+        if (!rawRequest.includes('\r\n\r\n')) return;
+        socket.end([
+          'HTTP/1.1 201 Created',
+          'Content-Type: application/json',
+          'Transfer-Encoding: chunked',
+          'Trailer: X-CodeAPI-Egress-Outcome',
+          'X-Upstream-Marker: preserved',
+          '',
+          '11',
+          '{"accepted":true}',
+          '0',
+          'X-CodeAPI-Egress-Outcome: OK',
+          '',
+          '',
+        ].join('\r\n'));
+      });
+    });
+    await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve));
+    const address = upstream.address();
+    if (!address || typeof address === 'string') throw new Error('upstream listen failed');
+    const proxy = await spawnProxy({ upstreamUrl: `http://127.0.0.1:${address.port}` });
+    try {
+      const body = JSON.stringify({
+        url: 'https://console-staging.optale.com/api/optale/mcp',
+        method: 'POST',
+        headers: { authorization: 'Bearer inside-envelope' },
+        bodyBase64: '',
+      });
+      const client = await rawConnect(proxy.socketPath);
+      const responseChunks: Buffer[] = [];
+      const responseClosed = Promise.withResolvers<void>();
+      client.on('data', chunk => responseChunks.push(Buffer.from(chunk)));
+      client.once('close', responseClosed.resolve);
+      client.write([
+        'POST /https-passthrough HTTP/1.1',
+        'Host: local',
+        'Content-Type: application/json',
+        `Content-Length: ${Buffer.byteLength(body)}`,
+        'X-CodeAPI-Egress-Grant: opaque-grant',
+        'Connection: close',
+        '',
+        body,
+      ].join('\r\n'));
+      await responseClosed.promise;
+      const rawResponse = Buffer.concat(responseChunks).toString('utf8');
+      expect(rawResponse).toContain('HTTP/1.1 201 Created');
+      expect(rawResponse).toContain('X-CodeAPI-Egress-Outcome: OK');
+      expect(rawResponse.toLowerCase()).toContain('x-upstream-marker: preserved');
+      expect(rawRequest).toContain('POST /https-passthrough HTTP/1.1');
+    } finally {
+      await proxy.stop();
+      await new Promise<void>(resolve => upstream.close(() => resolve()));
+    }
+  });
+
   test('SILENT-CONNECTION DoS: idle accept-then-do-nothing connections close before they pin FDs', async () => {
     /* This is the audit's actual attack:
      *   for i in range(N): socket.connect('/tmp/tcs.sock')

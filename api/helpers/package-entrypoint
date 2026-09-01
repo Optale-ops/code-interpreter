@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+ready=/run/codeapi/package-proxy-ready
+attempt=0
+while [ "$(cat "$ready" 2>/dev/null || true)" != ready ]; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 500 ]; then
+    echo "package proxy failed to become ready" >&2
+    exit 70
+  fi
+  sleep 0.01
+done
+exec "$@"

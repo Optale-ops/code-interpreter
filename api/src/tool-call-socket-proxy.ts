@@ -50,6 +50,9 @@ const DEFAULT_IDLE_SOCKET_TIMEOUT_MS = 2_000;
 const DEFAULT_REQUEST_BODY_TIMEOUT_MS = 5_000;
 const DEFAULT_ACTIVE_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BODY_BYTES = 1_048_576;
+const HTTPS_PASSTHROUGH_MAX_ENVELOPE_BYTES = 1_500_000;
+const HTTPS_PASSTHROUGH_MAX_BODY_BYTES = 1_048_576;
+const PACKAGE_TRANSPORT_MAX_ENVELOPE_BYTES = 65_536;
 const DEFAULT_LISTEN_BACKLOG = 16;
 const MAX_DEFAULT_CONNECTIONS = 256;
 const MAX_DEFAULT_ACTIVE_REQUESTS = 64;
@@ -108,7 +111,9 @@ function normalizeTarget(rawTarget: string): URL {
   if (!rawTarget) {
     throw new Error('SANDBOX_FORWARD_TARGET is required');
   }
-  return new URL(rawTarget.includes('://') ? rawTarget : `http://${rawTarget}`);
+    return new URL(
+        rawTarget.includes('://') ? rawTarget : `http://${rawTarget}`,
+    );
 }
 
 function destroySocket(socket: net.Socket): void {
@@ -163,7 +168,7 @@ const EXTERNAL_FETCH_RESPONSE_HEADERS: Record<string, true> = {
   'x-request-id': true,
   'x-codeapi-egress-host': true,
   'x-codeapi-egress-redirects': true,
-  'trailer': true,
+    trailer: true,
 };
 
 const EXTERNAL_FETCH_OUTCOMES: Record<string, true> = {
@@ -186,7 +191,8 @@ function buildExternalFetchHeaders(
   const out: http.OutgoingHttpHeaders = {};
   for (const [key, value] of Object.entries(reqHeaders)) {
     const lowerKey = key.toLowerCase();
-    if (EXTERNAL_FETCH_REQUEST_HEADERS[lowerKey] !== true || value == null) continue;
+        if (EXTERNAL_FETCH_REQUEST_HEADERS[lowerKey] !== true || value == null)
+            continue;
     out[lowerKey] = value;
   }
   out.host = upstreamHost;
@@ -231,22 +237,35 @@ function parsePositiveInt(raw: string | undefined): number | undefined {
 }
 
 function defaultMaxConnections(): number {
-  const maxConcurrentJobs = parsePositiveInt(process.env.SANDBOX_MAX_CONCURRENT_JOBS);
+    const maxConcurrentJobs = parsePositiveInt(
+        process.env.SANDBOX_MAX_CONCURRENT_JOBS,
+    );
   if (maxConcurrentJobs == null) return DEFAULT_MAX_CONNECTIONS;
-  return Math.min(Math.max(maxConcurrentJobs * 4, DEFAULT_MAX_CONNECTIONS), MAX_DEFAULT_CONNECTIONS);
+    return Math.min(
+        Math.max(maxConcurrentJobs * 4, DEFAULT_MAX_CONNECTIONS),
+        MAX_DEFAULT_CONNECTIONS,
+    );
 }
 
 function defaultMaxActiveRequests(): number {
-  const maxConcurrentJobs = parsePositiveInt(process.env.SANDBOX_MAX_CONCURRENT_JOBS);
+    const maxConcurrentJobs = parsePositiveInt(
+        process.env.SANDBOX_MAX_CONCURRENT_JOBS,
+    );
   if (maxConcurrentJobs == null) return DEFAULT_MAX_ACTIVE_REQUESTS;
-  return Math.min(Math.max(maxConcurrentJobs, DEFAULT_MAX_ACTIVE_REQUESTS), MAX_DEFAULT_ACTIVE_REQUESTS);
+    return Math.min(
+        Math.max(maxConcurrentJobs, DEFAULT_MAX_ACTIVE_REQUESTS),
+        MAX_DEFAULT_ACTIVE_REQUESTS,
+    );
 }
 
 function defaultActiveRequestTimeoutMs(): number {
   const runTimeoutMs = parsePositiveInt(process.env.SANDBOX_RUN_TIMEOUT);
   if (runTimeoutMs == null) return DEFAULT_ACTIVE_REQUEST_TIMEOUT_MS;
   return Math.min(
-    Math.max(runTimeoutMs + ACTIVE_REQUEST_TIMEOUT_GRACE_MS, DEFAULT_REQUEST_BODY_TIMEOUT_MS),
+        Math.max(
+            runTimeoutMs + ACTIVE_REQUEST_TIMEOUT_GRACE_MS,
+            DEFAULT_REQUEST_BODY_TIMEOUT_MS,
+        ),
     MAX_DEFAULT_ACTIVE_REQUEST_TIMEOUT_MS,
   );
 }
@@ -260,7 +279,9 @@ function defaultActiveRequestTimeoutMs(): number {
  * instead get destroyed at the rate limiter, which is the wrong shape
  * (clients see ECONNRESET instead of a structured Retry-After response). */
 export function defaultConnectionRateBurst(): number {
-  const maxConcurrentJobs = parsePositiveInt(process.env.SANDBOX_MAX_CONCURRENT_JOBS);
+    const maxConcurrentJobs = parsePositiveInt(
+        process.env.SANDBOX_MAX_CONCURRENT_JOBS,
+    );
   if (maxConcurrentJobs == null) return DEFAULT_CONNECTION_RATE_BURST;
   return Math.min(
     Math.max(maxConcurrentJobs * 4, DEFAULT_CONNECTION_RATE_BURST),
@@ -269,8 +290,11 @@ export function defaultConnectionRateBurst(): number {
 }
 
 export function defaultConnectionRateRefillPerSec(): number {
-  const maxConcurrentJobs = parsePositiveInt(process.env.SANDBOX_MAX_CONCURRENT_JOBS);
-  if (maxConcurrentJobs == null) return DEFAULT_CONNECTION_RATE_REFILL_PER_SEC;
+    const maxConcurrentJobs = parsePositiveInt(
+        process.env.SANDBOX_MAX_CONCURRENT_JOBS,
+    );
+    if (maxConcurrentJobs == null)
+        return DEFAULT_CONNECTION_RATE_REFILL_PER_SEC;
   /* 2x maxConcurrentJobs gives headroom over the steady-state rate
    * (~1 connection per active job per second for typical tool-call
    * workloads). Floor at 20/sec so small deployments don't get a
@@ -289,15 +313,21 @@ export async function startToolCallSocketProxy(
   const target = normalizeTarget(opts.rawTarget);
   const transport = target.protocol === 'https:' ? https : http;
   const maxConnections = opts.maxConnections ?? defaultMaxConnections();
-  const maxActiveRequests = opts.maxActiveRequests ?? defaultMaxActiveRequests();
-  const idleSocketTimeoutMs = opts.idleSocketTimeoutMs ?? DEFAULT_IDLE_SOCKET_TIMEOUT_MS;
+    const maxActiveRequests =
+        opts.maxActiveRequests ?? defaultMaxActiveRequests();
+    const idleSocketTimeoutMs =
+        opts.idleSocketTimeoutMs ?? DEFAULT_IDLE_SOCKET_TIMEOUT_MS;
   const headerTimeoutMs = opts.headerTimeoutMs ?? idleSocketTimeoutMs;
-  const requestBodyTimeoutMs = opts.requestBodyTimeoutMs ?? DEFAULT_REQUEST_BODY_TIMEOUT_MS;
-  const activeRequestTimeoutMs = opts.activeRequestTimeoutMs ?? defaultActiveRequestTimeoutMs();
+    const requestBodyTimeoutMs =
+        opts.requestBodyTimeoutMs ?? DEFAULT_REQUEST_BODY_TIMEOUT_MS;
+    const activeRequestTimeoutMs =
+        opts.activeRequestTimeoutMs ?? defaultActiveRequestTimeoutMs();
   const maxBodyBytes = opts.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const listenBacklog = opts.listenBacklog ?? DEFAULT_LISTEN_BACKLOG;
-  const connectionRateBurst = opts.connectionRateBurst ?? defaultConnectionRateBurst();
-  const connectionRateRefillPerSec = opts.connectionRateRefillPerSec ?? defaultConnectionRateRefillPerSec();
+    const connectionRateBurst =
+        opts.connectionRateBurst ?? defaultConnectionRateBurst();
+    const connectionRateRefillPerSec =
+        opts.connectionRateRefillPerSec ?? defaultConnectionRateRefillPerSec();
   // The socket is intentionally connectable by sandbox jobs even when
   // SANDBOX_PER_JOB_UIDS maps each job to a distinct outside UID. Abuse is
   // bounded by the proxy's connection caps/timeouts, not by inode ownership.
@@ -308,7 +338,10 @@ export async function startToolCallSocketProxy(
    * headersTimeout and socket idle timers are not a short per-socket deadline
    * for AF_UNIX header drip attacks, so track the accepted socket ourselves
    * until node:http has parsed enough bytes to dispatch a request. */
-  const headerReceiveDeadlines = new WeakMap<net.Socket, ReturnType<typeof setTimeout>>();
+    const headerReceiveDeadlines = new WeakMap<
+        net.Socket,
+        ReturnType<typeof setTimeout>
+    >();
   let activeRequests = 0;
   let activeUpstreams = 0;
 
@@ -344,52 +377,88 @@ export async function startToolCallSocketProxy(
     res.on('finish', () => socket.end());
 
     const isToolCall = req.method === 'POST' && req.url === '/tool-call';
-    const isExternalFetch = req.method === 'POST' && req.url === '/external-fetch';
-    if (!isToolCall && !isExternalFetch) {
+        const isExternalFetch =
+            req.method === 'POST' && req.url === '/external-fetch';
+        const isHttpsPassthrough =
+            req.method === 'POST' && req.url === '/https-passthrough';
+        const isPackageTransport =
+            req.method === 'POST' && req.url === '/package-transport';
+        const isControlledFetch =
+            isExternalFetch || isHttpsPassthrough || isPackageTransport;
+    if (!isToolCall && !isControlledFetch) {
       req.resume();
-      res.writeHead(404, { 'Content-Type': 'text/plain', Connection: 'close' });
+            res.writeHead(404, {
+                'Content-Type': 'text/plain',
+                Connection: 'close',
+            });
       res.end('not found');
       return;
     }
 
     const hasRequiredHeaders = isToolCall
-      ? hasPtcHeaderValue(req.headers['x-execution-id'])
-        && hasPtcHeaderValue(req.headers['x-tool-call-id'])
-        && hasPtcHeaderValue(req.headers['x-callback-token'])
+            ? hasPtcHeaderValue(req.headers['x-execution-id']) &&
+              hasPtcHeaderValue(req.headers['x-tool-call-id']) &&
+              hasPtcHeaderValue(req.headers['x-callback-token'])
       : hasPtcHeaderValue(req.headers['x-codeapi-egress-grant']);
     if (!hasRequiredHeaders) {
       req.resume();
-      res.writeHead(404, { 'Content-Type': 'text/plain', Connection: 'close' });
+            res.writeHead(404, {
+                'Content-Type': 'text/plain',
+                Connection: 'close',
+            });
       res.end('not found');
       return;
     }
 
-    if (isSmugglingShaped(req.headers) || (isExternalFetch && req.headers['transfer-encoding'] !== undefined)) {
+        if (
+            isSmugglingShaped(req.headers) ||
+            (isControlledFetch &&
+                req.headers['transfer-encoding'] !== undefined)
+        ) {
       req.resume();
-      res.writeHead(400, { 'Content-Type': 'text/plain', Connection: 'close' });
+            res.writeHead(400, {
+                'Content-Type': 'text/plain',
+                Connection: 'close',
+            });
       res.end('ambiguous Content-Length and Transfer-Encoding');
       return;
     }
 
-    const requestBodyLimit = isExternalFetch ? 16_384 : maxBodyBytes;
+    const requestBodyLimit = isExternalFetch
+      ? 16_384
+      : isHttpsPassthrough
+        ? HTTPS_PASSTHROUGH_MAX_ENVELOPE_BYTES
+              : isPackageTransport
+                ? PACKAGE_TRANSPORT_MAX_ENVELOPE_BYTES
+        : maxBodyBytes;
     const declaredHeaderValue = req.headers['content-length'];
     /* Content-Length is contractually required on /external-fetch (W730 §5.2 —
      * no transfer-encoding/content-length ambiguity), so an absent header is a
      * 411 there. /tool-call has always accepted a chunked body with no
      * Content-Length, so absence stays legal and the equality check below is
      * skipped rather than comparing a real body against an implied 0. */
-    const declaredCL = declaredHeaderValue === undefined && !isExternalFetch
+        const declaredCL =
+            declaredHeaderValue === undefined && !isControlledFetch
       ? undefined
       : Number(declaredHeaderValue);
-    if (declaredCL !== undefined && (!Number.isSafeInteger(declaredCL) || declaredCL < 0)) {
+        if (
+            declaredCL !== undefined &&
+            (!Number.isSafeInteger(declaredCL) || declaredCL < 0)
+        ) {
       req.resume();
-      res.writeHead(411, { 'Content-Type': 'text/plain', Connection: 'close' });
+            res.writeHead(411, {
+                'Content-Type': 'text/plain',
+                Connection: 'close',
+            });
       res.end('Content-Length is required');
       return;
     }
     if (declaredCL !== undefined && declaredCL > requestBodyLimit) {
       req.resume();
-      res.writeHead(413, { 'Content-Type': 'text/plain', Connection: 'close' });
+            res.writeHead(413, {
+                'Content-Type': 'text/plain',
+                Connection: 'close',
+            });
       res.end('request body too large');
       return;
     }
@@ -401,12 +470,14 @@ export async function startToolCallSocketProxy(
         Connection: 'close',
         'Retry-After': '1',
       });
-      res.end(JSON.stringify({
+            res.end(
+                JSON.stringify({
         success: false,
-        error: isExternalFetch
-          ? 'Too many concurrent external-fetch requests'
+        error: isControlledFetch
+          ? 'Too many concurrent controlled-egress requests'
           : 'Too many concurrent tool-call requests',
-      }));
+                }),
+            );
       return;
     }
 
@@ -427,18 +498,29 @@ export async function startToolCallSocketProxy(
       if (req.complete || rejected) return;
       destroySocket(socket);
     }, requestBodyTimeoutMs);
-    const clearBodyUploadDeadline = (): void => clearTimeout(bodyUploadDeadline);
+        const clearBodyUploadDeadline = (): void =>
+            clearTimeout(bodyUploadDeadline);
     req.on('end', clearBodyUploadDeadline);
     req.on('aborted', clearBodyUploadDeadline);
     res.on('finish', clearBodyUploadDeadline);
     res.on('close', clearBodyUploadDeadline);
-    req.on('end', () => socket.setTimeout(activeRequestTimeoutMs, () => destroySocket(socket)));
+        req.on('end', () =>
+            socket.setTimeout(activeRequestTimeoutMs, () =>
+                destroySocket(socket),
+            ),
+        );
 
     const bodyChunks: Buffer[] = [];
     let upstream: http.ClientRequest | undefined;
     const abortUpstream = (): void => {
       if (!upstream || upstreamClosed || res.writableEnded) return;
-      upstream.destroy(new Error(`${isExternalFetch ? 'external-fetch' : 'tool-call'} client disconnected`));
+            upstream.destroy(
+                new Error(
+                    `${
+                        isControlledFetch ? 'controlled-egress' : 'tool-call'
+                    } client disconnected`,
+                ),
+            );
     };
     req.on('aborted', abortUpstream);
     res.on('close', abortUpstream);
@@ -449,7 +531,10 @@ export async function startToolCallSocketProxy(
       bodyBytes += chunk.length;
       if (bodyBytes > requestBodyLimit) {
         rejected = true;
-        res.writeHead(413, { 'Content-Type': 'text/plain', Connection: 'close' });
+                res.writeHead(413, {
+                    'Content-Type': 'text/plain',
+                    Connection: 'close',
+                });
         res.end('request body too large');
         destroySocket(socket);
         return;
@@ -459,16 +544,36 @@ export async function startToolCallSocketProxy(
 
     req.on('end', () => {
       if (rejected) return;
-      const body = bodyChunks.length === 1 ? bodyChunks[0] : Buffer.concat(bodyChunks);
+            const body =
+                bodyChunks.length === 1
+                    ? bodyChunks[0]
+                    : Buffer.concat(bodyChunks);
       if (declaredCL !== undefined && body.length !== declaredCL) {
-        res.writeHead(400, { 'Content-Type': 'text/plain', Connection: 'close' });
+                res.writeHead(400, {
+                    'Content-Type': 'text/plain',
+                    Connection: 'close',
+                });
         res.end('request body length mismatch');
         return;
       }
-      if (isExternalFetch) {
-        if ((req.headers['content-type'] ?? '').toString().split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
-          res.writeHead(400, { 'Content-Type': 'application/json', Connection: 'close' });
-          res.end(JSON.stringify({ error: 'URL_REJECTED', message: 'External fetch URL is invalid' }));
+      if (isControlledFetch) {
+                if (
+                    (req.headers['content-type'] ?? '')
+                        .toString()
+                        .split(';', 1)[0]
+                        ?.trim()
+                        .toLowerCase() !== 'application/json'
+                ) {
+                    res.writeHead(400, {
+                        'Content-Type': 'application/json',
+                        Connection: 'close',
+                    });
+                    res.end(
+                        JSON.stringify({
+                            error: 'URL_REJECTED',
+                            message: 'External fetch URL is invalid',
+                        }),
+                    );
           return;
         }
         let envelope: unknown;
@@ -477,63 +582,210 @@ export async function startToolCallSocketProxy(
         } catch {
           envelope = undefined;
         }
-        if (
-          !envelope
-          || typeof envelope !== 'object'
-          || Array.isArray(envelope)
-          || Object.keys(envelope).length !== 1
-          || !('url' in envelope)
-          || typeof envelope.url !== 'string'
-        ) {
-          res.writeHead(400, { 'Content-Type': 'application/json', Connection: 'close' });
-          res.end(JSON.stringify({ error: 'URL_REJECTED', message: 'External fetch URL is invalid' }));
+                const isObjectEnvelope =
+                    envelope !== null &&
+                    typeof envelope === 'object' &&
+                    !Array.isArray(envelope);
+        const objectEnvelope = isObjectEnvelope
+                    ? (envelope as Record<string, unknown>)
+          : {};
+                const validExternalFetch =
+                    isExternalFetch &&
+                    isObjectEnvelope &&
+                    Object.keys(objectEnvelope).length === 1 &&
+                    typeof objectEnvelope.url === 'string';
+        const passthroughEnvelope = objectEnvelope as {
+          url?: unknown;
+          method?: unknown;
+          headers?: unknown;
+          bodyBase64?: unknown;
+        };
+                const encodedBody =
+                    typeof passthroughEnvelope.bodyBase64 === 'string'
+          ? passthroughEnvelope.bodyBase64
+          : '';
+                const validPackageTransport =
+                    isPackageTransport &&
+                    isObjectEnvelope &&
+                    Object.keys(objectEnvelope).sort().join(',') ===
+                        'headers,method,url' &&
+                    typeof objectEnvelope.url === 'string' &&
+                    (objectEnvelope.method === 'GET' ||
+                        objectEnvelope.method === 'HEAD') &&
+                    objectEnvelope.headers !== null &&
+                    typeof objectEnvelope.headers === 'object' &&
+                    !Array.isArray(objectEnvelope.headers) &&
+                    Object.keys(
+                        objectEnvelope.headers as Record<string, unknown>,
+                    ).length <= 64 &&
+                    Object.values(
+                        objectEnvelope.headers as Record<string, unknown>,
+                    ).every(value => typeof value === 'string');
+                const validPassthrough =
+                    isHttpsPassthrough &&
+                    isObjectEnvelope &&
+                    Object.keys(objectEnvelope).sort().join(',') ===
+                        'bodyBase64,headers,method,url' &&
+                    typeof passthroughEnvelope.url === 'string' &&
+                    typeof passthroughEnvelope.method === 'string' &&
+                    passthroughEnvelope.headers !== null &&
+                    typeof passthroughEnvelope.headers === 'object' &&
+                    !Array.isArray(passthroughEnvelope.headers) &&
+                    typeof passthroughEnvelope.bodyBase64 === 'string' &&
+                    encodedBody.length <=
+                        Math.ceil(HTTPS_PASSTHROUGH_MAX_BODY_BYTES / 3) * 4 &&
+                    /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+                        encodedBody,
+                    ) &&
+                    Buffer.from(encodedBody, 'base64').length <=
+                        HTTPS_PASSTHROUGH_MAX_BODY_BYTES;
+                if (
+                    !validExternalFetch &&
+                    !validPassthrough &&
+                    !validPackageTransport
+                ) {
+                    res.writeHead(400, {
+                        'Content-Type': 'application/json',
+                        Connection: 'close',
+                    });
+                    res.end(
+                        JSON.stringify({
+                            error: 'URL_REJECTED',
+                            message: 'External fetch URL is invalid',
+                        }),
+                    );
           return;
         }
       }
 
-      const headers = isExternalFetch
+      const headers = isControlledFetch
         ? buildExternalFetchHeaders(req.headers, target.host)
         : buildForwardedHeaders(req.headers, target.host);
       headers['content-length'] = body.length;
-      upstream = transport.request({
+            upstream = transport.request(
+                {
         protocol: target.protocol,
         hostname: target.hostname,
         port: target.port || undefined,
         method: 'POST',
-        path: isExternalFetch ? '/external-fetch' : '/tool-call',
+        path: isExternalFetch
+          ? '/external-fetch'
+          : isHttpsPassthrough
+            ? '/https-passthrough'
+                          : isPackageTransport
+                            ? '/package-transport'
+            : '/tool-call',
         headers,
-      }, upstreamRes => {
+                },
+                upstreamRes => {
         if (rejected) {
           upstreamRes.resume();
           return;
         }
         const responseHeaders: http.OutgoingHttpHeaders = {};
-        for (const [key, value] of Object.entries(upstreamRes.headers)) {
+                    for (const [key, value] of Object.entries(
+                        upstreamRes.headers,
+                    )) {
           const lowerKey = key.toLowerCase();
           if (value == null) continue;
           if (isExternalFetch) {
-            if (EXTERNAL_FETCH_RESPONSE_HEADERS[lowerKey] !== true) continue;
-            if (lowerKey === 'trailer' && value.toString().toLowerCase() !== 'x-codeapi-egress-outcome') continue;
+            if (
+                                EXTERNAL_FETCH_RESPONSE_HEADERS[lowerKey] !==
+                                true
+                            )
+                                continue;
+                            if (
+                                lowerKey === 'trailer' &&
+                                value.toString().toLowerCase() !==
+                                    'x-codeapi-egress-outcome'
+                            )
+                                continue;
+                        } else if (isHttpsPassthrough || isPackageTransport) {
+                            if (lowerKey === 'trailer') {
+                                const names = value
+                                    .toString()
+                                    .toLowerCase()
+                                    .split(',')
+                                    .map(name => name.trim())
+                                    .sort();
+                                const allowed = isPackageTransport
+                                    ? [
+                                          'x-codeapi-egress-bytes',
+                                          'x-codeapi-egress-outcome',
+                                          'x-codeapi-egress-requests',
+                                      ]
+                                    : ['x-codeapi-egress-outcome'];
+                                if (
+                                    names.length === allowed.length &&
+                                    names.every(
+                                        (name, index) =>
+                                            name === allowed[index],
+                                    )
+            ) {
+              responseHeaders[lowerKey] = Array.isArray(value) ? value.join(', ') : value;
+                                }
+              continue;
+            }
+            if (HOP_BY_HOP_HEADERS.has(lowerKey)) continue;
           } else if (HOP_BY_HOP_HEADERS.has(lowerKey)) {
             continue;
           }
           responseHeaders[lowerKey] = value;
         }
+                    if (
+                        isControlledFetch &&
+                        responseHeaders.trailer !== undefined
+                    ) {
+          delete responseHeaders['content-length'];
+          responseHeaders['transfer-encoding'] = 'chunked';
+        }
         responseHeaders.Connection = 'close';
-        res.writeHead(upstreamRes.statusCode || 502, responseHeaders);
-        if (!isExternalFetch) {
+                    res.writeHead(
+                        upstreamRes.statusCode || 502,
+                        responseHeaders,
+                    );
+        if (!isControlledFetch) {
           upstreamRes.pipe(res);
           return;
         }
         upstreamRes.on('data', chunk => res.write(chunk));
         upstreamRes.on('end', () => {
-          const outcome = upstreamRes.trailers['x-codeapi-egress-outcome'];
-          if (typeof outcome === 'string' && EXTERNAL_FETCH_OUTCOMES[outcome] === true) {
-            res.addTrailers({ 'X-CodeAPI-Egress-Outcome': outcome });
+                        const outcome =
+                            upstreamRes.trailers['x-codeapi-egress-outcome'];
+                        const trailers: Record<string, string> = {};
+                        if (
+                            typeof outcome === 'string' &&
+                            EXTERNAL_FETCH_OUTCOMES[outcome] === true
+                        ) {
+                            trailers['X-CodeAPI-Egress-Outcome'] = outcome;
+                        }
+                        if (isPackageTransport) {
+                            const requests =
+                                upstreamRes.trailers[
+                                    'x-codeapi-egress-requests'
+                                ];
+                            const bytes =
+                                upstreamRes.trailers['x-codeapi-egress-bytes'];
+                            if (
+                                typeof requests === 'string' &&
+                                /^\d+$/.test(requests)
+                            ) {
+                                trailers['X-CodeAPI-Egress-Requests'] =
+                                    requests;
           }
+                            if (
+                                typeof bytes === 'string' &&
+                                /^\d+$/.test(bytes)
+                            ) {
+                                trailers['X-CodeAPI-Egress-Bytes'] = bytes;
+                            }
+                        }
+                        if (Object.keys(trailers).length > 0)
+                            res.addTrailers(trailers);
           res.end();
         });
-      });
+                },
+            );
       activeUpstreams += 1;
       upstream.on('close', () => {
         upstreamClosed = true;
@@ -541,13 +793,29 @@ export async function startToolCallSocketProxy(
         releaseActiveRequest();
       });
       upstream.setTimeout(activeRequestTimeoutMs, () => {
-        upstream?.destroy(new Error(`${isExternalFetch ? 'external-fetch' : 'tool-call'} upstream timeout`));
+                upstream?.destroy(
+                    new Error(
+                        `${
+                            isControlledFetch
+                                ? 'controlled-egress'
+                                : 'tool-call'
+                        } upstream timeout`,
+                    ),
+                );
       });
       upstream.on('error', error => {
         if (rejected) return;
-        log.error(`${isExternalFetch ? 'external-fetch' : 'tool-call'} socket proxy upstream error`, error);
+                log.error(
+                    `${
+                        isControlledFetch ? 'controlled-egress' : 'tool-call'
+                    } socket proxy upstream error`,
+                    error,
+                );
         if (!res.headersSent) {
-          res.writeHead(502, { 'Content-Type': 'text/plain', Connection: 'close' });
+                    res.writeHead(502, {
+                        'Content-Type': 'text/plain',
+                        Connection: 'close',
+                    });
         }
         res.end('bad gateway');
       });
@@ -582,7 +850,9 @@ export async function startToolCallSocketProxy(
       return;
     }
     if (activeSockets.size >= maxConnections) {
-      log.warn('tool-call socket proxy connection limit reached; dropping connection');
+            log.warn(
+                'tool-call socket proxy connection limit reached; dropping connection',
+            );
       destroySocket(socket);
       return;
     }
@@ -640,7 +910,7 @@ export async function startToolCallSocketProxy(
       for (const socket of activeSockets) {
         destroySocket(socket);
       }
-      await new Promise<void>((resolve) => {
+            await new Promise<void>(resolve => {
         server.close(() => {
           try {
             fs.unlinkSync(socketPath);
@@ -662,8 +932,12 @@ export async function startToolCallSocketProxy(
 if (require.main === module) {
   const socketPath = process.env.TCS_SOCKET || '/tmp/tcs.sock';
   const rawTarget = process.env.SANDBOX_FORWARD_TARGET || '';
-  const socketUid = process.env.TCS_SOCKET_UID ? Number(process.env.TCS_SOCKET_UID) : undefined;
-  const socketGid = process.env.TCS_SOCKET_GID ? Number(process.env.TCS_SOCKET_GID) : undefined;
+    const socketUid = process.env.TCS_SOCKET_UID
+        ? Number(process.env.TCS_SOCKET_UID)
+        : undefined;
+    const socketGid = process.env.TCS_SOCKET_GID
+        ? Number(process.env.TCS_SOCKET_GID)
+        : undefined;
   const maxConnections = parsePositiveInt(process.env.TCS_MAX_CONNECTIONS);
   const headerTimeoutMs = parsePositiveInt(process.env.TCS_HEADER_TIMEOUT_MS);
   /* Operator overrides for the connection-rate limiter — see
@@ -672,7 +946,9 @@ if (require.main === module) {
    * pattern (one connection per call) plus generous headroom; raise only
    * if a legitimate workload trips the dropped-connection counter. */
   const rateBurst = parsePositiveInt(process.env.TCS_CONNECTION_RATE_BURST);
-  const rateRefillPerSec = parsePositiveInt(process.env.TCS_CONNECTION_RATE_REFILL_PER_SEC);
+    const rateRefillPerSec = parsePositiveInt(
+        process.env.TCS_CONNECTION_RATE_REFILL_PER_SEC,
+    );
   let handle: ToolCallSocketProxyHandle | undefined;
   let shuttingDown = false;
 
@@ -694,7 +970,10 @@ if (require.main === module) {
   process.on('SIGINT', shutdown);
 
   startToolCallSocketProxy({
-    socketPath, rawTarget, socketUid, socketGid,
+        socketPath,
+        rawTarget,
+        socketUid,
+        socketGid,
     maxConnections,
     headerTimeoutMs,
     connectionRateBurst: rateBurst,

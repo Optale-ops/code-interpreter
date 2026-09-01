@@ -1,0 +1,18 @@
+{
+    "wheel": {
+        "file": "optale_fixture_py-1.0.0-py3-none-any.whl",
+        "sha256": "3acc850ea76ee5fd70b7c0faee242b660bfbc895f116e1663caf479b893dfc20",
+        "bytes": 1313
+    },
+    "npm": {
+        "file": "optale-fixture-npm-1.0.0.tgz",
+        "sha1": "1bf6db357896205bddd87db103ddb29928acf340",
+        "integrity": "sha512-oyJcX598yE3Ie2Zv78X7RIhfris/Aoja9C80VOvqpIXNdGpy0EcdrdevCkZJ5lFQhA48kxOBnIpgcWeavi4lbw==",
+        "bytes": 379
+    },
+    "source": {
+        "file": "optale-fixture-source-1.0.0.tar.gz",
+        "sha256": "a1b17cf706de0937c079f29ff2708c3dec6612c7b39bfd825f2db00307156088",
+        "bytes": 921
+    }
+}

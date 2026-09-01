@@ -4,6 +4,8 @@ import type { ExecutionManifestClaims } from '../execution-manifest';
 import type { ExecutionIdentity } from '../execution-identity';
 import type { CodeApiPrincipal } from '../auth/principal';
 import type { ExecutionProfile } from '../execution-profile';
+import type { ExternalFetchPolicySnapshot } from '../external-fetch-policy';
+import type { PackageSetupSummary } from '../../../shared/package-transport';
 import { Jobs } from '@/enum/service';
 
 /**
@@ -115,6 +117,7 @@ export type ExecuteResponse = {
     status: string | null;
     cpu_time: number | null;
     wall_time: number | null;
+        package_setup?: PackageSetupSummary[];
   };
   language: string;
   version: string;
@@ -127,6 +130,7 @@ export interface RequestBody {
   code: string;
   lang: string;
   args?: string[];
+  env_vars?: Record<string, string>;
   user_id?: string;
   files?: RequestFile[];
   /**
@@ -138,7 +142,11 @@ export interface RequestBody {
   runtime_session_hint?: string;
 }
 
-export type CreatePayload = { req: AuthenticatedRequest, session_id: string; isPyPlot?: boolean };
+export type CreatePayload = {
+    req: AuthenticatedRequest;
+    session_id: string;
+    isPyPlot?: boolean;
+};
 export interface FileObject {
   name: string;
   id: string;
@@ -149,10 +157,12 @@ export interface FileObject {
   size?: number;
   lastModified?: string;
   etag?: string;
-  metadata?: {
+    metadata?:
+        | {
     'content-type': string;
     'original-filename': string;
-  } | undefined;
+          }
+        | undefined;
   versionId?: string | null;
   contentType?: string;
 }
@@ -226,6 +236,7 @@ export type ExecuteResult = {
   message?: string | null;
   status?: string | null;
   wall_time?: number | null;
+    package_setup?: PackageSetupSummary[];
 };
 
 export interface LanguageConfig {
@@ -294,6 +305,8 @@ export interface CodeApiAuthContext {
   externalUserId?: string;
   principalSource?: string;
   authContextHash?: string;
+    networkPolicy?: ExternalFetchPolicySnapshot;
+    networkPolicyDigest?: string;
 }
 
 export interface AuthenticatedRequest extends Request {
