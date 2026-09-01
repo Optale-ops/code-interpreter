@@ -56,12 +56,17 @@ external_fixture="$(
         docker compose -f "$ROOT/docker-compose.external-fetch-test.yml" config --format json
 )"
 
-if ! jq -e '
-    .services.egress_gateway.environment.CODEAPI_HARDENED_SANDBOX_MODE == "true"
-    and .services.egress_gateway.environment.CODEAPI_EGRESS_LEDGER_REQUIRED == "true"
-    and .services.egress_gateway.environment.REDIS_HOST == "redis"
+if ! jq -e --arg redis_password "$TEST_REDIS_PASSWORD" '
+    . as $root
+    | .services.egress_gateway.environment.CODEAPI_HARDENED_SANDBOX_MODE == "true"
+      and .services.egress_gateway.environment.CODEAPI_EGRESS_LEDGER_REQUIRED == "true"
+      and .services.egress_gateway.environment.REDIS_HOST == "redis"
+      and all(["api", "service-worker", "egress_gateway", "tool_call_server", "file_server"][];
+        . as $service
+        | $root.services[$service].environment.REDIS_PASSWORD == $redis_password)
+      and ($root.services.redis.command | tostring | contains($redis_password))
 ' <<<"$canonical" >/dev/null; then
-    echo "docker-compose.yaml: egress_gateway lost pinned hardened mode, required ledger mode, or Redis host wiring" >&2
+    echo "docker-compose.yaml: hardened gateway or shared Redis credential wiring is incomplete" >&2
     exit 1
 fi
 
@@ -94,38 +99,37 @@ if auth_values_are_deployable "$(render_gateway "$ROOT/docker-compose.yaml" "$TE
     exit 1
 fi
 
-expected_w799="$(
-    jq --arg redis_password "$TEST_REDIS_PASSWORD" \
-        '.services.egress_gateway.environment.REDIS_PASSWORD = $redis_password' \
-        <<<"$canonical"
-)"
-if [[ "$(jq -S . <<<"$expected_w799")" != "$(jq -S . <<<"$w799")" ]]; then
-    echo "docker-compose.w799-egress.yml must match the canonical model except for the required gateway Redis password" >&2
+if [[ "$(jq -S . <<<"$canonical")" != "$(jq -S . <<<"$w799")" ]]; then
+    echo "docker-compose.w799-egress.yml must render exactly the canonical compose model" >&2
     exit 1
 fi
 
 wrapper_model="$(sed -E '/^[[:space:]]*(#|$)/d' "$ROOT/docker-compose.w799-egress.yml")"
-if [[ "$wrapper_model" != $'include:\n  - docker-compose.yaml\nservices:\n  egress_gateway:\n    environment:\n      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}' ]]; then
-    echo "docker-compose.w799-egress.yml must retain the canonical include and only override the gateway Redis password" >&2
+if [[ "$wrapper_model" != $'include:\n  - docker-compose.yaml' ]]; then
+    echo "docker-compose.w799-egress.yml must only include docker-compose.yaml" >&2
     exit 1
 fi
 
-if env -u REDIS_PASSWORD \
-    CODEAPI_EGRESS_GRANT_SECRET="$TEST_GRANT_SECRET" \
-    CODEAPI_INTERNAL_SERVICE_TOKEN="$TEST_INTERNAL_TOKEN" \
-    docker compose -f "$ROOT/docker-compose.w799-egress.yml" config >/dev/null 2>&1; then
-    echo "docker-compose.w799-egress.yml must require REDIS_PASSWORD" >&2
-    exit 1
-fi
+for compose_file in docker-compose.yaml docker-compose.w799-egress.yml; do
+    if env -u REDIS_PASSWORD \
+        CODEAPI_EGRESS_GRANT_SECRET="$TEST_GRANT_SECRET" \
+        CODEAPI_INTERNAL_SERVICE_TOKEN="$TEST_INTERNAL_TOKEN" \
+        docker compose -f "$ROOT/$compose_file" config >/dev/null 2>&1; then
+        echo "$compose_file must require REDIS_PASSWORD" >&2
+        exit 1
+    fi
+done
 
 if env -u CODEAPI_EGRESS_GRANT_SECRET \
     CODEAPI_INTERNAL_SERVICE_TOKEN="$TEST_INTERNAL_TOKEN" \
+    REDIS_PASSWORD="$TEST_REDIS_PASSWORD" \
     docker compose -f "$ROOT/docker-compose.yaml" config >/dev/null 2>&1; then
     echo "docker-compose.yaml must require CODEAPI_EGRESS_GRANT_SECRET independently" >&2
     exit 1
 fi
 if env -u CODEAPI_INTERNAL_SERVICE_TOKEN \
     CODEAPI_EGRESS_GRANT_SECRET="$TEST_GRANT_SECRET" \
+    REDIS_PASSWORD="$TEST_REDIS_PASSWORD" \
     docker compose -f "$ROOT/docker-compose.yaml" config >/dev/null 2>&1; then
     echo "docker-compose.yaml must require CODEAPI_INTERNAL_SERVICE_TOKEN independently" >&2
     exit 1

@@ -1,4 +1,4 @@
-Deviations from brief: none
+Deviations from brief: Fix round 1 moved the Compose credential requirement from a W799 service override into canonical docker-compose.yaml because Compose include rejects imported-service overrides; the guard now covers all canonical Redis clients and the Redis server.
 
 Status: DONE (built; validation intentionally unrun as instructed)
 
@@ -9,27 +9,37 @@ Base and branch
 Implementation commits
 - 062104a fix(egress): require Redis auth in hardened mode
 - b116c12 fix(compose): require W799 Redis credential
+- fix(compose): require shared Redis credential (fix round 1; this report is committed with it)
 
 Changed files
 - service/src/secure-startup.test.ts
 - service/src/secure-startup.ts
 - docker-compose.w799-egress.yml
+- docker-compose.yaml
 - tests/egress_gateway_compose.sh
 - implementation-report.txt
 
 Implemented behavior
 - Hardened egress-gateway startup now rejects missing or blank REDIS_PASSWORD with the exact required-value error and accepts a configured value.
-- The W799 Compose wrapper retains the canonical include and overrides only egress_gateway.environment.REDIS_PASSWORD with the required production interpolation.
-- The Compose contract supplies a test-only Redis value, proves W799 rendering fails when REDIS_PASSWORD is absent, and compares the W799 model with the canonical model after applying only the intended password override.
+- Canonical Compose requires one shared REDIS_PASSWORD for every Redis client and the authenticated Redis server.
+- The W799 Compose wrapper remains a pure canonical include. The Compose contract proves canonical and W799 rendering both fail without REDIS_PASSWORD and render identically with the configured test-only value.
 
 Self-review findings
 - Tests were written before production changes.
 - The runtime change reuses the existing whitespace-aware requireValue helper and remains limited to hardened mode.
 - Existing fresh-gateway tests receive a test-only Redis value so they continue to exercise their intended earlier validation failures.
-- The base-to-head changed-file review contains only the four assigned source/test files; no external-fetch file or behavior changed.
+- The base-to-head source/test review contains the original four files plus the Primary-authorized canonical docker-compose.yaml fix; no external-fetch file or behavior changed.
 - The reviewed diff contains no real credential or secret material. All test values are explicit test-only placeholders.
-- git diff --check completed without findings before the implementation commits.
+- git diff --check completed without findings for the initial implementation and fix round 1 before their commits.
 
 Validation intentionally not run
 cd /mnt/data/scratch/ci-redis-permanent/service && bun test src/secure-startup.test.ts
 cd /mnt/data/scratch/ci-redis-permanent && tests/egress_gateway_compose.sh
+
+Fix round 1
+- Focused parent validation found that Compose include rejects redefining an imported service, so the first W799 override could not render.
+- The W799 wrapper was restored to a pure include.
+- The required interpolation moved to all five canonical Redis clients and the Redis server command so every process uses the same supplied credential.
+- The Compose contract now checks all shared-password consumers, exact canonical/W799 model equality, and missing-password failure for both entry points.
+- The root .env.example already documents REDIS_PASSWORD, so no environment-example or README change was required.
+- Tests remain unrun by instruction.
