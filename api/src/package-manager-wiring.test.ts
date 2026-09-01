@@ -69,6 +69,15 @@ describe('native package manager wiring', () => {
             'Name: fixture-pkg\nVersion: 1.2.3\nHome-page: https://secret.example/path\n',
         );
         await fsp.writeFile(path.join(distInfo, 'REQUESTED'), '');
+        await fsp.writeFile(
+            path.join(workspace, '.optale-packages/invocations.jsonl'),
+            JSON.stringify({
+                manager: 'pip',
+                requestedSpecs: ['fixture-pkg>=1.0,<2'],
+                durationMs: 1234,
+                outcome: 'success',
+            }) + '\n',
+        );
 
         const summary = await collectPackageSetupSummary(
             workspace,
@@ -77,14 +86,12 @@ describe('native package manager wiring', () => {
                 responseBytes: 2048,
                 policyDigest: 'D'.repeat(43),
             },
-            1234,
-            'success',
         );
 
         expect(summary).toEqual([
             {
                 manager: 'pip',
-                requestedSpec: 'fixture-pkg==1.2.3',
+                requestedSpec: 'fixture-pkg>=1.0,<2',
                 installedVersion: '1.2.3',
                 durationMs: 1234,
                 outcome: 'success',
@@ -100,6 +107,7 @@ describe('native package manager wiring', () => {
         const wrapperRoot = path.resolve(__dirname, '../helpers/package-bin');
         const npm = await fsp.readFile(path.join(wrapperRoot, 'npm'), 'utf8');
         const bun = await fsp.readFile(path.join(wrapperRoot, 'bun'), 'utf8');
+        const pip = await fsp.readFile(path.join(wrapperRoot, 'pip'), 'utf8');
         const entrypoint = await fsp.readFile(
             path.resolve(__dirname, '../helpers/package-entrypoint'),
             'utf8',
@@ -112,6 +120,7 @@ describe('native package manager wiring', () => {
         expect(bun).toContain('--cafile');
         expect(bun).toContain('--exact');
         expect(bun).toContain('/mnt/data/.optale-packages/bun');
+        expect(pip).toContain('package-invocation.cjs');
         expect(entrypoint).toContain('/run/codeapi/package-proxy-ready');
         expect(entrypoint).toContain('exec "$@"');
     });
@@ -130,6 +139,15 @@ describe('native package manager wiring', () => {
             'Name: result-pkg\nVersion: 2.0.0\n',
         );
         await fsp.writeFile(path.join(distInfo, 'REQUESTED'), '');
+        await fsp.writeFile(
+            path.join(workspace, '.optale-packages/invocations.jsonl'),
+            JSON.stringify({
+                manager: 'pip',
+                requestedSpecs: ['missing-package~=9.0'],
+                durationMs: 17,
+                outcome: 'failed',
+            }) + '\n',
+        );
         const result: NsJailResult = {
             stdout: '',
             stderr: '',
@@ -152,10 +170,9 @@ describe('native package manager wiring', () => {
         expect(result.package_setup).toEqual([
             {
                 manager: 'pip',
-                requestedSpec: 'result-pkg==2.0.0',
-                installedVersion: '2.0.0',
-                durationMs: 321,
-                outcome: 'success',
+                requestedSpec: 'missing-package~=9.0',
+                durationMs: 17,
+                outcome: 'failed',
                 gatewayRequestCount: 2,
                 gatewayResponseBytes: 512,
                 policyDigest: 'R'.repeat(43),
@@ -168,18 +185,18 @@ describe('native package manager wiring', () => {
             path.join(os.tmpdir(), 'package-digest-'),
         );
         const root = path.join(workspace, '.optale-packages/node');
-        const installed = path.join(root, 'node_modules/fixture-npm');
+        const installed = path.join(root, 'node_modules/@scope/fixture-npm');
         await fsp.mkdir(installed, { recursive: true });
         await fsp.writeFile(
             path.join(root, 'package.json'),
             JSON.stringify({
-                dependencies: { 'fixture-npm': '1.0.0' },
+                dependencies: { '@scope/fixture-npm': '^1.0.0' },
             }),
         );
         await fsp.writeFile(
             path.join(installed, 'package.json'),
             JSON.stringify({
-                name: 'fixture-npm',
+                name: '@scope/fixture-npm',
                 version: '1.0.0',
             }),
         );
@@ -187,12 +204,21 @@ describe('native package manager wiring', () => {
             path.join(root, 'package-lock.json'),
             JSON.stringify({
                 packages: {
-                    'node_modules/fixture-npm': {
+                    'node_modules/@scope/fixture-npm': {
                         version: '1.0.0',
                         integrity: 'sha512-' + 'A'.repeat(86),
                     },
                 },
             }),
+        );
+        await fsp.writeFile(
+            path.join(workspace, '.optale-packages/invocations.jsonl'),
+            JSON.stringify({
+                manager: 'npm',
+                requestedSpecs: ['@scope/fixture-npm@^1.0.0'],
+                durationMs: 100,
+                outcome: 'success',
+            }) + '\n',
         );
         const [summary] = await collectPackageSetupSummary(
             workspace,
@@ -201,12 +227,10 @@ describe('native package manager wiring', () => {
                 responseBytes: 512,
                 policyDigest: 'I'.repeat(43),
             },
-            100,
-            'success',
         );
         expect(summary).toMatchObject({
             manager: 'npm',
-            requestedSpec: 'fixture-npm@1.0.0',
+            requestedSpec: '@scope/fixture-npm@^1.0.0',
             installedVersion: '1.0.0',
             artifactDigest: 'sha512-' + 'A'.repeat(86),
         });

@@ -20,7 +20,7 @@ afterEach(async () => {
         cleanupPackageProxyState(stateDir);
 });
 
-async function fixture(): Promise<{
+async function fixture(options: { outcome?: string; disconnect?: boolean } = {}): Promise<{
     stateDir: string;
     socketPath: string;
     calls: Array<{
@@ -52,10 +52,19 @@ async function fixture(): Promise<{
             res.writeHead(200, {
                 'Content-Type': 'application/octet-stream',
                 'X-CodeAPI-Network-Policy-Digest': 'P'.repeat(43),
+                Trailer: 'X-CodeAPI-Egress-Outcome, X-CodeAPI-Egress-Requests, X-CodeAPI-Egress-Bytes',
+            });
+            res.write('package-bytes');
+            if (options.disconnect) {
+                res.destroy();
+                return;
+            }
+            res.addTrailers({
+                'X-CodeAPI-Egress-Outcome': options.outcome ?? 'OK',
                 'X-CodeAPI-Egress-Requests': '7',
                 'X-CodeAPI-Egress-Bytes': '2048',
             });
-            res.end('package-bytes');
+            res.end();
         });
     });
     await new Promise<void>((resolve, reject) => {
@@ -127,6 +136,79 @@ describe('per-job package proxy', () => {
             responseBytes: 2048,
             policyDigest: 'P'.repeat(43),
         });
+        await fx.close();
+    });
+
+    test.each(['RESPONSE_TOO_LARGE', 'FETCH_FAILED'])(
+        'does not report a clean EOF when the gateway trailer is %s',
+        async outcome => {
+            const fx = await fixture({ outcome });
+            const ca = await createPackageProxyCertificateAuthority(fx.stateDir);
+            const proxy = await startPackageProxy({
+                host: '127.0.0.1',
+                port: 0,
+                relaySocketPath: fx.socketPath,
+                grant: 'opaque-grant',
+                stateDir: fx.stateDir,
+                caCertPath: ca.certPath,
+                caKeyPath: ca.keyPath,
+                log: { log() {}, warn() {}, error() {} },
+            });
+            handles.push(proxy);
+            const completed = await new Promise<boolean>(resolve => {
+                const request = http.request(
+                    {
+                        host: proxy.host,
+                        port: proxy.port,
+                        method: 'GET',
+                        path: 'https://registry.npmjs.org/pkg.tgz',
+                        headers: { Host: 'registry.npmjs.org' },
+                    },
+                    response => {
+                        response.resume();
+                        response.on('end', () => resolve(true));
+                        response.on('aborted', () => resolve(false));
+                        response.on('error', () => resolve(false));
+                    },
+                );
+                request.on('error', () => resolve(false));
+                request.end();
+            });
+            expect(completed).toBe(false);
+            await fx.close();
+        },
+    );
+
+    test('does not report a clean EOF when the gateway disconnects mid-stream', async () => {
+        const fx = await fixture({ disconnect: true });
+        const ca = await createPackageProxyCertificateAuthority(fx.stateDir);
+        const proxy = await startPackageProxy({
+            host: '127.0.0.1', port: 0, relaySocketPath: fx.socketPath,
+            grant: 'opaque-grant', stateDir: fx.stateDir,
+            caCertPath: ca.certPath, caKeyPath: ca.keyPath,
+            log: { log() {}, warn() {}, error() {} },
+        });
+        handles.push(proxy);
+        const completed = await new Promise<boolean>(resolve => {
+            const request = http.request(
+                    {
+                        host: proxy.host,
+                        port: proxy.port,
+                        method: 'GET',
+                        path: 'https://registry.npmjs.org/pkg.tgz',
+                        headers: { Host: 'registry.npmjs.org' },
+                    },
+                    response => {
+                    response.resume();
+                    response.on('end', () => resolve(true));
+                    response.on('aborted', () => resolve(false));
+                    response.on('error', () => resolve(false));
+                },
+            );
+            request.on('error', () => resolve(false));
+                request.end();
+        });
+        expect(completed).toBe(false);
         await fx.close();
     });
 

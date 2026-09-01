@@ -3,7 +3,12 @@ import * as fsp from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
 import { config } from './config';
-import { buildArgs, execute, renderJobConfigOverlay } from './nsjail';
+import {
+  buildArgs,
+  cleanupFailedPackageSandboxSpawn,
+  execute,
+  renderJobConfigOverlay,
+} from './nsjail';
 
 function valueAfter(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag);
@@ -161,6 +166,22 @@ describe('NsJail args', () => {
     } finally {
       config.allowed_local_network_port = originalAllowedPort;
     }
+  });
+});
+
+describe('package namespace cleanup', () => {
+  test('stops the private network holder before cleaning an async spawn failure', async () => {
+    const holder = { pid: 1234 } as never;
+    const events: string[] = [];
+    await cleanupFailedPackageSandboxSpawn(
+      holder,
+      () => events.push('cleanup'),
+      async child => {
+        expect(child).toBe(holder);
+        events.push('stop');
+      },
+    );
+    expect(events).toEqual(['stop', 'cleanup']);
   });
 });
 

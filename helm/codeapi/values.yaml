@@ -411,6 +411,7 @@ egressGateway:
 
   config:
     maxToolCallBytes: 1048576
+    externalFetchDenyCIDRs: []
     externalFetchPolicy:
       version: 1
       limits:

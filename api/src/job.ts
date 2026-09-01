@@ -676,130 +676,177 @@ async function readBoundedJson(
     }
 }
 
-export async function collectPackageSetupSummary(
+interface PackageInvocationRecord {
+    manager: 'pip' | 'npm' | 'bun';
+    requestedSpecs: string[];
+    durationMs: number;
+    outcome: 'success' | 'failed';
+}
+
+function boundedRequestedSpec(value: unknown): string | undefined {
+    if (typeof value !== 'string' || value.length < 1 || value.length > 256)
+        return undefined;
+    if (/[\u0000-\u001f\u007f]/.test(value)) return undefined;
+    return value;
+}
+
+async function readPackageInvocations(
     submissionDir: string,
-    transport: PackageTransportSummary,
-    durationMs: number,
-    outcome: 'success' | 'failed',
-): Promise<PackageSetupSummary[]> {
-    if (!/^[A-Za-z0-9_-]{43}$/.test(transport.policyDigest)) return [];
-    const common = {
-        durationMs: Math.max(0, Math.min(300_000, Math.floor(durationMs))),
-        outcome,
-        gatewayRequestCount: Math.max(0, Math.floor(transport.requestCount)),
-        gatewayResponseBytes: Math.max(0, Math.floor(transport.responseBytes)),
-        policyDigest: transport.policyDigest,
-    };
-    const summaries: PackageSetupSummary[] = [];
-    const pythonRoot = path.join(submissionDir, '.optale-packages/python');
+): Promise<PackageInvocationRecord[]> {
+    const invocationPath = path.join(
+        submissionDir,
+        '.optale-packages/invocations.jsonl',
+    );
     try {
-        const entries = await fsp.readdir(pythonRoot, { withFileTypes: true });
-        for (const entry of entries.sort((a, b) =>
-            a.name.localeCompare(b.name),
-        )) {
+        const stat = await fsp.stat(invocationPath);
+        if (!stat.isFile() || stat.size > 131_072) return [];
+        const records: PackageInvocationRecord[] = [];
+        for (const line of (await fsp.readFile(invocationPath, 'utf8')).split('\n')) {
+            if (!line || records.length >= 64) continue;
+            let raw: unknown;
+            try {
+                raw = JSON.parse(line);
+            } catch {
+                continue;
+            }
+            if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+            const value = raw as Record<string, unknown>;
             if (
-                summaries.length >= 32 ||
-                !entry.isDirectory() ||
-                !entry.name.endsWith('.dist-info')
+                value.manager !== 'pip' &&
+                value.manager !== 'npm' &&
+                value.manager !== 'bun'
             )
                 continue;
-            const distInfo = path.join(pythonRoot, entry.name);
-            try {
-                const requested = await fsp.stat(
-                    path.join(distInfo, 'REQUESTED'),
-                );
-                if (!requested.isFile()) continue;
-            } catch {
+            if (value.outcome !== 'success' && value.outcome !== 'failed')
                 continue;
-            }
-            let metadata: string;
-            try {
-                const stat = await fsp.stat(path.join(distInfo, 'METADATA'));
-                if (!stat.isFile() || stat.size > 131_072) continue;
-                metadata = await fsp.readFile(
-                    path.join(distInfo, 'METADATA'),
-                    'utf8',
-                );
-            } catch {
+            if (
+                typeof value.durationMs !== 'number' ||
+                !Number.isSafeInteger(value.durationMs) ||
+                value.durationMs < 0 ||
+                value.durationMs > 300_000 ||
+                !Array.isArray(value.requestedSpecs)
+            )
                 continue;
-            }
-            const name = boundedPackageFact(
-                metadata.match(/^Name:\s*(.+)$/im)?.[1]?.trim(),
-            );
-            const version = boundedPackageFact(
-                metadata.match(/^Version:\s*(.+)$/im)?.[1]?.trim(),
-            );
-            if (!name || !version) continue;
-            summaries.push({
-                manager: 'pip',
-                requestedSpec: `${name}==${version}`,
-                installedVersion: version,
-                ...common,
+            const requestedSpecs = value.requestedSpecs
+                .map(boundedRequestedSpec)
+                .filter((spec): spec is string => spec !== undefined)
+                .slice(0, 32);
+            if (requestedSpecs.length === 0) continue;
+            records.push({
+                manager: value.manager,
+                requestedSpecs,
+                durationMs: value.durationMs,
+                outcome: value.outcome,
             });
+        }
+        return records;
+    } catch {
+        return [];
+    }
+}
+
+function requestedPackageName(
+    manager: 'pip' | 'npm' | 'bun',
+    spec: string,
+): string | undefined {
+    if (manager === 'pip') {
+        return spec.match(/^([A-Za-z0-9][A-Za-z0-9._-]*)/)?.[1];
+    }
+    const candidate = spec.startsWith('@')
+        ? spec.slice(0, spec.lastIndexOf('@') > spec.indexOf('/') ? spec.lastIndexOf('@') : undefined)
+        : spec.split('@', 1)[0];
+    return /^(?:@[a-z0-9._-]+\/[a-z0-9._-]+|[a-z0-9._-]+)$/i.test(candidate)
+        ? candidate
+        : undefined;
+}
+
+function normalizedPythonName(value: string): string {
+    return value.toLowerCase().replace(/[-_.]+/g, '-');
+}
+
+async function installedPythonVersions(
+    submissionDir: string,
+): Promise<Map<string, string>> {
+    const versions = new Map<string, string>();
+    try {
+        const root = path.join(submissionDir, '.optale-packages/python');
+        const entries = await fsp.readdir(root, { withFileTypes: true });
+        for (const entry of entries) {
+            if (!entry.isDirectory() || !entry.name.endsWith('.dist-info')) continue;
+            const metadataPath = path.join(root, entry.name, 'METADATA');
+            const stat = await fsp.stat(metadataPath);
+            if (!stat.isFile() || stat.size > 131_072) continue;
+            const metadata = await fsp.readFile(metadataPath, 'utf8');
+            const name = boundedPackageFact(metadata.match(/^Name:\s*(.+)$/im)?.[1]?.trim());
+            const version = boundedPackageFact(metadata.match(/^Version:\s*(.+)$/im)?.[1]?.trim());
+            if (name && version) versions.set(normalizedPythonName(name), version);
         }
     } catch {
         /* no Python installs */
     }
+    return versions;
+}
 
-    for (const [manager, directory] of [
-        ['npm', 'node'],
-        ['bun', 'bun'],
-    ] as const) {
-        if (summaries.length >= 32) break;
-        const root = path.join(submissionDir, '.optale-packages', directory);
-        const rootPackage = await readBoundedJson(
-            path.join(root, 'package.json'),
-        );
-        const lockfile =
-            manager === 'npm'
-                ? await readBoundedJson(path.join(root, 'package-lock.json'))
-                : undefined;
-        const lockedPackages =
-            lockfile?.packages &&
-            typeof lockfile.packages === 'object' &&
-            !Array.isArray(lockfile.packages)
-                ? (lockfile.packages as Record<string, unknown>)
-                : undefined;
-        const dependencies = rootPackage?.dependencies;
-        if (
-            !dependencies ||
-            typeof dependencies !== 'object' ||
-            Array.isArray(dependencies)
-        )
-            continue;
-        for (const [rawName, rawSpec] of Object.entries(
-            dependencies as Record<string, unknown>,
-        ).sort()) {
-            if (summaries.length >= 32) break;
-            const name = boundedPackageFact(rawName);
-            const spec = boundedPackageFact(rawSpec);
-            if (!name || !spec) continue;
-            const installed = await readBoundedJson(
-                path.join(
-                    root,
-                    'node_modules',
-                    ...name.split('/'),
-                    'package.json',
-                ),
-            );
-            const version = boundedPackageFact(installed?.version);
-            if (!version) continue;
-            const locked = lockedPackages?.[`node_modules/${name}`];
-            const integrity =
-                locked && typeof locked === 'object' && !Array.isArray(locked)
-                    ? (locked as Record<string, unknown>).integrity
-                    : undefined;
-            const artifactDigest =
-                typeof integrity === 'string' &&
-                /^sha(?:256|384|512)-[A-Za-z0-9+/=]{32,256}$/.test(integrity)
-                    ? integrity
-                    : undefined;
+export async function collectPackageSetupSummary(
+    submissionDir: string,
+    transport: PackageTransportSummary,
+): Promise<PackageSetupSummary[]> {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(transport.policyDigest)) return [];
+    const invocations = await readPackageInvocations(submissionDir);
+    if (invocations.length === 0) return [];
+    const pythonVersions = await installedPythonVersions(submissionDir);
+    const summaries: PackageSetupSummary[] = [];
+    for (const invocation of invocations) {
+        for (const requestedSpec of invocation.requestedSpecs) {
+            if (summaries.length >= 32) return summaries;
+            const name = requestedPackageName(invocation.manager, requestedSpec);
+            let installedVersion: string | undefined;
+            let artifactDigest: string | undefined;
+            if (name && invocation.manager === 'pip') {
+                installedVersion = pythonVersions.get(normalizedPythonName(name));
+            } else if (name) {
+                const directory = invocation.manager === 'npm' ? 'node' : 'bun';
+                const root = path.join(submissionDir, '.optale-packages', directory);
+                const installed = await readBoundedJson(
+                    path.join(root, 'node_modules', ...name.split('/'), 'package.json'),
+                );
+                installedVersion = boundedPackageFact(installed?.version);
+                if (invocation.manager === 'npm') {
+                    const lockfile = await readBoundedJson(path.join(root, 'package-lock.json'));
+                    const packages =
+                        lockfile?.packages &&
+                        typeof lockfile.packages === 'object' &&
+                        !Array.isArray(lockfile.packages)
+                            ? (lockfile.packages as Record<string, unknown>)
+                            : undefined;
+                    const locked = packages?.[`node_modules/${name}`];
+                    const integrity =
+                        locked && typeof locked === 'object' && !Array.isArray(locked)
+                            ? (locked as Record<string, unknown>).integrity
+                            : undefined;
+                    if (
+                        typeof integrity === 'string' &&
+                        /^sha(?:256|384|512)-[A-Za-z0-9+/=]{32,256}$/.test(integrity)
+                    )
+                        artifactDigest = integrity;
+                }
+            }
             summaries.push({
-                manager,
-                requestedSpec: `${name}@${spec}`,
-                installedVersion: version,
+                manager: invocation.manager,
+                requestedSpec,
+                ...(installedVersion ? { installedVersion } : {}),
                 ...(artifactDigest ? { artifactDigest } : {}),
-                ...common,
+                durationMs: invocation.durationMs,
+                outcome: invocation.outcome,
+                gatewayRequestCount: Math.max(
+                    0,
+                    Math.min(8, Math.floor(transport.requestCount)),
+                ),
+                gatewayResponseBytes: Math.max(
+                    0,
+                    Math.min(52_428_800, Math.floor(transport.responseBytes)),
+                ),
+                policyDigest: transport.policyDigest,
             });
         }
     }
@@ -814,8 +861,6 @@ export async function attachPackageSetupSummary(
     result.package_setup = await collectPackageSetupSummary(
         submissionDir,
         result.package_transport,
-        result.wall_time ?? 0,
-        result.code === 0 ? 'success' : 'failed',
     );
 }
 
