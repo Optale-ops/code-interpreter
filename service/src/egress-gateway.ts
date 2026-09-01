@@ -109,7 +109,15 @@ export function setEgressFetchReserveForTest(
 export function setExternalFetchOpenForTest(
   open: typeof openExternalFetch | null,
 ): void {
-  externalFetchOpen = open ?? openExternalFetch;
+  if (!open) {
+    externalFetchOpen = openExternalFetch;
+    return;
+  }
+  externalFetchOpen = async args => {
+    const target = validateExternalFetchUrl(args.url, args.policy);
+    await args.beforeRequest?.(target);
+    return open(args);
+  };
 }
 
 export function setEgressFetchReleaseForTest(
