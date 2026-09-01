@@ -40,32 +40,75 @@ async function fixture(options: { outcome?: string; disconnect?: boolean } = {})
         grant: string;
         body: Record<string, unknown>;
     }> = [];
-    const server = http.createServer((req, res) => {
-        const chunks: Buffer[] = [];
-        req.on('data', chunk => chunks.push(Buffer.from(chunk)));
-        req.on('end', () => {
+    const relaySockets = new Set<net.Socket>();
+    const server = net.createServer(socket => {
+        relaySockets.add(socket);
+        socket.on('close', () => relaySockets.delete(socket));
+        let request = Buffer.alloc(0);
+        let handled = false;
+        socket.on('data', chunk => {
+            if (handled) return;
+            request = Buffer.concat([request, Buffer.from(chunk)]);
+            const headerEnd = request.indexOf('\r\n\r\n');
+            if (headerEnd < 0) return;
+            const headerText = request.subarray(0, headerEnd).toString('latin1');
+            const lines = headerText.split('\r\n');
+            const contentLength = Number(
+                lines
+                    .find(line => line.toLowerCase().startsWith('content-length:'))
+                    ?.split(':', 2)[1]
+                    ?.trim() ?? '0',
+            );
+            const bodyStart = headerEnd + 4;
+            if (request.length < bodyStart + contentLength) return;
+            handled = true;
+            const headers = Object.fromEntries(
+                lines.slice(1).map(line => {
+                    const separator = line.indexOf(':');
+                    return [
+                        line.slice(0, separator).trim().toLowerCase(),
+                        line.slice(separator + 1).trim(),
+                    ];
+                }),
+            );
             calls.push({
-                path: req.url ?? '',
-                grant: String(req.headers['x-codeapi-egress-grant'] ?? ''),
-                body: JSON.parse(Buffer.concat(chunks).toString('utf8')),
+                path: lines[0]?.split(' ')[1] ?? '',
+                grant: headers['x-codeapi-egress-grant'] ?? '',
+                body: JSON.parse(
+                    request
+                        .subarray(bodyStart, bodyStart + contentLength)
+                        .toString('utf8'),
+                ),
             });
-            res.writeHead(200, {
-                'Content-Type': 'application/octet-stream',
-                'X-CodeAPI-Network-Policy-Digest': 'P'.repeat(43),
-                Trailer: 'X-CodeAPI-Egress-Outcome, X-CodeAPI-Egress-Requests, X-CodeAPI-Egress-Bytes',
-                'Transfer-Encoding': 'chunked',
-            });
-            res.write('package-bytes');
+            const responseHeaders = [
+                'HTTP/1.1 200 OK',
+                'Content-Type: application/octet-stream',
+                `X-CodeAPI-Network-Policy-Digest: ${'P'.repeat(43)}`,
+                'Transfer-Encoding: chunked',
+                'Trailer: X-CodeAPI-Egress-Outcome, X-CodeAPI-Egress-Requests, X-CodeAPI-Egress-Bytes',
+                'Connection: close',
+                '',
+                '',
+            ].join('\r\n');
             if (options.disconnect) {
-                res.destroy();
+                socket.write(responseHeaders + '20\r\npartial-package');
+                socket.destroy();
                 return;
             }
-            res.addTrailers({
-                'X-CodeAPI-Egress-Outcome': options.outcome ?? 'OK',
-                'X-CodeAPI-Egress-Requests': '7',
-                'X-CodeAPI-Egress-Bytes': '2048',
-            });
-            res.end();
+            const body = 'package-bytes';
+            const trailers = [
+                '0',
+                `X-CodeAPI-Egress-Outcome: ${options.outcome ?? 'OK'}`,
+                'X-CodeAPI-Egress-Requests: 7',
+                'X-CodeAPI-Egress-Bytes: 2048',
+                '',
+                '',
+            ].join('\r\n');
+            socket.end(
+                responseHeaders +
+                    `${Buffer.byteLength(body).toString(16)}\r\n${body}\r\n` +
+                    trailers,
+            );
         });
     });
     await new Promise<void>((resolve, reject) => {
@@ -78,7 +121,7 @@ async function fixture(options: { outcome?: string; disconnect?: boolean } = {})
         calls,
         close: () =>
             new Promise<void>(resolve => {
-                server.closeAllConnections();
+                for (const socket of relaySockets) socket.destroy();
                 server.close(() => resolve());
             }),
     };
