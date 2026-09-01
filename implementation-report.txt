@@ -1,4 +1,4 @@
-Deviations from brief: Fix round 1 moved the Compose credential requirement from a W799 service override into canonical docker-compose.yaml; fix round 2 made the Redis password an exact exec-list argument; fix round 3 compares Compose-rendered credentials because Compose escapes dollar signs during rendering.
+Deviations from brief: Fix rounds 1-3 corrected canonical Compose placement, exact Redis argv, and rendered-value comparison; fix round 4 supplies the new required test credential to an existing deployment-config renderer outside the original four-file scope.
 
 Status: DONE (built; validation intentionally unrun as instructed)
 
@@ -12,6 +12,7 @@ Implementation commits
 - fix(compose): require shared Redis credential (fix round 1; this report is committed with it)
 - fix(compose): preserve Redis password argv (fix round 2; this report is committed with it)
 - fix(compose): compare rendered Redis credential (fix round 3; this report is committed with it)
+- test(compose): supply Redis credential in delivery config (fix round 4; this report is committed with it)
 
 Changed files
 - service/src/secure-startup.test.ts
@@ -19,6 +20,7 @@ Changed files
 - docker-compose.w799-egress.yml
 - docker-compose.yaml
 - tests/egress_gateway_compose.sh
+- tests/block_root_package_delivery.sh
 - implementation-report.txt
 
 Implemented behavior
@@ -30,9 +32,9 @@ Self-review findings
 - Tests were written before production changes.
 - The runtime change reuses the existing whitespace-aware requireValue helper and remains limited to hardened mode.
 - Existing fresh-gateway tests receive a test-only Redis value so they continue to exercise their intended earlier validation failures.
-- The base-to-head source/test review contains the original four files plus the Primary-authorized canonical docker-compose.yaml fix; no external-fetch file or behavior changed.
+- The base-to-head source/test review contains the original files plus Primary-authorized canonical Compose and deployment-config helper fixes; no external-fetch file or behavior changed.
 - The reviewed diff contains no real credential or secret material. All test values are explicit test-only placeholders.
-- git diff --check completed without findings for the initial implementation and all three fix rounds before their commits.
+- git diff --check completed without findings for the initial implementation and all four fix rounds before their commits.
 
 Validation intentionally not run
 cd /mnt/data/scratch/ci-redis-permanent/service && bun test src/secure-startup.test.ts
@@ -58,4 +60,10 @@ Fix round 3
 - The contract now derives the rendered password from egress_gateway, proves it is a nonblank string, and requires every other Redis client to use that exact rendered value.
 - Redis argv must still equal exactly [redis-server, --requirepass, rendered password], so duplicate or conflicting arguments remain rejected.
 - The metacharacter fixture and isolated unset/blank checks remain unchanged.
+- This lane did not run tests, as instructed.
+
+Fix round 4
+- Hosted CI job 99869699076 reached an existing canonical Compose renderer without the newly required REDIS_PASSWORD, so interpolation failed before that test could inspect package-delivery mode.
+- assert_compose_mode now supplies a synthetic, non-secret Redis password beside its existing synthetic grant and internal-service credentials.
+- The helper's package-delivery assertions are unchanged; no additional coverage was needed.
 - This lane did not run tests, as instructed.
