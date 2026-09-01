@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import {
   HARD_EXTERNAL_FETCH_LIMITS,
+  HARD_MAX_EXTERNAL_FETCH_HOSTS,
+  externalFetchPolicyDigest,
   parseExternalFetchPolicy,
+  serializeExternalFetchPolicy,
   validateExternalFetchUrl,
   validateHttpsPassthroughUrl,
   validateResolvedAddresses,
@@ -170,6 +173,44 @@ describe('external fetch policy parser', () => {
       ).toThrow(/maxFetchesPerGrant must be an integer from 1 through 8/);
     },
   );
+
+  test('accepts exactly 256 hosts and preserves canonical digest determinism', () => {
+    const hosts = Object.fromEntries(
+      Array.from({ length: HARD_MAX_EXTERNAL_FETCH_HOSTS }, (_, index) => [
+        `host-${index}.example.com`,
+        { contentTypes: ['application/pdf'] },
+      ]),
+    );
+    const first = parseExternalFetchPolicy(frozenPolicy({ hosts }));
+    const snapshot = serializeExternalFetchPolicy(first);
+    const reparsed = parseExternalFetchPolicy(snapshot);
+    expect(Object.keys(snapshot.hosts)).toHaveLength(256);
+    expect(externalFetchPolicyDigest(reparsed)).toBe(
+      externalFetchPolicyDigest(first),
+    );
+  });
+
+  test('rejects 257 hosts in parsed and canonical snapshot inputs', () => {
+    const hosts = Object.fromEntries(
+      Array.from({ length: HARD_MAX_EXTERNAL_FETCH_HOSTS + 1 }, (_, index) => [
+        `host-${index}.example.com`,
+        { contentTypes: ['application/pdf'] },
+      ]),
+    );
+    expect(() => parseExternalFetchPolicy(frozenPolicy({ hosts }))).toThrow(
+      /at most 256 exact hosts/,
+    );
+
+    const allowed = parseExternalFetchPolicy(
+      frozenPolicy({
+        hosts: Object.fromEntries(Object.entries(hosts).slice(0, 256)),
+      }),
+    );
+    allowed.hosts.set('overflow.example.com', allowed.hosts.values().next().value!);
+    expect(() => serializeExternalFetchPolicy(allowed)).toThrow(
+      /at most 256 exact hosts/,
+    );
+  });
 
   test('accepts an empty host map as deny-all', () => {
     const policy = parseExternalFetchPolicy(frozenPolicy({ hosts: {} }));

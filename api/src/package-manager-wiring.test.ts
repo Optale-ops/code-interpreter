@@ -235,4 +235,40 @@ describe('native package manager wiring', () => {
             artifactDigest: 'sha512-' + 'A'.repeat(86),
         });
     });
+
+    test('never returns URL, credential, VCS, file, or path requested specs', async () => {
+        const workspace = await fsp.mkdtemp(
+            path.join(os.tmpdir(), 'package-unsafe-spec-'),
+        );
+        await fsp.mkdir(path.join(workspace, '.optale-packages'), {
+            recursive: true,
+        });
+        await fsp.writeFile(
+            path.join(workspace, '.optale-packages/invocations.jsonl'),
+            [
+                ['pip', 'pkg @ https://user:secret@example.test/pkg.whl'],
+                ['pip', 'git+https://example.test/repo.git'],
+                ['npm', 'pkg@https://user:secret@example.test/pkg.tgz'],
+                ['bun', 'file:../pkg'],
+                ['pip', '../local.whl'],
+            ]
+                .map(([manager, requestedSpec]) =>
+                    JSON.stringify({
+                        manager,
+                        requestedSpecs: [requestedSpec],
+                        durationMs: 4,
+                        outcome: 'failed',
+                    }),
+                )
+                .join('\n') + '\n',
+        );
+        const summaries = await collectPackageSetupSummary(workspace, {
+            requestCount: 1,
+            responseBytes: 0,
+            policyDigest: 'S'.repeat(43),
+        });
+        expect(summaries).toEqual([]);
+        expect(JSON.stringify(summaries)).not.toContain('user:secret');
+    });
+
 });
