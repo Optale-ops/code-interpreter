@@ -84,8 +84,10 @@ async function fixture(options: { outcome?: string; disconnect?: boolean } = {})
                 'HTTP/1.1 200 OK',
                 'Content-Type: application/octet-stream',
                 `X-CodeAPI-Network-Policy-Digest: ${'P'.repeat(43)}`,
+                'X-CodeAPI-Egress-Requests: 7',
+                'X-CodeAPI-Egress-Bytes: 2048',
                 'Transfer-Encoding: chunked',
-                'Trailer: X-CodeAPI-Egress-Outcome, X-CodeAPI-Egress-Requests, X-CodeAPI-Egress-Bytes',
+                'Trailer: X-CodeAPI-Egress-Outcome',
                 'Connection: close',
                 '',
                 '',
@@ -99,8 +101,6 @@ async function fixture(options: { outcome?: string; disconnect?: boolean } = {})
             const trailers = [
                 '0',
                 `X-CodeAPI-Egress-Outcome: ${options.outcome ?? 'OK'}`,
-                'X-CodeAPI-Egress-Requests: 7',
-                'X-CodeAPI-Egress-Bytes: 2048',
                 '',
                 '',
             ].join('\r\n');
