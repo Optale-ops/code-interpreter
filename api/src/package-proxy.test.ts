@@ -53,6 +53,7 @@ async function fixture(options: { outcome?: string; disconnect?: boolean } = {})
                 'Content-Type': 'application/octet-stream',
                 'X-CodeAPI-Network-Policy-Digest': 'P'.repeat(43),
                 Trailer: 'X-CodeAPI-Egress-Outcome, X-CodeAPI-Egress-Requests, X-CodeAPI-Egress-Bytes',
+                'Transfer-Encoding': 'chunked',
             });
             res.write('package-bytes');
             if (options.disconnect) {
@@ -76,7 +77,10 @@ async function fixture(options: { outcome?: string; disconnect?: boolean } = {})
         socketPath,
         calls,
         close: () =>
-            new Promise<void>(resolve => server.close(() => resolve())),
+            new Promise<void>(resolve => {
+                server.closeAllConnections();
+                server.close(() => resolve());
+            }),
     };
 }
 
@@ -169,10 +173,17 @@ describe('per-job package proxy', () => {
                         response.on('end', () => resolve(true));
                         response.on('aborted', () => resolve(false));
                         response.on('error', () => resolve(false));
+                        response.on('close', () => {
+                            if (!response.complete) resolve(false);
+                        });
                     },
                 );
                 request.on('error', () => resolve(false));
                 request.end();
+                setTimeout(() => {
+                    request.destroy();
+                    resolve(false);
+                }, 1_000).unref();
             });
             expect(completed).toBe(false);
             await fx.close();
@@ -203,10 +214,17 @@ describe('per-job package proxy', () => {
                     response.on('end', () => resolve(true));
                     response.on('aborted', () => resolve(false));
                     response.on('error', () => resolve(false));
+                        response.on('close', () => {
+                            if (!response.complete) resolve(false);
+                        });
                 },
             );
             request.on('error', () => resolve(false));
                 request.end();
+                setTimeout(() => {
+                    request.destroy();
+                    resolve(false);
+                }, 1_000).unref();
         });
         expect(completed).toBe(false);
         await fx.close();

@@ -354,6 +354,7 @@ export async function startPackageProxy(
                         writeWithBackpressure(upstreamResponse, res, buffer);
                 });
                 const abortDownstream = (): void => {
+                    upstream.destroy();
                     if (!res.destroyed) res.destroy();
                 };
                 upstreamResponse.on('aborted', abortDownstream);

@@ -21,8 +21,14 @@ async function main(): Promise<void> {
         req.on('data', chunk => chunks.push(Buffer.from(chunk)));
         req.on('end', () => {
             calls.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-            res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
-            res.end('package-bytes');
+            res.writeHead(200, {
+                'Content-Type': 'application/octet-stream',
+                Trailer: 'X-CodeAPI-Egress-Outcome',
+                'Transfer-Encoding': 'chunked',
+            });
+            res.write('package-bytes');
+            res.addTrailers({ 'X-CodeAPI-Egress-Outcome': 'OK' });
+            res.end();
         });
     });
     await new Promise<void>((resolve, reject) => {
