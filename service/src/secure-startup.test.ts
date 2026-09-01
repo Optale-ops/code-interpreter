@@ -105,6 +105,7 @@ async function runFreshGateway(
         CODEAPI_EXTERNAL_FETCH_POLICY_FILE: path.resolve(__dirname, '../config/external-fetch-policy.json'),
         CODEAPI_SYNTHETIC_ACCESS_TOKEN: '',
         REDIS_HOST: 'redis',
+        REDIS_PASSWORD: 'test-only-redis-password',
         ...overrides,
       },
       stdout: 'pipe',
@@ -303,12 +304,13 @@ describe('hardened CodeAPI startup config', () => {
     expect(result.stderr).toContain(message);
   });
 
-  test('requires strong gateway secret, Redis ledger, and upstream URLs', () => {
+  test('requires strong gateway secret, Redis ledger credentials, and upstream URLs', () => {
     env.HARDENED_SANDBOX_MODE = true;
     env.EGRESS_GRANT_SECRET = 'strong-egress-grant-secret-32-bytes';
     env.EGRESS_LEDGER_REQUIRED = true;
     process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = 'strong-internal-service-token-32-bytes';
     process.env.REDIS_HOST = 'redis';
+    process.env.REDIS_PASSWORD = 'test-only-redis-password';
 
     env.EGRESS_GATEWAY_FILE_SERVER_URL = '';
     env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL = 'http://tool-call-server:3033';
@@ -328,6 +330,19 @@ describe('hardened CodeAPI startup config', () => {
     expect(() => validateEgressGatewayHardenedConfig()).toThrow('REDIS_HOST');
 
     process.env.REDIS_HOST = 'redis';
+    delete process.env.REDIS_PASSWORD;
+    expect(() => validateEgressGatewayHardenedConfig()).toThrow(
+      'REDIS_PASSWORD is required in CODEAPI_HARDENED_SANDBOX_MODE',
+    );
+
+    process.env.REDIS_PASSWORD = '   ';
+    expect(() => validateEgressGatewayHardenedConfig()).toThrow(
+      'REDIS_PASSWORD is required in CODEAPI_HARDENED_SANDBOX_MODE',
+    );
+
+    process.env.REDIS_PASSWORD = 'test-only-redis-password';
+    expect(() => validateEgressGatewayHardenedConfig()).not.toThrow();
+
     env.EGRESS_GRANT_SECRET = 'short';
     expect(() => validateEgressGatewayHardenedConfig()).toThrow('at least 32 bytes');
 

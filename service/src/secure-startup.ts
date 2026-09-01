@@ -238,6 +238,7 @@ export function validateEgressGatewayHardenedConfig(): void {
   requireValue('EGRESS_GATEWAY_TOOL_CALL_SERVER_URL', env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL);
   requireValue('CODEAPI_EXTERNAL_FETCH_POLICY_FILE', env.EXTERNAL_FETCH_POLICY_FILE);
   requireValue('REDIS_HOST', process.env.REDIS_HOST);
+  requireValue('REDIS_PASSWORD', process.env.REDIS_PASSWORD);
   if (!env.EGRESS_LEDGER_REQUIRED) {
     throw new SecureStartupConfigError('CODEAPI_EGRESS_LEDGER_REQUIRED must be true in CODEAPI_HARDENED_SANDBOX_MODE');
   }
