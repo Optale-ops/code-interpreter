@@ -1,0 +1,35 @@
+Deviations from brief: none
+
+Status: DONE (built; validation intentionally unrun as instructed)
+
+Base and branch
+- Base: adf1ba60c9e423b11b0a1e67ced8a91931b95026
+- Branch: fix/redis-permanent
+
+Implementation commits
+- 062104a fix(egress): require Redis auth in hardened mode
+- b116c12 fix(compose): require W799 Redis credential
+
+Changed files
+- service/src/secure-startup.test.ts
+- service/src/secure-startup.ts
+- docker-compose.w799-egress.yml
+- tests/egress_gateway_compose.sh
+- implementation-report.txt
+
+Implemented behavior
+- Hardened egress-gateway startup now rejects missing or blank REDIS_PASSWORD with the exact required-value error and accepts a configured value.
+- The W799 Compose wrapper retains the canonical include and overrides only egress_gateway.environment.REDIS_PASSWORD with the required production interpolation.
+- The Compose contract supplies a test-only Redis value, proves W799 rendering fails when REDIS_PASSWORD is absent, and compares the W799 model with the canonical model after applying only the intended password override.
+
+Self-review findings
+- Tests were written before production changes.
+- The runtime change reuses the existing whitespace-aware requireValue helper and remains limited to hardened mode.
+- Existing fresh-gateway tests receive a test-only Redis value so they continue to exercise their intended earlier validation failures.
+- The base-to-head changed-file review contains only the four assigned source/test files; no external-fetch file or behavior changed.
+- The reviewed diff contains no real credential or secret material. All test values are explicit test-only placeholders.
+- git diff --check completed without findings before the implementation commits.
+
+Validation intentionally not run
+cd /mnt/data/scratch/ci-redis-permanent/service && bun test src/secure-startup.test.ts
+cd /mnt/data/scratch/ci-redis-permanent && tests/egress_gateway_compose.sh
