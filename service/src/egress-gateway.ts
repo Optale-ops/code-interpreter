@@ -8,6 +8,7 @@ import express, {
 import { nanoid } from 'nanoid';
 import path from 'path';
 import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import { env } from './config';
 import {
     ExternalFetchError,
@@ -777,19 +778,31 @@ function responseHeaders(
   return headers;
 }
 
-function pipeFetchResponse(
+async function pipeFetchResponse(
     fetchResponse: globalThis.Response,
     res: Response,
-): void {
+): Promise<void> {
   res.status(fetchResponse.status);
   res.set(responseHeaders(fetchResponse));
   if (!fetchResponse.body) {
     res.end();
     return;
   }
-    Readable.fromWeb(
-        fetchResponse.body as unknown as import('stream/web').ReadableStream,
-    ).pipe(res);
+  try {
+    await pipeline(
+        Readable.fromWeb(
+            fetchResponse.body as unknown as import('stream/web').ReadableStream,
+        ),
+        res,
+    );
+  } catch (error) {
+    /* pipeline destroyed the socket: the client saw an aborted transfer,
+     * never a clean short body; nothing more can be written. */
+    logger.error('Upstream response stream failed mid-transfer', {
+      requestId: requestId(res),
+      error,
+    });
+  }
 }
 
 function setPassthroughResponseHeaders(
@@ -1448,7 +1461,7 @@ app.get('/sessions/:sessionHandle/objects', async (req, res) => {
             },
     );
     if (!upstream.ok) {
-      return pipeFetchResponse(upstream, res);
+      return await pipeFetchResponse(upstream, res);
     }
     const data: unknown = await upstream.json();
     if (!Array.isArray(data)) {
@@ -1543,7 +1556,7 @@ app.get('/sessions/:sessionHandle/objects/:objectHandle', async (req, res) => {
       ),
       { headers: injectTraceHeaders(internalServiceHeaders()) },
     );
-    return pipeFetchResponse(upstream, res);
+    return await pipeFetchResponse(upstream, res);
   } catch (error) {
     return sendEgressError(req, res, error);
   }
@@ -1622,7 +1635,7 @@ app.put('/sessions/:sessionHandle/objects/:fileId', async (req, res) => {
     } else {
       reservedUpload = undefined;
     }
-    return pipeFetchResponse(upstream, res);
+    return await pipeFetchResponse(upstream, res);
   } catch (error) {
     if (reservedUpload) {
       await releaseEgressUpload(reservedUpload).catch(releaseError => {
@@ -2221,7 +2234,7 @@ app.post('/tool-call', async (req, res) => {
         body: body as unknown as BodyInit,
                 },
             );
-      return pipeFetchResponse(upstream, res);
+      return await pipeFetchResponse(upstream, res);
     }
     await recordEgressToolCall(callback.grant_id, executionId);
         const upstream = await fetch(
@@ -2240,7 +2253,7 @@ app.post('/tool-call', async (req, res) => {
       body: body as unknown as BodyInit,
             },
         );
-    return pipeFetchResponse(upstream, res);
+    return await pipeFetchResponse(upstream, res);
   } catch (error) {
     return sendEgressError(req, res, error);
   }

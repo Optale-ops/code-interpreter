@@ -980,6 +980,56 @@ describe('egress gateway routes', () => {
         ).toBe(INTERNAL_TOKEN);
   });
 
+  test('aborts the client transfer when the upstream object body fails mid-stream', async () => {
+    const declaredLength = 200_000;
+    /* Upstream declares Content-Length then dies mid-body: the first pull
+     * delivers a prefix the gateway flushes to its client, the second
+     * errors — a true mid-body failure the gateway must propagate as an
+     * aborted transfer, never a clean short body. */
+    let prefixSent = false;
+    upstreamResponse = new Response(
+      new ReadableStream({
+        pull(controller) {
+          if (!prefixSent) {
+            prefixSent = true;
+            controller.enqueue(new TextEncoder().encode('x'.repeat(1_000)));
+          } else {
+            controller.error(new Error('file-server stream failure'));
+          }
+        },
+      }),
+      {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': String(declaredLength),
+        },
+      },
+    );
+        const readSession = sessionHandle({
+            dir: 'read',
+            sessionId: 'sess_input',
+        });
+    const object = objectHandle({});
+
+    await expect(
+      gatewayFetch(`/sessions/${readSession}/objects/${object}`, {
+        headers: grantHeader(),
+      }).then(response => response.text()),
+    ).rejects.toThrow();
+
+    /* The gateway survives: a retry against a healthy upstream streams. */
+    upstreamResponse = new Response('file-body', { status: 200 });
+        const recovered = await gatewayFetch(
+            `/sessions/${readSession}/objects/${objectHandle({})}`,
+            {
+      headers: grantHeader(),
+            },
+        );
+    expect(recovered.status).toBe(200);
+    expect(await recovered.text()).toBe('file-body');
+  });
+
   test('downloads required dirkeep markers without allowing unrelated markers', async () => {
     upstreamResponse = new Response('marker-body', {
       status: 200,
