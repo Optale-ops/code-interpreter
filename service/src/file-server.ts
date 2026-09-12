@@ -16,6 +16,7 @@ import { internalServiceAuthEnabled, requireInternalServiceAuth } from './intern
 import { shutdownTelemetry, traceHttpRequest } from './telemetry';
 import logger from './fileServerLogger';
 import { env } from './config';
+import { streamObjectToResponse } from './file-server-download';
 import { redisKeepAliveOptions } from './redis-options';
 
 const { INSTANCE_ID } = env;
@@ -541,26 +542,14 @@ app.get('/sessions/:session_id/objects/:objectId', async (req, res) => {
     const dataStream = await minioClient.getObject(bucketName, objectName);
     fileDownloads.inc();
 
-    dataStream.on('data', (chunk) => {
-      res.write(chunk);
-    });
-
-    dataStream.on('end', () => {
-      res.end();
-    });
-
-    dataStream.on('error', (err) => {
+    /* Content-Length from stat + pipeline: a source failure destroys the
+     * socket, so a truncated body is never a clean 200 and the downloader's
+     * retry path can recover. */
+    try {
+      await streamObjectToResponse(dataStream, res, stat.size);
+    } catch (err) {
       logger.error('Error streaming file:', { error: err, session_id, objectId, bucketName });
-      // Only send error if headers haven't been sent yet
-      if (!res.headersSent) {
-        res.status(500).json({
-          error: 'Error streaming file',
-          details: err.message
-        });
-      } else {
-        res.end();
-      }
-    });
+    }
   } catch (err) {
     logger.error('Error downloading file:', { error: err, session_id, objectId, bucketName });
     return res.status(500).json({

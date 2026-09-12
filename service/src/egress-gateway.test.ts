@@ -4,8 +4,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import crypto from 'crypto';
 import fs from 'fs';
 import RedisMock from 'ioredis-mock';
-import { request as httpRequest, type IncomingMessage, type Server } from 'http';
-import type { AddressInfo } from 'net';
+import { createServer, request as httpRequest, type ClientRequest, type IncomingMessage, type Server } from 'http';
+import type { AddressInfo, Socket } from 'net';
 import path from 'path';
 import { Readable } from 'stream';
 import { env } from './config';
@@ -978,6 +978,86 @@ describe('egress gateway routes', () => {
         expect(
             header(upstreamCalls[0].init, INTERNAL_SERVICE_TOKEN_HEADER),
         ).toBe(INTERNAL_TOKEN);
+  });
+
+  test('aborts the client transfer when the upstream object body fails mid-stream', async () => {
+    const declaredLength = 200_000;
+    const prefix = Buffer.alloc(1_000, 0x78);
+    // Fail only after the client receives the prefix, never during fetch setup.
+    let healthy = false;
+    let releaseFailure: (() => void) | undefined;
+    let downloadRequest: ClientRequest | undefined;
+    const upstreamSockets = new Set<Socket>();
+    const upstream = createServer((_req, res) => {
+      if (!healthy) {
+        res.writeHead(200, {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': declaredLength,
+        });
+        res.write(prefix);
+        releaseFailure = () => res.destroy();
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('file-body');
+    });
+    upstream.on('connection', socket => {
+      upstreamSockets.add(socket);
+      socket.on('close', () => upstreamSockets.delete(socket));
+    });
+    await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve));
+    const upstreamPort = (upstream.address() as AddressInfo).port;
+        env.EGRESS_GATEWAY_FILE_SERVER_URL = `http://127.0.0.1:${upstreamPort}`;
+    globalThis.fetch = originalFetch;
+        const readSession = sessionHandle({
+            dir: 'read',
+            sessionId: 'sess_input',
+        });
+    const object = objectHandle({});
+
+    try {
+      const chunks: Buffer[] = [];
+      let received = 0;
+      let status = 0;
+      const aborted = await new Promise<boolean>((resolve, reject) => {
+        downloadRequest = httpRequest(
+          `${baseUrl}/sessions/${readSession}/objects/${object}`,
+          { headers: grantHeader() },
+          response => {
+            status = response.statusCode ?? 0;
+            response.on('data', chunk => {
+              chunks.push(Buffer.from(chunk));
+              received += chunk.length;
+              if (received >= prefix.length) releaseFailure?.();
+            });
+            response.once('aborted', () => resolve(true));
+            response.once('error', () => resolve(true));
+            response.once('end', () => resolve(false));
+          },
+        );
+        downloadRequest.once('error', reject);
+        downloadRequest.end();
+      });
+      expect(status).toBe(200);
+      expect(Buffer.concat(chunks)).toEqual(prefix);
+      expect(aborted).toBe(true);
+
+    /* The gateway survives: a retry against a healthy upstream streams. */
+    healthy = true;
+        const recovered = await gatewayFetch(
+            `/sessions/${readSession}/objects/${object}`,
+            {
+      headers: grantHeader(),
+            },
+        );
+    expect(recovered.status).toBe(200);
+    expect(await recovered.text()).toBe('file-body');
+    } finally {
+      releaseFailure?.();
+      downloadRequest?.destroy();
+      for (const socket of upstreamSockets) socket.destroy();
+      await new Promise(resolve => upstream.close(resolve));
+    }
   });
 
   test('downloads required dirkeep markers without allowing unrelated markers', async () => {

@@ -2003,9 +2003,19 @@ export class Job {
     const body = response.body;
     if (!body) throw new Error('Response body is null');
 
+    // Some supported fetch runtimes accept a clean short body. Check the declared
+    // length before publishing the temporary file.
+    const rawLength = response.headers.get('content-length');
+    const declaredLength =
+      rawLength != null && /^\d+$/.test(rawLength)
+        ? Number(rawLength)
+        : undefined;
+
     const hashStream = crypto.createHash('sha256');
+    let received = 0;
     const hashTransform = new Transform({
             transform(chunk, _enc, cb) {
+                received += chunk.length;
                 hashStream.update(chunk);
                 cb(null, chunk);
             },
@@ -2025,6 +2035,11 @@ export class Job {
       throwIfAborted(signal);
       await pipeline(reader, hashTransform, fileStream);
       throwIfAborted(signal);
+      if (declaredLength !== undefined && received !== declaredLength) {
+        throw new Error(
+          `Truncated download: received ${received} bytes but Content-Length declared ${declaredLength}`,
+        );
+      }
       await fsp.rename(tempPath, finalPath);
       await this.applySandboxFilePermissions(finalPath, false, identity);
     } finally {

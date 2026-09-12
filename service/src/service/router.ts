@@ -4,6 +4,7 @@ import { nanoid } from 'nanoid';
 import { Router } from 'express';
 import type { Response } from 'express';
 import type { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import type * as t from '../types';
 import { checkServiceStartUp, checkServiceShutDown } from '../lifecycle';
 import { sessionAuth } from '../middleware/auth';
@@ -328,11 +329,18 @@ router.get('/download/:session_id/:fileId', downloadLimiter, sessionAuth, async 
     });
 
     res.set(response.headers);
-    response.data.pipe(res);
+    /* pipeline, not .pipe: a mid-stream source failure destroys the client
+     * socket instead of ending the response cleanly. */
+    await pipeline(response.data, res);
   } catch (error) {
     const errorDetails = getAxiosErrorDetails(error);
     logger.error(`[${INSTANCE_ID}] Session ID: ${session_id} | File ID: ${fileId} | Error downloading file:`, errorDetails);
 
+    /* Mid-stream failure: pipeline already destroyed the socket; no error
+     * body can be written. */
+    if (res.headersSent || res.destroyed) {
+      return;
+    }
     return res.status(500).json({
       error: 'Error downloading file',
       details: (error as Error).message
