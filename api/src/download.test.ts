@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from
 import * as fsp from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
+import * as http from 'node:http';
+import type { AddressInfo, Socket } from 'node:net';
 import * as semver from 'semver';
 import { Job, SessionWorkspaceDirtyError, type TFile } from './job';
 import type { Runtime } from './runtime';
@@ -461,33 +463,51 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
 describe('downloadAndWriteFile / truncated transfer recovery', () => {
   /* Regression coverage for the transfer-completion defect: a mid-stream
    * failure used to arrive as a clean short 200, so retries never engaged.
-   * These pin the downloader's side of the fixed contract — declared
-   * Content-Length plus aborted socket on failure — over real HTTP. */
-
+   * These pin the downloader's side of the fixed contract over real HTTP. */
   const FULL = 'x'.repeat(128 * 1024);
+  const PREFIX_BYTES = 1_000;
 
   function objectPath(file: TFile): string {
     return `/sessions/${encodeURIComponent(file.storage_session_id!)}/objects/${encodeURIComponent(file.id!)}`;
   }
 
-  function truncatedResponse(declaredLength: number, prefixBytes: number, contentDisposition: string): Response {
-    /* True mid-body failure: the prefix is flushed first (the client
-     * receives `prefixBytes` with status 200), then the stream errors and
-     * the connection drops before the declared length arrives. A
-     * synchronous error would discard the queued prefix (ResetQueue). */
-    const stream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode(FULL.slice(0, prefixBytes)));
-        setTimeout(() => controller.error(new Error('file-server stream failure')), 25);
-      },
+  // Raw HTTP retains Content-Length on interrupted streams. Bun.serve drops
+  // the header for the streamed-response fixture on Bun 1.3.14.
+  async function withRawFileServer(
+    state: { attempts: number },
+    respond: (res: http.ServerResponse, attempt: number) => void,
+    fn: () => Promise<void>,
+  ): Promise<void> {
+    const sockets = new Set<Socket>();
+    const raw = http.createServer((_req, res) => {
+      state.attempts++;
+      respond(res, state.attempts);
     });
-    return new Response(stream, {
-      status: 200,
-      headers: {
-        'content-length': String(declaredLength),
-        'content-disposition': contentDisposition,
-      },
+    raw.on('connection', socket => {
+      sockets.add(socket);
+      socket.on('close', () => sockets.delete(socket));
     });
+    await new Promise<void>(resolve => raw.listen(0, '127.0.0.1', resolve));
+    const bunListenerUrl = `http://127.0.0.1:${serverPort}`;
+    (config as { file_server_url: string }).file_server_url =
+      `http://127.0.0.1:${(raw.address() as AddressInfo).port}`;
+    try {
+      await fn();
+    } finally {
+      (config as { file_server_url: string }).file_server_url = bunListenerUrl;
+      for (const socket of sockets) socket.destroy();
+      await new Promise(resolve => raw.close(resolve));
+    }
+  }
+
+  function truncatedRawResponse(res: http.ServerResponse, disposition: string): void {
+    /* Post-fix failure shape: declared Content-Length, prefix flushed,
+     * then the connection drops before the rest arrives. */
+    res.writeHead(200, {
+      'content-disposition': disposition,
+      'content-length': FULL.length,
+    });
+    res.write(FULL.slice(0, PREFIX_BYTES), () => res.destroy());
   }
 
   it('recovers the complete bytes on retry within a single download call', async () => {
@@ -497,25 +517,26 @@ describe('downloadAndWriteFile / truncated transfer recovery', () => {
       name: 'flaky.txt',
     };
     const disposition = "attachment; filename*=UTF-8''flaky.txt";
-    let attempts = 0;
-    routes.set(objectPath(file), {
-      status: 200,
-      respond: () => {
-        attempts++;
-        if (attempts === 1) return truncatedResponse(FULL.length, 1_000, disposition);
-        return new Response(FULL, { status: 200, headers: { 'content-disposition': disposition } });
-      },
-    });
+    const state = { attempts: 0 };
 
     const job = makeJob([file]);
     asInternals(job).submissionDir = tmpDir;
 
-    const writtenName = await job.downloadAndWriteFile(file, 3, 1);
-
-    /* No manual regenerate: one invocation retries and lands full bytes. */
-    expect(writtenName).toBe('flaky.txt');
-    expect(attempts).toBe(2);
-    expect(await fsp.readFile(path.join(tmpDir, 'flaky.txt'), 'utf8')).toBe(FULL);
+    await withRawFileServer(
+      state,
+      (res, attempt) => {
+        if (attempt === 1) return truncatedRawResponse(res, disposition);
+        res.writeHead(200, { 'content-disposition': disposition, 'content-length': FULL.length });
+        res.end(FULL);
+      },
+      async () => {
+        const writtenName = await job.downloadAndWriteFile(file, 3, 1);
+        /* No manual regenerate: one invocation retries, lands full bytes. */
+        expect(writtenName).toBe('flaky.txt');
+        expect(state.attempts).toBe(2);
+        expect(await fsp.readFile(path.join(tmpDir, 'flaky.txt'), 'utf8')).toBe(FULL);
+      },
+    );
   });
 
   it('rejects on exhausted truncated attempts without publishing a partial or clobbering the prior file', async () => {
@@ -525,10 +546,7 @@ describe('downloadAndWriteFile / truncated transfer recovery', () => {
       name: 'prior.txt',
     };
     const disposition = "attachment; filename*=UTF-8''prior.txt";
-    routes.set(objectPath(file), {
-      status: 200,
-      respond: () => truncatedResponse(FULL.length, 1_000, disposition),
-    });
+    const state = { attempts: 0 };
     /* A prior complete copy must survive: streamToDisk only renames the
      * temp file over it after the full body arrived. */
     await fsp.writeFile(path.join(tmpDir, 'prior.txt'), 'prior complete bytes');
@@ -536,8 +554,15 @@ describe('downloadAndWriteFile / truncated transfer recovery', () => {
     const job = makeJob([file]);
     asInternals(job).submissionDir = tmpDir;
 
-    await expect(job.downloadAndWriteFile(file, 2, 1)).rejects.toThrow();
+    await withRawFileServer(
+      state,
+      res => truncatedRawResponse(res, disposition),
+      async () => {
+        await expect(job.downloadAndWriteFile(file, 2, 1)).rejects.toThrow();
+      },
+    );
 
+    expect(state.attempts).toBe(2);
     expect(await fsp.readFile(path.join(tmpDir, 'prior.txt'), 'utf8')).toBe('prior complete bytes');
     const leftovers = (await fsp.readdir(tmpDir)).filter(name => name.startsWith('.tmp-'));
     expect(leftovers).toEqual([]);
@@ -562,5 +587,67 @@ describe('downloadAndWriteFile / truncated transfer recovery', () => {
 
     expect(writtenName).toBe('empty.txt');
     expect((await fsp.stat(path.join(tmpDir, 'empty.txt'))).size).toBe(0);
+  });
+
+  it('downloads a complete body when the server omits Content-Length', async () => {
+    const file: TFile = {
+      id: 'nolength-id',
+      storage_session_id: 'prev-session',
+      name: 'nolength.txt',
+    };
+    /* Bun.serve transmits streamed bodies without Content-Length (probed),
+     * exercising the no-declared-length path: no guard, plain download. */
+    routes.set(objectPath(file), {
+      status: 200,
+      respond: () => {
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(FULL));
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { 'content-disposition': "attachment; filename*=UTF-8''nolength.txt" },
+        });
+      },
+    });
+
+    const job = makeJob([file]);
+    asInternals(job).submissionDir = tmpDir;
+
+    const writtenName = await job.downloadAndWriteFile(file);
+
+    expect(writtenName).toBe('nolength.txt');
+    expect(await fsp.readFile(path.join(tmpDir, 'nolength.txt'), 'utf8')).toBe(FULL);
+  });
+
+  it('rejects a clean short response without replacing the prior complete file', async () => {
+    const file: TFile = {
+      id: 'short-id',
+      storage_session_id: 'prev-session',
+      name: 'guard.txt',
+    };
+    const job = makeJob([file]);
+    asInternals(job).submissionDir = tmpDir;
+    const finalPath = path.join(tmpDir, 'guard.txt');
+    await fsp.writeFile(finalPath, 'prior complete bytes');
+    const originalFetch = globalThis.fetch;
+    // Simulate a transport that reports clean EOF without enforcing its header.
+    globalThis.fetch = (async () =>
+      new Response('short', {
+        status: 200,
+        headers: {
+          'content-length': '1000',
+          'content-disposition': "attachment; filename*=UTF-8''guard.txt",
+        },
+      })) as typeof fetch;
+    try {
+      await expect(job.downloadAndWriteFile(file, 1, 1)).rejects.toThrow(/Content-Length/);
+      expect(await fsp.readFile(finalPath, 'utf8')).toBe('prior complete bytes');
+      expect((await fsp.readdir(tmpDir)).filter(name => name.startsWith('.tmp-'))).toEqual([]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
