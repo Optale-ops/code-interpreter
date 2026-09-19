@@ -188,9 +188,9 @@ printf 'CAPTURED=%s\\n' "$captured"
     expect(completed.stdout).toContain('CAPTURED=');
   });
 
-  test('propagates a cached child tool error without running dependent code', () => {
+  test('propagates a cached child tool error under explicit errexit', () => {
     const userCode = `
-bash -c 'result=$(get_weather "{}"); echo CHILD_AFTER_ERROR'
+bash -e -c 'result=$(get_weather "{}"); echo CHILD_AFTER_ERROR'
 echo PARENT_AFTER_ERROR
 `;
     const first = extractPendingFromStdout(runBash(assemble(userCode)).stdout, executionId);
@@ -205,12 +205,72 @@ echo PARENT_AFTER_ERROR
           call_site: call.call_site,
         },
       },
+      bashEnv: 'set -e',
     });
     expect(run.exitCode).toBe(1);
-    expect(run.stderr).toContain('station unavailable');
+    expect(run.stderr.match(/station unavailable/g)).toHaveLength(1);
     expect(run.stdout).not.toContain('CHILD_AFTER_ERROR');
     expect(run.stdout).not.toContain('PARENT_AFTER_ERROR');
     expect(extractPendingFromStdout(run.stdout, executionId).pending).toBeNull();
+  });
+
+  test('lets a child Bash -e script catch a cached tool error and continue', () => {
+    const userCode = `
+cat > "\${0%/*}/child-catchable.sh" <<'CHILD'
+first=$(calculate '{"expression":"2+3"}')
+printf 'FIRST=%s\\n' "$first"
+set +e
+second=$(get_weather '{"city":"Paris"}' 2> "\${0%/*}/child-error.txt")
+status=$?
+set -e
+printf 'SECOND_STATUS=%s\\n' "$status"
+printf 'SECOND_ERR=%s\\n' "$(cat "\${0%/*}/child-error.txt")"
+printf 'CHILD_DONE\\n'
+CHILD
+bash -e "\${0%/*}/child-catchable.sh"
+printf 'PARENT_DONE\\n'
+`;
+    const firstRun = runBash(assemble(userCode));
+    const first = extractPendingFromStdout(firstRun.stdout, executionId);
+    expect(firstRun.exitCode).toBe(0);
+    expect(first.pending).toHaveLength(1);
+    expect(first.pending?.[0]?.tool_name).toBe('calculate');
+
+    const firstCall = first.pending![0];
+    const history: Record<string, unknown> = {
+      [firstCall.call_id]: {
+        result: 5,
+        tool_name: firstCall.tool_name,
+        input_hash: firstCall.input_hash,
+        call_site: firstCall.call_site,
+      },
+    };
+    const secondRun = runBash(assemble(userCode), { history });
+    const second = extractPendingFromStdout(secondRun.stdout, executionId);
+    expect(secondRun.exitCode).toBe(0);
+    expect(second.stdout).toContain('FIRST=5');
+    expect(second.pending).toHaveLength(1);
+    expect(second.pending?.[0]?.tool_name).toBe('get_weather');
+
+    const secondCall = second.pending![0];
+    history[secondCall.call_id] = {
+      is_error: true,
+      error_message: 'station unavailable',
+      tool_name: secondCall.tool_name,
+      input_hash: secondCall.input_hash,
+      call_site: secondCall.call_site,
+    };
+    const completedRun = runBash(assemble(userCode), { history });
+    const completed = extractPendingFromStdout(completedRun.stdout, executionId);
+    expect(completedRun.exitCode).toBe(0);
+    expect(completed.pending).toBeNull();
+    expect(completed.stdout).toContain('FIRST=5');
+    expect(completed.stdout).toContain('SECOND_STATUS=1');
+    expect(completed.stdout).toContain('SECOND_ERR=station unavailable');
+    expect(completed.stdout.match(/station unavailable/g)).toHaveLength(1);
+    expect(completed.stdout).toContain('CHILD_DONE');
+    expect(completed.stdout).toContain('PARENT_DONE');
+    expect(completedRun.stderr).not.toContain('station unavailable');
   });
 
   test('preserves the original Bash startup environment and ordinary child exit status', () => {

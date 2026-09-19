@@ -151,6 +151,7 @@ echo "Count: $count"
 
 {
   const user = `
+set -e
 result=$(get_weather '{"city":"Nowhere"}')
 echo "UNREACHABLE: $result"
 `;
