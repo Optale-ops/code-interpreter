@@ -472,8 +472,8 @@ _ptc_print_history_entry() {
     if [ "$_ptc_is_err" = "true" ]; then
         local _ptc_msg
         _ptc_msg=$(printf '%s' "$_ptc_entry" | jq -r '.error_message // "tool execution failed"' 2>/dev/null)
-        _ptc_write_error "$_ptc_msg"
-        exit 1
+        printf '%s\\n' "$_ptc_msg" >&2
+        return 1
     fi
     local _ptc_result
     _ptc_result=$(printf '%s' "$_ptc_entry" | jq -c 'if type == "object" and has("result") then .result else . end' 2>/dev/null || printf 'null')
