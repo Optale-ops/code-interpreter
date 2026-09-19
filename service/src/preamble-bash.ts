@@ -50,6 +50,10 @@ const BASH_RESERVED = new Set([
   'exec', 'jobs', 'bg', 'fg', 'set', 'let', 'test', 'true', 'false',
 ]);
 
+/** The same internal helpers are protected and inherited in every Bash process. */
+const BASH_REPLAY_FUNCTIONS =
+  'trap _ptc_maybe_emit_pending _ptc_exit_handler _ptc_cleanup_tempfiles _ptc_acquire_lock _ptc_release_lock _ptc_write_error _ptc_sha256 _ptc_hash_input _ptc_contains_command_substitution _ptc_record_tool_job_pid _ptc_record_matching_background_tool_jobs _ptc_record_launched_tool_jobs _ptc_prune_finished_tool_jobs _ptc_wait_for_tracked_tool_jobs _ptc_note_bare_tool_command _ptc_note_subshell_tool_command _ptc_mark_counter_at_least _ptc_next_call_id _ptc_history_matches_by_signature _ptc_first_unconsumed_history_match _ptc_print_history_entry _ptc_history_entry_matches_current_call _ptc_call_tool _ptc_is_bare_tool_command _ptc_contains_tool_command _ptc_should_defer_pending_emit';
+
 function normalizeBashFunctionName(name: string): string {
   let normalized = name.replace(/[-\s.]/g, '_').replace(/[^a-zA-Z0-9_]/g, '');
   if (/^[0-9]/.test(normalized)) normalized = '_' + normalized;
@@ -603,12 +607,12 @@ if [ -n "$_PTC_ORIGINAL_BASH_ENV" ] && [ -r "$_PTC_ORIGINAL_BASH_ENV" ]; then
     . "$_PTC_ORIGINAL_BASH_ENV"
 fi
 _PTC_USER_SUBSHELL=0
-readonly -f trap $(builtin compgen -A function _ptc_)
+readonly -f ${BASH_REPLAY_FUNCTIONS}
 builtin trap _ptc_maybe_emit_pending DEBUG
 builtin trap _ptc_exit_handler EXIT
 PTC_CHILD_ENV
 export \${!_PTC_@}
-export -f trap ${tools.map(tool => normalizeBashFunctionName(tool.name)).join(' ')} $(builtin compgen -A function _ptc_)
+export -f ${BASH_REPLAY_FUNCTIONS} ${tools.map(tool => normalizeBashFunctionName(tool.name)).join(' ')}
 export BASH_ENV="$_PTC_CHILD_ENV_FILE"
 
 # ============================================================================
@@ -617,7 +621,7 @@ export BASH_ENV="$_PTC_CHILD_ENV_FILE"
 # Prevent user code from redefining or unsetting the PTC infrastructure.
 # Done at preamble end so every function referenced below already exists.
 # \`|| true\` keeps the preamble robust if a future refactor renames one.
-readonly -f trap _ptc_maybe_emit_pending _ptc_exit_handler _ptc_cleanup_tempfiles _ptc_acquire_lock _ptc_release_lock _ptc_write_error _ptc_sha256 _ptc_hash_input _ptc_contains_command_substitution _ptc_record_tool_job_pid _ptc_record_matching_background_tool_jobs _ptc_record_launched_tool_jobs _ptc_prune_finished_tool_jobs _ptc_wait_for_tracked_tool_jobs _ptc_note_bare_tool_command _ptc_note_subshell_tool_command _ptc_mark_counter_at_least _ptc_next_call_id _ptc_history_matches_by_signature _ptc_first_unconsumed_history_match _ptc_print_history_entry _ptc_history_entry_matches_current_call _ptc_call_tool _ptc_is_bare_tool_command _ptc_contains_tool_command _ptc_should_defer_pending_emit 2>/dev/null || true
+readonly -f ${BASH_REPLAY_FUNCTIONS} 2>/dev/null || true
 
 # ============================================================================
 # USER CODE EXECUTES INSIDE A SUBSHELL
