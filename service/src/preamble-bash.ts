@@ -108,6 +108,10 @@ export function generateBashReplayPreamble(config: BashReplayPreambleConfig): st
 _PTC_EXECUTION_ID="${executionId}"
 _PTC_SENTINEL_START="${scopedStart}"
 _PTC_SENTINEL_END="${scopedEnd}"
+_PTC_ROOT_SHELL_PID="\${BASHPID:-$$}"
+_PTC_USER_SUBSHELL=1
+_PTC_ORIGINAL_BASH_ENV="\${BASH_ENV:-}"
+_PTC_CHILD_ENV_FILE="$(mktemp -t _ptc_child_env.XXXXXX 2>/dev/null || mktemp /tmp/_ptc_child_env.XXXXXX)"
 _PTC_HISTORY_PATH="\${PTC_HISTORY_PATH:-${PTC_HISTORY_SANDBOX_PATH}}"
 _PTC_PENDING_FILE="$(mktemp -t _ptc_pending.XXXXXX 2>/dev/null || mktemp /tmp/_ptc_pending.XXXXXX)"
 _PTC_ERROR_FILE="$(mktemp -t _ptc_error.XXXXXX 2>/dev/null || mktemp /tmp/_ptc_error.XXXXXX)"
@@ -134,6 +138,8 @@ printf '0' > "$_PTC_COUNTER_FILE"
 : > "$_PTC_SUPPRESS_SUBSHELL_TOOL_CLEAR_FILE"
 
 _ptc_cleanup_tempfiles() {
+    [ "\${BASHPID:-$$}" = "$_PTC_ROOT_SHELL_PID" ] || return 0
+    rm -f "$_PTC_CHILD_ENV_FILE" 2>/dev/null
     rm -f "$_PTC_PENDING_FILE" "$_PTC_ERROR_FILE" "$_PTC_CONSUMED_FILE" "$_PTC_SAW_BARE_TOOL_FILE" "$_PTC_PRE_TOOL_JOBS_FILE" "$_PTC_PRE_TOOL_JOBS_READY_FILE" "$_PTC_TOOL_JOBS_FILE" "$_PTC_WAIT_RAN_FILE" "$_PTC_SUPPRESS_SUBSHELL_TOOL_FILE" "$_PTC_SUPPRESS_SUBSHELL_TOOL_CLEAR_FILE" "$_PTC_COUNTER_FILE" 2>/dev/null
     rmdir "$_PTC_LOCK_DIR" 2>/dev/null || true
 }
@@ -283,13 +289,13 @@ _ptc_maybe_emit_pending() {
     # Command substitutions and background jobs run in deeper subshells.
     # They may record pending calls; the main user-code subshell exits
     # before side effects, and the parent emits the sentinel on stdout.
-    if [ "\${BASH_SUBSHELL:-0}" -gt 1 ]; then
+    if [ "\${BASH_SUBSHELL:-0}" -gt "$_PTC_USER_SUBSHELL" ]; then
         if declare -F _ptc_is_bare_tool_command >/dev/null 2>&1 && _ptc_is_bare_tool_command "$BASH_COMMAND"; then
             _ptc_note_subshell_tool_command
         fi
         return 0
     fi
-    if [ "\${BASH_SUBSHELL:-0}" -eq 1 ]; then
+    if [ "\${BASH_SUBSHELL:-0}" -eq "$_PTC_USER_SUBSHELL" ]; then
         if [ -s "$_PTC_SUPPRESS_SUBSHELL_TOOL_CLEAR_FILE" ]; then
             : > "$_PTC_SUPPRESS_SUBSHELL_TOOL_FILE"
             : > "$_PTC_SUPPRESS_SUBSHELL_TOOL_CLEAR_FILE"
@@ -330,7 +336,7 @@ _ptc_maybe_emit_pending() {
         trap - DEBUG EXIT
         exit 1
     fi
-    if [ "\${BASH_SUBSHELL:-0}" -eq 1 ]; then
+    if [ "\${BASH_SUBSHELL:-0}" -eq "$_PTC_USER_SUBSHELL" ]; then
         trap - DEBUG EXIT
         exit 0
     fi
@@ -344,7 +350,7 @@ _ptc_maybe_emit_pending() {
 
 _ptc_exit_handler() {
     _ptc_maybe_emit_pending
-    if [ "\${BASH_SUBSHELL:-0}" -gt 1 ]; then
+    if [ "\${BASH_SUBSHELL:-0}" -gt "$_PTC_USER_SUBSHELL" ]; then
         return 0
     fi
     if declare -F _ptc_should_defer_pending_emit >/dev/null 2>&1 && _ptc_should_defer_pending_emit "$BASH_COMMAND"; then
@@ -587,6 +593,25 @@ _ptc_call_tool() {
   preamble += generateBashPendingDeferHelper(tools);
 
   preamble += `# ============================================================================
+# CHILD BASH RUNTIME
+# ============================================================================
+# A new Bash process resets BASH_SUBSHELL and does not inherit unexported
+# functions, variables, or traps. Share the existing replay files and initialise
+# its traps without starting a second replay owner.
+builtin command cat > "$_PTC_CHILD_ENV_FILE" <<'PTC_CHILD_ENV'
+if [ -n "$_PTC_ORIGINAL_BASH_ENV" ] && [ -r "$_PTC_ORIGINAL_BASH_ENV" ]; then
+    . "$_PTC_ORIGINAL_BASH_ENV"
+fi
+_PTC_USER_SUBSHELL=0
+readonly -f trap $(builtin compgen -A function _ptc_)
+builtin trap _ptc_maybe_emit_pending DEBUG
+builtin trap _ptc_exit_handler EXIT
+PTC_CHILD_ENV
+export \${!_PTC_@}
+export -f trap ${tools.map(tool => normalizeBashFunctionName(tool.name)).join(' ')} $(builtin compgen -A function _ptc_)
+export BASH_ENV="$_PTC_CHILD_ENV_FILE"
+
+# ============================================================================
 # LOCK INTERNAL FUNCTIONS
 # ============================================================================
 # Prevent user code from redefining or unsetting the PTC infrastructure.
@@ -661,7 +686,7 @@ function generateBashToolStub(tool: LCTool): string {
   return `${nameComment}${desc ? desc + '\n' : ''}${fnName}() {
     local _default_input='{}'
     local _input="\${1:-\$_default_input}"
-    if [ "\${BASH_SUBSHELL:-0}" -gt 1 ]; then
+    if [ "\${BASH_SUBSHELL:-0}" -gt "$_PTC_USER_SUBSHELL" ]; then
         _ptc_note_subshell_tool_command
     fi
     _ptc_call_tool "${escapedToolName}" "\$_input"
@@ -696,7 +721,7 @@ _ptc_contains_tool_command() {
 
 _ptc_should_defer_pending_emit() {
     local _ptc_cmd="$1"
-    if [ "\${BASH_SUBSHELL:-0}" -ne 1 ]; then
+    if [ "\${BASH_SUBSHELL:-0}" -ne "$_PTC_USER_SUBSHELL" ]; then
         return 1
     fi
     if [ -z "$(jobs -p 2>/dev/null)" ]; then

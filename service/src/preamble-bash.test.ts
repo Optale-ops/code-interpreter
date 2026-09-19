@@ -16,6 +16,8 @@ interface BashRunResult {
 interface BashRunOptions {
   history?: Record<string, unknown>;
   timeoutMs?: number;
+  bashEnv?: string;
+  env?: Record<string, string>;
 }
 
 const executionId = 'exec_bash_unit';
@@ -63,14 +65,24 @@ function assemble(userCode: string, toolSet: LCTool[] = tools): string {
 function runBash(script: string, options: number | BashRunOptions = {}): BashRunResult {
   const timeoutMs = typeof options === 'number' ? options : options.timeoutMs ?? 3000;
   const history = typeof options === 'number' ? {} : options.history ?? {};
+  const bashEnv = typeof options === 'number' ? undefined : options.bashEnv;
   const dir = mkdtempSync(join(tmpdir(), 'ptc-bash-unit-'));
   const file = join(dir, 'main.sh');
   const historyPath = join(dir, 'history.json');
   writeFileSync(file, script, { mode: 0o755 });
   writeFileSync(historyPath, JSON.stringify(history));
+  const bashEnvPath = join(dir, 'original-env.sh');
+  if (bashEnv != null) {
+    writeFileSync(bashEnvPath, bashEnv);
+  }
   try {
     const stdout = execFileSync('bash', [file], {
-      env: { ...process.env, PTC_HISTORY_PATH: historyPath },
+      env: {
+        ...process.env,
+        ...(typeof options === 'number' ? undefined : options.env),
+        PTC_HISTORY_PATH: historyPath,
+        ...(bashEnv != null ? { BASH_ENV: bashEnvPath } : {}),
+      },
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: timeoutMs,
@@ -100,6 +112,133 @@ function pendingNames(stdout: string): string[] {
 }
 
 describe('generateBashReplayPreamble - command substitution pending emission', () => {
+  test('replays dependent tool calls from a generated child Bash script under errexit', () => {
+    const userCode = `
+cat > "\${0%/*}/child.sh" <<'CHILD'
+first=$(calculate '{"expression":"2+3"}')
+second=$(calculate "{\\"expression\\":\\"$first+1\\"}")
+printf 'CHILD_RESULT=%s\\n' "$second"
+CHILD
+bash -e "\${0%/*}/child.sh"
+echo "PARENT_DONE"
+`;
+    const firstRun = runBash(assemble(userCode), { bashEnv: 'set -e' });
+    const first = extractPendingFromStdout(firstRun.stdout, executionId);
+    expect(first.pending?.map(call => call.input)).toEqual([{ expression: '2+3' }]);
+    expect(first.stdout).not.toContain('CHILD_RESULT');
+    expect(first.stdout).not.toContain('PARENT_DONE');
+    const history: Record<string, unknown> = {};
+    const firstCall = first.pending![0];
+    history[firstCall.call_id] = {
+      result: 5,
+      tool_name: firstCall.tool_name,
+      input_hash: firstCall.input_hash,
+      call_site: firstCall.call_site,
+    };
+    const secondRun = runBash(assemble(userCode), { history, bashEnv: 'set -e' });
+    const second = extractPendingFromStdout(secondRun.stdout, executionId);
+    expect(second.pending?.map(call => call.input)).toEqual([{ expression: '5+1' }]);
+    expect(second.stdout).not.toContain('CHILD_RESULT');
+    const secondCall = second.pending![0];
+    history[secondCall.call_id] = {
+      result: 6,
+      tool_name: secondCall.tool_name,
+      input_hash: secondCall.input_hash,
+      call_site: secondCall.call_site,
+    };
+    const completedRun = runBash(assemble(userCode), { history, bashEnv: 'set -e' });
+    const completed = extractPendingFromStdout(completedRun.stdout, executionId);
+    expect(completedRun.exitCode).toBe(0);
+    expect(completed.pending).toBeNull();
+    expect(completed.stdout).toContain('CHILD_RESULT=6');
+    expect(completed.stdout).toContain('PARENT_DONE');
+  });
+
+  test('emits one parent sentinel for parallel calls in a captured child shell', () => {
+    const userCode = `
+cat > "\${0%/*}/child-parallel.sh" <<'CHILD'
+get_weather '{"city":"Oslo"}' &
+calculate '{"expression":"2+3"}' &
+wait
+echo CHILD_DONE
+CHILD
+captured=$(bash "\${0%/*}/child-parallel.sh")
+printf 'CAPTURED=%s\\n' "$captured"
+`;
+    const firstRun = runBash(assemble(userCode));
+    const first = extractPendingFromStdout(firstRun.stdout, executionId);
+    expect(pendingNames(firstRun.stdout)).toEqual(['calculate', 'get_weather']);
+    expect(first.stdout).not.toContain('CHILD_DONE');
+    expect(first.stdout).not.toContain('CAPTURED=');
+    const history = Object.fromEntries(first.pending!.map(call => [
+      call.call_id,
+      {
+        result: call.tool_name === 'calculate' ? 5 : { temperature: 13 },
+        tool_name: call.tool_name,
+        input_hash: call.input_hash,
+        call_site: call.call_site,
+      },
+    ]));
+    const completedRun = runBash(assemble(userCode), { history });
+    const completed = extractPendingFromStdout(completedRun.stdout, executionId);
+    expect(completedRun.exitCode).toBe(0);
+    expect(completed.pending).toBeNull();
+    expect(completed.stdout).toContain('CHILD_DONE');
+    expect(completed.stdout).toContain('"temperature":13');
+    expect(completed.stdout).toContain('CAPTURED=');
+  });
+
+  test('propagates a cached child tool error without running dependent code', () => {
+    const userCode = `
+bash -c 'result=$(get_weather "{}"); echo CHILD_AFTER_ERROR'
+echo PARENT_AFTER_ERROR
+`;
+    const first = extractPendingFromStdout(runBash(assemble(userCode)).stdout, executionId);
+    const call = first.pending![0];
+    const run = runBash(assemble(userCode), {
+      history: {
+        [call.call_id]: {
+          is_error: true,
+          error_message: 'station unavailable',
+          tool_name: call.tool_name,
+          input_hash: call.input_hash,
+          call_site: call.call_site,
+        },
+      },
+    });
+    expect(run.exitCode).toBe(1);
+    expect(run.stderr).toContain('station unavailable');
+    expect(run.stdout).not.toContain('CHILD_AFTER_ERROR');
+    expect(run.stdout).not.toContain('PARENT_AFTER_ERROR');
+    expect(extractPendingFromStdout(run.stdout, executionId).pending).toBeNull();
+  });
+
+  test('preserves the original Bash startup environment and ordinary child exit status', () => {
+    const run = runBash(assemble(`
+bash -c 'printf "ENV_COUNT=%s\\n" "$ENV_COUNT"; exit 7'
+`), {
+      bashEnv: 'export ENV_COUNT=$((${ENV_COUNT:-0} + 1))',
+      env: { ENV_COUNT: '0' },
+    });
+    expect(run.stdout).toContain('ENV_COUNT=2');
+    expect(run.exitCode).toBe(7);
+    expect(extractPendingFromStdout(run.stdout, executionId).pending).toBeNull();
+  });
+
+  test('does not invoke tools that share bootstrap command names during initialization', () => {
+    const run = runBash(assemble(
+      `bash -c 'echo CHILD_DONE'`,
+      ['cat', 'compgen', 'command'].map(name => ({
+        name,
+        description: 'A registered tool, not a shell initialization command.',
+        parameters: { type: 'object', properties: {} },
+      })),
+    ));
+    expect(run.exitCode).toBe(0);
+    expect(run.stdout).toContain('CHILD_DONE');
+    expect(extractPendingFromStdout(run.stdout, executionId).pending).toBeNull();
+  });
+
   test('emits ClickHouse-style object input with SQL quotes from double-quoted JSON', () => {
     const run = runBash(assemble(`
 SVC="45886e06-932b-4cff-bb49-3f7281d80717"
