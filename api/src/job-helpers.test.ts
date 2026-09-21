@@ -200,6 +200,11 @@ describe('mimeTypeFor', () => {
   it('returns the registered MIME for text extensions', () => {
     expect(mimeTypeFor('notes.txt')).toBe('text/plain');
     expect(mimeTypeFor('README.md')).toBe('text/markdown');
+    /* Collected `.markdown` outputs upload with this Content-Type, which the
+     * file-server stores and serves back; octet-stream would make Console
+     * treat an ordinary note as a binary download. */
+    expect(mimeTypeFor('notes.markdown')).toBe('text/markdown');
+    expect(mimeTypeFor('NOTES.MARKDOWN')).toBe('text/markdown');
     expect(mimeTypeFor('data.csv')).toBe('text/csv');
     expect(mimeTypeFor('page.html')).toBe('text/html');
     expect(mimeTypeFor('config.json')).toBe('application/json');

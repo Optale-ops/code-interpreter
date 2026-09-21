@@ -329,6 +329,7 @@ const MIME_TYPE_BY_EXTENSION: ReadonlyMap<string, string> = new Map([
   ['.txt', 'text/plain'],
   ['.log', 'text/plain'],
   ['.md', 'text/markdown'],
+  ['.markdown', 'text/markdown'],
   ['.rst', 'text/x-rst'],
   ['.csv', 'text/csv'],
   ['.tsv', 'text/tab-separated-values'],
