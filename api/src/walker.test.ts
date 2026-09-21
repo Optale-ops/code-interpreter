@@ -574,6 +574,40 @@ describe('walkDir / regular file handling', () => {
     expect(names).toEqual(['keep.py']);
   });
 
+  it('collects .markdown outputs alongside .md so imported notes survive the turn', async () => {
+    await fsp.writeFile(path.join(tmpDir, 'notes.md'), '# short');
+    await fsp.writeFile(path.join(tmpDir, 'notes.markdown'), '# long');
+    await fsp.writeFile(path.join(tmpDir, 'README.MARKDOWN'), '# shouty');
+
+    const job = makeJob();
+    const internals = asInternals(job);
+    internals.submissionDir = tmpDir;
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    expect(internals.generatedFiles.map(f => f.name).sort()).toEqual([
+      'README.MARKDOWN',
+      'notes.markdown',
+      'notes.md',
+    ].sort());
+    expect(internals.generatedFiles.every(f => f.id.length > 0)).toBe(true);
+  });
+
+  it('collects the .bin artifact that the export fallback names', async () => {
+    await fsp.writeFile(path.join(tmpDir, 'librechat-export-abc.bin'), 'bytes');
+    await fsp.writeFile(path.join(tmpDir, 'skip.exe'), 'binary');
+
+    const job = makeJob();
+    const internals = asInternals(job);
+    internals.submissionDir = tmpDir;
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    expect(internals.generatedFiles.map(f => f.name)).toEqual([
+      'librechat-export-abc.bin',
+    ]);
+  });
+
   it('keeps supported extensionless output basenames', async () => {
     await fsp.writeFile(path.join(tmpDir, 'Dockerfile'), 'FROM scratch');
     await fsp.mkdir(path.join(tmpDir, 'ci'));

@@ -922,6 +922,7 @@ const SUPPORTED_EXTENSIONS = new Set([
     '.adoc',
     '.asciidoc',
     '.md',
+    '.markdown',
     '.rst',
     '.tex',
     '.txt',
@@ -994,6 +995,10 @@ const SUPPORTED_EXTENSIONS = new Set([
     '.editorconfig',
     '.nomad',
     '.bat',
+    /* Console's exportWorkspaceFile falls back to a `.bin` artifact name
+     * whenever the source extension is unusual or absent, so the collector
+     * must register it or every such export loses its bytes. */
+    '.bin',
     '.cmd',
     '.deb',
     '.log',
