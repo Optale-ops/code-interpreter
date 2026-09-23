@@ -146,6 +146,10 @@ RUN chmod 0444 \
     && ln -s /usr/local/lib/sandbox-fetch/package-bin/pip /usr/local/lib/sandbox-fetch/package-bin/pip3 \
     && ln -s /usr/local/lib/sandbox-fetch/sandbox_fetch.py /usr/local/bin/sandbox-fetch \
     && chmod 0555 /usr/local/bin/sandbox-fetch
+# The Optale agent CLI launcher lives in the read-only /usr so the workspace can stay
+# noexec: it hands off to whatever CLI the console installed under /mnt/data.
+COPY docker/optale-agent /usr/local/bin/optale-agent
+RUN chmod 0555 /usr/local/bin/optale-agent
 RUN mkdir -p /run/codeapi && touch /run/codeapi/egress-grant && chmod 0000 /run/codeapi/egress-grant
 
 RUN bun run build
