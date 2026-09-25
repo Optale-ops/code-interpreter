@@ -1,0 +1,8 @@
+#!/bin/sh
+# Static launcher for the Optale agent CLI that the console installs into the
+# session workspace. The workspace (/mnt/data) is mounted noexec on purpose, so
+# nothing written there can be started as a program; Node reading a script is
+# allowed, and that is all this does. The launcher itself never changes with a
+# console release: the console decides which CLI version lives at the fixed path.
+# Absolute interpreter path: no PATH lookup that a workspace could influence.
+exec /usr/local/bin/node /mnt/data/optale-agent/package/dist/cli.js "$@"

@@ -407,6 +407,23 @@ test_escape_attempt() {
     fi
 }
 
+test_agent_cli_launcher() {
+    log_info "Testing the Optale agent CLI launcher with a noexec workspace..."
+    # The console installs the CLI under /mnt/data; the launcher in /usr must start it
+    # from any language and subprocess, while a program written to /mnt/data must not run.
+    result=$(execute_sandbox '{"language":"python","version":"3.14.4","files":[{"content":"import os, subprocess\nos.makedirs(\"/mnt/data/optale-agent/package/dist\", exist_ok=True)\nwith open(\"/mnt/data/optale-agent/package/dist/cli.js\", \"w\") as f:\n    f.write(\"console.log(\\\"CLI \\\" + process.argv.slice(2).join(\\\" \\\"))\")\nprint(subprocess.run([\"optale-agent\", \"object\", \"query\"], capture_output=True, text=True).stdout.strip())\nwith open(\"/mnt/data/x.sh\", \"w\") as f:\n    f.write(\"#!/bin/sh\\necho WORKSPACE_EXEC\")\nos.chmod(\"/mnt/data/x.sh\", 0o755)\ntry:\n    print(subprocess.run([\"/mnt/data/x.sh\"], capture_output=True, text=True).stdout.strip() or \"WORKSPACE_NOEXEC\")\nexcept PermissionError:\n    print(\"WORKSPACE_NOEXEC\")"}]}')
+
+    stdout=$(echo "$result" | jq -r '.run.stdout // empty')
+    if [[ "$stdout" == "CLI object query"* ]] && [[ "$stdout" == *"WORKSPACE_NOEXEC"* ]]; then
+        log_success "Agent CLI launcher runs from /usr while /mnt/data stays noexec"
+        return 0
+    else
+        log_error "Agent CLI launcher: expected 'CLI object query' then 'WORKSPACE_NOEXEC', got '$stdout'"
+        echo "$result" | jq .
+        return 1
+    fi
+}
+
 echo "=============================================="
 echo "  Sandbox Security Test Suite"
 echo "=============================================="
@@ -426,6 +443,7 @@ test_sched_setaffinity_blocked || FAILED=$((FAILED + 1))
 test_kernel_attack_surface_blocked || FAILED=$((FAILED + 1))
 test_bun || FAILED=$((FAILED + 1))
 test_escape_attempt || FAILED=$((FAILED + 1))
+test_agent_cli_launcher || FAILED=$((FAILED + 1))
 
 echo ""
 echo "=============================================="
