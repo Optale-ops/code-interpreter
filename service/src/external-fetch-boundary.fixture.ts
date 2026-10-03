@@ -299,6 +299,51 @@ async function main(): Promise<void> {
     );
     assert.equal(requests.length, passthroughRequestCount + 1);
 
+    // A host that lists routes: only the listed method and path reach the origin; any other
+    // request is refused before a connection is made.
+    const routed = parseExternalFetchPolicy({
+      version: 1,
+      limits: policy().limits,
+      hosts: {
+        [HOST]: {
+          httpsPassthrough: true,
+          httpsPassthroughRoutes: [{ method: 'POST', path: '/passthrough' }],
+        },
+      },
+    });
+    const routedRequestCount = requests.length;
+    const allowed = await openHttpsPassthrough({
+      url: `https://${HOST}/passthrough`,
+      policy: routed,
+      resolver: dns.resolver,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: Buffer.from('{}'),
+    });
+    for await (const _chunk of allowed.response) {
+      // drain
+    }
+    allowed.close();
+    assert.equal(allowed.response.statusCode, 201);
+    for (const [url, method] of [
+      [`https://${HOST}/passthrough`, 'GET'],
+      [`https://${HOST}/success`, 'POST'],
+      [`https://${HOST}/passthrough?x=1`, 'POST'],
+    ] as const) {
+      await expectCode(
+        () => openHttpsPassthrough({
+          url,
+          policy: routed,
+          resolver: dns.resolver,
+          method,
+          headers: {},
+          body: Buffer.alloc(0),
+        }),
+        'HOST_NOT_ALLOWED',
+      );
+    }
+    assert.equal(requests.length, routedRequestCount + 1);
+
     const disconnectOpened = await openExternalFetch({
       url: `https://${HOST}/success`,
       policy: policy(),

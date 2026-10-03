@@ -13,10 +13,31 @@ export interface ExternalFetchLimits {
   totalTimeoutMs: number;
 }
 
+export const HTTPS_PASSTHROUGH_METHODS = [
+  'DELETE',
+  'GET',
+  'HEAD',
+  'PATCH',
+  'POST',
+  'PUT',
+] as const;
+export type HttpsPassthroughMethod = (typeof HTTPS_PASSTHROUGH_METHODS)[number];
+export const HARD_MAX_HTTPS_PASSTHROUGH_ROUTES = 64;
+
+/**
+ * One HTTPS passthrough request a host accepts: an exact method and an exact, already
+ * normalized path, with no query string. A host without routes accepts any passthrough request.
+ */
+export interface HttpsPassthroughRoute {
+  method: HttpsPassthroughMethod;
+  path: string;
+}
+
 export interface ExternalFetchHostPolicy {
   contentTypes: Set<string>;
   httpsPassthrough: boolean;
   httpsPassthroughTotalTimeoutMs?: number;
+  httpsPassthroughRoutes?: HttpsPassthroughRoute[];
     packageTransport: boolean;
   limits: ExternalFetchLimits;
 }
@@ -25,6 +46,7 @@ export interface ExternalFetchPolicySnapshotHost {
     contentTypes?: string[];
     httpsPassthrough?: true;
     httpsPassthroughTotalTimeoutMs?: number;
+    httpsPassthroughRoutes?: HttpsPassthroughRoute[];
     packageTransport?: true;
     limits: ExternalFetchLimits;
 }
@@ -267,6 +289,61 @@ function validatePolicyHostname(host: string): void {
   }
 }
 
+function compareRoutes(a: HttpsPassthroughRoute, b: HttpsPassthroughRoute): number {
+  if (a.path !== b.path) return a.path < b.path ? -1 : 1;
+  if (a.method !== b.method) return a.method < b.method ? -1 : 1;
+  return 0;
+}
+
+/**
+ * A route's path must already be in the exact form the gateway compares against: what the URL
+ * parser yields as `pathname` (dot segments resolved), without query, fragment, percent-encoding
+ * or backslashes, so no two spellings can name the same request.
+ */
+function parseHttpsPassthroughRoutes(
+  value: unknown,
+  host: string,
+): HttpsPassthroughRoute[] {
+  const label = `External fetch host ${host} httpsPassthroughRoutes`;
+  if (
+    !Array.isArray(value) ||
+    value.length < 1 ||
+    value.length > HARD_MAX_HTTPS_PASSTHROUGH_ROUTES
+  ) {
+    throw new Error(
+      `${label} must list 1 to ${HARD_MAX_HTTPS_PASSTHROUGH_ROUTES} routes`,
+    );
+  }
+  const routes: HttpsPassthroughRoute[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    const raw = objectValue(entry, label);
+    assertOnlyKeys(raw, ['method', 'path'], label);
+    const method = raw.method;
+    const path = raw.path;
+    if (
+      typeof method !== 'string' ||
+      !(HTTPS_PASSTHROUGH_METHODS as readonly string[]).includes(method)
+    ) {
+      throw new Error(`${label} has an invalid method`);
+    }
+    if (
+      typeof path !== 'string' ||
+      !path.startsWith('/') ||
+      path.length > 2_048 ||
+      /[?#%\\\s\u0000-\u001f\u007f]/.test(path) ||
+      new URL(path, 'https://route.invalid').pathname !== path
+    ) {
+      throw new Error(`${label} has an invalid path`);
+    }
+    const key = `${method} ${path}`;
+    if (seen.has(key)) throw new Error(`${label} lists a route twice`);
+    seen.add(key);
+    routes.push({ method: method as HttpsPassthroughMethod, path });
+  }
+  return routes.sort(compareRoutes);
+}
+
 export function parseExternalFetchPolicy(value: unknown): ExternalFetchPolicy {
   const raw = objectValue(value, 'External fetch policy');
     assertOnlyKeys(
@@ -299,6 +376,7 @@ export function parseExternalFetchPolicy(value: unknown): ExternalFetchPolicy {
         'contentTypes',
         'httpsPassthrough',
         'httpsPassthroughTotalTimeoutMs',
+        'httpsPassthroughRoutes',
                 'packageTransport',
         'limits',
       ],
@@ -339,6 +417,15 @@ export function parseExternalFetchPolicy(value: unknown): ExternalFetchPolicy {
             HARD_HTTPS_PASSTHROUGH_TOTAL_TIMEOUT_MS,
           )
       : undefined;
+    if (rawHost.httpsPassthroughRoutes !== undefined && !httpsPassthrough) {
+      throw new Error(
+        `External fetch host ${host} cannot set httpsPassthroughRoutes without HTTPS passthrough`,
+      );
+    }
+    const httpsPassthroughRoutes =
+      rawHost.httpsPassthroughRoutes === undefined
+        ? undefined
+        : parseHttpsPassthroughRoutes(rawHost.httpsPassthroughRoutes, host);
         if (
             rawHost.contentTypes !== undefined &&
             !Array.isArray(rawHost.contentTypes)
@@ -377,6 +464,7 @@ export function parseExternalFetchPolicy(value: unknown): ExternalFetchPolicy {
       ...(httpsPassthroughTotalTimeoutMs === undefined
         ? {}
         : { httpsPassthroughTotalTimeoutMs }),
+      ...(httpsPassthroughRoutes === undefined ? {} : { httpsPassthroughRoutes }),
       limits:
         rawHost.limits === undefined
           ? { ...limits }
@@ -478,13 +566,29 @@ export function validateExternalFetchUrl(
   return validated;
 }
 
+/**
+ * A passthrough request is allowed when its host enables passthrough and, if the host lists
+ * routes, when its method and normalized path match one exactly and it carries no query.
+ */
 export function validateHttpsPassthroughUrl(
   raw: string,
   policy: ExternalFetchPolicy,
+  method: string,
 ): ValidatedExternalFetchUrl {
   const validated = validatePolicyUrl(raw, policy);
   if (!validated.policy.httpsPassthrough) {
     throw new ExternalFetchError('HOST_NOT_ALLOWED');
+  }
+  const routes = validated.policy.httpsPassthroughRoutes;
+  if (routes) {
+    const requested = method.toUpperCase();
+    const pathname = validated.url.pathname;
+    if (
+      validated.queryPresent ||
+      !routes.some(route => route.method === requested && route.path === pathname)
+    ) {
+      throw new ExternalFetchError('HOST_NOT_ALLOWED');
+    }
   }
   return validated;
 }
@@ -550,6 +654,13 @@ export function serializeExternalFetchPolicy(
                       httpsPassthroughTotalTimeoutMs:
                           entry.httpsPassthroughTotalTimeoutMs,
                   }),
+            ...(entry.httpsPassthroughRoutes === undefined
+                ? {}
+                : {
+                      httpsPassthroughRoutes: entry.httpsPassthroughRoutes.map(
+                          route => ({ ...route }),
+                      ),
+                  }),
             ...(entry.packageTransport
                 ? { packageTransport: true as const }
                 : {}),
@@ -564,6 +675,24 @@ export function externalFetchPolicyDigest(policy: ExternalFetchPolicy): string {
         .createHash('sha256')
         .update(canonicalJson(serializeExternalFetchPolicy(policy)), 'utf8')
         .digest('base64url');
+}
+
+/**
+ * Routes a signed host may use under the deployment's upper bound: absent on one side means
+ * that side does not restrict; listed on both, every signed route must be in the deployment's.
+ */
+function intersectHttpsPassthroughRoutes(
+    requested: HttpsPassthroughRoute[] | undefined,
+    upper: HttpsPassthroughRoute[] | undefined,
+): HttpsPassthroughRoute[] | undefined {
+    if (!upper) return requested?.map(route => ({ ...route }));
+    if (!requested) return upper.map(route => ({ ...route }));
+    const allowed = new Set(upper.map(route => `${route.method} ${route.path}`));
+    for (const route of requested) {
+        if (!allowed.has(`${route.method} ${route.path}`))
+            throw new ExternalFetchError('HOST_NOT_ALLOWED');
+    }
+    return requested.map(route => ({ ...route }));
 }
 
 export function intersectExternalFetchPolicies(
@@ -596,6 +725,12 @@ export function intersectExternalFetchPolicies(
                 Math.min(requested.limits[key], upper.limits[key], limits[key]),
             ]),
         ) as unknown as ExternalFetchLimits;
+        const httpsPassthroughRoutes = requested.httpsPassthrough
+            ? intersectHttpsPassthroughRoutes(
+                  requested.httpsPassthroughRoutes,
+                  upper.httpsPassthroughRoutes,
+              )
+            : undefined;
         hosts.set(host, {
             contentTypes: new Set(requested.contentTypes),
             httpsPassthrough: requested.httpsPassthrough,
@@ -609,6 +744,7 @@ export function intersectExternalFetchPolicies(
                       ),
                   }
                 : {}),
+            ...(httpsPassthroughRoutes ? { httpsPassthroughRoutes } : {}),
             packageTransport: requested.packageTransport,
             limits: hostLimits,
         });

@@ -1,8 +1,11 @@
+import crypto from 'node:crypto';
 import { describe, expect, test } from 'bun:test';
 import {
   HARD_EXTERNAL_FETCH_LIMITS,
   HARD_MAX_EXTERNAL_FETCH_HOSTS,
+  effectiveExternalFetchPolicy,
   externalFetchPolicyDigest,
+  intersectExternalFetchPolicies,
   parseExternalFetchPolicy,
   serializeExternalFetchPolicy,
   validateExternalFetchUrl,
@@ -81,6 +84,7 @@ describe('external fetch policy parser', () => {
             validateHttpsPassthroughUrl(
                 `https://${consoleHost}/api/optale/mcp`,
                 policy,
+                'POST',
             ).host,
     ).toBe(consoleHost);
   });
@@ -463,5 +467,188 @@ describe('external fetch address validation', () => {
         ),
       'FETCH_FAILED',
     );
+  });
+});
+
+const CONSOLE_HOST = 'console.optale.com';
+const PASSTHROUGH_LIMITS = { ...HARD_EXTERNAL_FETCH_LIMITS, maxFetchesPerGrant: 8 };
+
+function consolePolicy(routes?: unknown): unknown {
+  return {
+    version: 1,
+    limits: { ...HARD_EXTERNAL_FETCH_LIMITS },
+    hosts: {
+      [CONSOLE_HOST]: {
+        httpsPassthrough: true,
+        ...(routes === undefined ? {} : { httpsPassthroughRoutes: routes }),
+      },
+    },
+  };
+}
+
+const READ_ONLY_ROUTES = [
+  { method: 'POST', path: '/api/optale/mcp' },
+  { method: 'GET', path: '/api/optale/composio/catalog/OPTALE_CORE/actions' },
+];
+
+describe('HTTPS passthrough routes', () => {
+  test('parses routes into one canonical order that the digest covers', () => {
+    const listed = parseExternalFetchPolicy(consolePolicy(READ_ONLY_ROUTES));
+    const reversed = parseExternalFetchPolicy(consolePolicy([...READ_ONLY_ROUTES].reverse()));
+    const unrouted = parseExternalFetchPolicy(consolePolicy());
+
+    expect(serializeExternalFetchPolicy(listed).hosts[CONSOLE_HOST]?.httpsPassthroughRoutes).toEqual([
+      { method: 'GET', path: '/api/optale/composio/catalog/OPTALE_CORE/actions' },
+      { method: 'POST', path: '/api/optale/mcp' },
+    ]);
+    expect(externalFetchPolicyDigest(reversed)).toBe(externalFetchPolicyDigest(listed));
+    expect(externalFetchPolicyDigest(unrouted)).not.toBe(externalFetchPolicyDigest(listed));
+  });
+
+  test.each([
+    ['routes without HTTPS passthrough', { [CONSOLE_HOST]: { contentTypes: ['application/pdf'], httpsPassthroughRoutes: READ_ONLY_ROUTES } }],
+    ['an empty route list', { [CONSOLE_HOST]: { httpsPassthrough: true, httpsPassthroughRoutes: [] } }],
+    ['an unknown method', { [CONSOLE_HOST]: { httpsPassthrough: true, httpsPassthroughRoutes: [{ method: 'TRACE', path: '/x' }] } }],
+    ['a lowercase method', { [CONSOLE_HOST]: { httpsPassthrough: true, httpsPassthroughRoutes: [{ method: 'post', path: '/x' }] } }],
+    ['a query', { [CONSOLE_HOST]: { httpsPassthrough: true, httpsPassthroughRoutes: [{ method: 'GET', path: '/x?y=1' }] } }],
+    ['percent-encoding', { [CONSOLE_HOST]: { httpsPassthrough: true, httpsPassthroughRoutes: [{ method: 'GET', path: '/api/optale/%6dcp' }] } }],
+    ['dot segments', { [CONSOLE_HOST]: { httpsPassthrough: true, httpsPassthroughRoutes: [{ method: 'GET', path: '/api/x/../mcp' }] } }],
+    ['a relative path', { [CONSOLE_HOST]: { httpsPassthrough: true, httpsPassthroughRoutes: [{ method: 'GET', path: 'api/optale/mcp' }] } }],
+    ['a duplicate route', { [CONSOLE_HOST]: { httpsPassthrough: true, httpsPassthroughRoutes: [READ_ONLY_ROUTES[0], READ_ONLY_ROUTES[0]] } }],
+    ['an extra route key', { [CONSOLE_HOST]: { httpsPassthrough: true, httpsPassthroughRoutes: [{ ...READ_ONLY_ROUTES[0], query: true }] } }],
+  ])('rejects %s', (_label, hosts) => {
+    expect(() =>
+      parseExternalFetchPolicy({ version: 1, limits: { ...HARD_EXTERNAL_FETCH_LIMITS }, hosts }),
+    ).toThrow();
+  });
+
+  test('lets a routed host answer only its listed method and path, without a query', () => {
+    const policy = parseExternalFetchPolicy(consolePolicy(READ_ONLY_ROUTES));
+    const mcp = `https://${CONSOLE_HOST}/api/optale/mcp`;
+
+    expect(validateHttpsPassthroughUrl(mcp, policy, 'POST').url.pathname).toBe('/api/optale/mcp');
+    expect(validateHttpsPassthroughUrl(mcp, policy, 'post').host).toBe(CONSOLE_HOST);
+    expect(
+      validateHttpsPassthroughUrl(`https://${CONSOLE_HOST}/api/optale/x/../mcp`, policy, 'POST').url
+        .pathname,
+    ).toBe('/api/optale/mcp');
+    for (const [url, method] of [
+      [mcp, 'GET'],
+      [mcp, 'DELETE'],
+      [`${mcp}?debug=1`, 'POST'],
+      [`${mcp}/`, 'POST'],
+      [`https://${CONSOLE_HOST}/API/optale/mcp`, 'POST'],
+      [`https://${CONSOLE_HOST}/api/optale/%6dcp`, 'POST'],
+      [`https://${CONSOLE_HOST}/api/auth/requestPasswordReset`, 'POST'],
+      [`https://${CONSOLE_HOST}/api/optale/composio/catalog/OPTALE_CORE/actions`, 'POST'],
+    ] as const) {
+      expectCode(() => validateHttpsPassthroughUrl(url, policy, method), 'HOST_NOT_ALLOWED');
+    }
+  });
+
+  test('caps signed routes at the deployment routes, and applies deployment routes to an unrouted signature', () => {
+    const deployment = parseExternalFetchPolicy(consolePolicy(READ_ONLY_ROUTES));
+    const subset = parseExternalFetchPolicy(consolePolicy([READ_ONLY_ROUTES[0]]));
+    const outside = parseExternalFetchPolicy(
+      consolePolicy([{ method: 'POST', path: '/api/auth/requestPasswordReset' }]),
+    );
+    const unrouted = parseExternalFetchPolicy(consolePolicy());
+
+    expect(
+      intersectExternalFetchPolicies(subset, deployment).hosts.get(CONSOLE_HOST)
+        ?.httpsPassthroughRoutes,
+    ).toEqual([{ method: 'POST', path: '/api/optale/mcp' }]);
+    expectCode(() => intersectExternalFetchPolicies(outside, deployment), 'HOST_NOT_ALLOWED');
+    const capped = intersectExternalFetchPolicies(unrouted, deployment);
+    expectCode(
+      () =>
+        validateHttpsPassthroughUrl(
+          `https://${CONSOLE_HOST}/api/auth/requestPasswordReset`,
+          capped,
+          'POST',
+        ),
+      'HOST_NOT_ALLOWED',
+    );
+  });
+});
+
+/**
+ * The Console signs `sha256(JSON.stringify(<snapshot with sorted keys>))` (packages/api
+ * canonicalizeCodeApiNetworkPolicy). Snapshots it signs today carry no routes; this engine must
+ * keep verifying them and keep their effective policy unchanged.
+ */
+function consoleDigest(snapshot: unknown): string {
+  const sort = (value: unknown): unknown =>
+    Array.isArray(value)
+      ? value.map(sort)
+      : value !== null && typeof value === 'object'
+        ? Object.fromEntries(
+            Object.keys(value as Record<string, unknown>)
+              .sort()
+              .map(key => [key, sort((value as Record<string, unknown>)[key])]),
+          )
+        : value;
+  return crypto.createHash('sha256').update(JSON.stringify(sort(snapshot)), 'utf8').digest('base64url');
+}
+
+const PRODUCTION_SHAPED_DEPLOYMENT = parseExternalFetchPolicy({
+  version: 1,
+  limits: {
+    maxRedirects: 3,
+    maxResponseBytes: 26_214_400,
+    maxAggregateBytesPerGrant: 52_428_800,
+    maxFetchesPerGrant: 8,
+    connectTimeoutMs: 3_000,
+    headersTimeoutMs: 5_000,
+    totalTimeoutMs: 15_000,
+  },
+  hosts: {
+    [FROZEN_HOST]: { contentTypes: ['application/pdf'] },
+    ...Object.fromEntries(
+      ['console-staging.optale.com', CONSOLE_HOST, 'figent.optale.com', 'console-lab-callback.optale.com'].map(
+        host => [host, { httpsPassthrough: true, httpsPassthroughTotalTimeoutMs: 300_000, limits: { maxFetchesPerGrant: 8, maxResponseBytes: 2_097_152 } }],
+      ),
+    ),
+    'pypi.org': { packageTransport: true },
+    'files.pythonhosted.org': { packageTransport: true },
+    'registry.npmjs.org': { packageTransport: true },
+  },
+});
+
+describe('compatibility with the policies the Console signs today', () => {
+  test('a Read Only snapshot (Console passthrough only) verifies and still reaches every Console route', () => {
+    const snapshot = {
+      version: 1,
+      limits: PRODUCTION_SHAPED_DEPLOYMENT.limits,
+      hosts: {
+        [CONSOLE_HOST]: { httpsPassthrough: true, httpsPassthroughTotalTimeoutMs: 300_000, limits: PASSTHROUGH_LIMITS },
+      },
+    };
+    const effective = effectiveExternalFetchPolicy(
+      snapshot as never,
+      consoleDigest(snapshot),
+      PRODUCTION_SHAPED_DEPLOYMENT,
+    );
+
+    expect(effective.hosts.get(CONSOLE_HOST)?.httpsPassthroughRoutes).toBeUndefined();
+    expect(
+      validateHttpsPassthroughUrl(`https://${CONSOLE_HOST}/api/auth/requestPasswordReset`, effective, 'POST').host,
+    ).toBe(CONSOLE_HOST);
+  });
+
+  test('an Auto snapshot with package hosts verifies with the digest the Console computes', () => {
+    const snapshot = {
+      version: 1,
+      limits: { ...PRODUCTION_SHAPED_DEPLOYMENT.limits },
+      hosts: {
+        'files.pythonhosted.org': { packageTransport: true, limits: { ...PRODUCTION_SHAPED_DEPLOYMENT.limits } },
+        'pypi.org': { packageTransport: true, limits: { ...PRODUCTION_SHAPED_DEPLOYMENT.limits } },
+        [CONSOLE_HOST]: { httpsPassthrough: true, httpsPassthroughTotalTimeoutMs: 300_000, limits: PASSTHROUGH_LIMITS },
+      },
+    };
+
+    expect(externalFetchPolicyDigest(parseExternalFetchPolicy(snapshot))).toBe(consoleDigest(snapshot));
+    const effective = effectiveExternalFetchPolicy(snapshot as never, consoleDigest(snapshot), PRODUCTION_SHAPED_DEPLOYMENT);
+    expect([...effective.hosts.keys()].sort()).toEqual([CONSOLE_HOST, 'files.pythonhosted.org', 'pypi.org']);
   });
 });

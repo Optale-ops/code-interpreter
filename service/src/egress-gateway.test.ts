@@ -2090,7 +2090,7 @@ describe('egress gateway routes', () => {
                 });
             } else {
                 setHttpsPassthroughOpenForTest(async args => {
-                    const target = validateHttpsPassthroughUrl('https://allowed.test/pkg.tgz', args.policy);
+                    const target = validateHttpsPassthroughUrl('https://allowed.test/pkg.tgz', args.policy, args.method);
                     await args.beforeRequest?.(target);
                     return {
                         response,
