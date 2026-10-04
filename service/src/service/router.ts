@@ -25,7 +25,7 @@ import { captureTraceCarrier, withSpan } from '../telemetry';
 import { Jobs, Languages } from '../enum';
 import { FileRefAuthorizationError, authorizeRequestedFiles } from './file-authorization';
 import { createUploadSessionRegistrar } from './upload-session';
-import { forwardUploadToFileServer } from './upload-forward';
+import { createForwardQueue, forwardUploadToFileServer } from './upload-forward';
 import { prepareSandboxJobSecurity } from '../sandbox-egress';
 import logger from '../logger';
 
@@ -378,6 +378,8 @@ router.post('/upload', uploadLimiter, async (req: t.AuthenticatedRequest, res: R
     });
 
     const uploadPromises: Promise<t.UploadResult>[] = [];
+    /* One staged file in flight per request; busboy waits on the rest. */
+    const enqueueForward = createForwardQueue();
 
     bb.on('field', (fieldname: string, val: string) => {
       if (fieldname === 'kind') {
@@ -457,13 +459,13 @@ router.post('/upload', uploadLimiter, async (req: t.AuthenticatedRequest, res: R
         connection.set(`session:${session_id}`, sessionKey, 'EX', env.SESSION_CACHE_TTL)
           .then(() => {
             logger.info(`[${INSTANCE_ID}] Upload: Session ID: ${session_id} | User ID: ${userId} | Session key: ${sessionKey}`);
-            return forwardUploadToFileServer({
+            return enqueueForward(() => forwardUploadToFileServer({
               file,
               url: `${env.FILE_SERVER_URL}/sessions/${session_id}/objects/${fileId}`,
               headers: putHeaders,
               maxBytes: planFileSize,
               signal: abortController.signal,
-            });
+            }));
           })
           .then(result => {
             clearTimeout(uploadTimeout);
@@ -585,6 +587,8 @@ router.post('/upload/batch', uploadLimiter, async (req: t.AuthenticatedRequest, 
     });
 
     const uploadPromises: Promise<t.BatchUploadFileResult>[] = [];
+    /* One staged file in flight per request; busboy waits on the rest. */
+    const enqueueForward = createForwardQueue();
 
     bb.on('field', (fieldname: string, val: string) => {
       if (fieldname === 'kind') {
@@ -694,13 +698,13 @@ router.post('/upload/batch', uploadLimiter, async (req: t.AuthenticatedRequest, 
           logger.error(`[${INSTANCE_ID}] Batch upload file failed: ${filename} | Session: ${session_id}`, { error: message });
           resolve({ status: 'error', filename, error: message });
         };
-        const forwardFile = (): Promise<void> => forwardUploadToFileServer({
+        const forwardFile = (): Promise<void> => enqueueForward(() => forwardUploadToFileServer({
           file,
           url: `${env.FILE_SERVER_URL}/sessions/${session_id}/objects/${fileId}`,
           headers: putHeaders,
           maxBytes: planFileSize,
           signal: abortController.signal,
-        }).then(result => {
+        })).then(result => {
           clearTimeout(uploadTimeout);
           resolve({ status: 'success', filename: result.filename, fileId: result.fileId });
         }, resolveUploadFailure);

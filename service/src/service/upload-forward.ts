@@ -48,6 +48,8 @@ export async function forwardUploadToFileServer({
    * signal for that case and reports the limit, so nothing partial is sent. */
   signal.throwIfAborted();
   const body = Buffer.concat(chunks);
+  /* Only the joined copy stays alive while the request is in flight. */
+  chunks.length = 0;
   const forwardedBytes = body.length;
   const response = await axios.put<t.StoredUploadResult>(url, body, {
     headers: internalServiceHeaders({ ...headers, 'Content-Length': String(forwardedBytes) }),
@@ -73,4 +75,22 @@ export async function forwardUploadToFileServer({
     throw new UploadIncompleteError(forwardedBytes, storedBytes);
   }
   return { filename: response.data.filename, fileId: response.data.fileId };
+}
+
+/**
+ * Runs one upload's forwards one at a time, in the order they are queued.
+ *
+ * A file is read only when its turn comes, and busboy does not reach the next
+ * part until the current file stream is drained. So the request body is held
+ * back while a file is in flight, and the api holds at most one staged file
+ * per upload request, whatever the number of files in it. A failed forward
+ * does not stop the ones after it.
+ */
+export function createForwardQueue(): <T>(forward: () => Promise<T>) => Promise<T> {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(forward: () => Promise<T>): Promise<T> => {
+    const run = tail.then(forward);
+    tail = run.catch(() => undefined);
+    return run;
+  };
 }
