@@ -379,6 +379,35 @@ describe('LibreChat JWT auth provider', () => {
         );
   });
 
+  describe('tenant-bound keys', () => {
+    function bindTestKey(tenants: unknown): void {
+      const jwks = JSON.parse(process.env.CODEAPI_JWT_JWKS_JSON!) as { keys: object[] };
+      process.env.CODEAPI_JWT_JWKS_JSON = JSON.stringify({
+        keys: jwks.keys.map(key => ({ ...key, tenants })),
+      });
+    }
+
+    test('accepts a key only for the tenants it is bound to', () => {
+      bindTestKey(['tenant_staging']);
+      expect(
+        verifyLibreChatJwt(signJwt(baseClaims({ tenant_id: 'tenant_staging' }))).tenantId,
+      ).toBe('tenant_staging');
+      expectJwtReason(signJwt(baseClaims({ tenant_id: 'tenant_abc' })), 'tenant_not_allowed');
+    });
+
+    test('does not let a bound key fall back to the single-tenant namespace', () => {
+      bindTestKey(['tenant_staging']);
+      expectJwtReason(signJwt(baseClaims({ tenant_id: undefined })), 'tenant_not_allowed');
+    });
+
+    test('refuses a malformed binding as configuration instead of trusting the key unbound', () => {
+      for (const tenants of [[], 'tenant_staging', [''], [' tenant_staging'], [42]]) {
+        bindTestKey(tenants);
+        expectJwtReason(signJwt(baseClaims({ tenant_id: 'tenant_staging' })), 'config');
+      }
+    });
+  });
+
   test('rejects tampered signatures and malformed required claims', () => {
     const token = signJwt(baseClaims());
         const [encodedHeader, encodedPayload, encodedSignature] = token.split(

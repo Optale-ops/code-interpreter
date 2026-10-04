@@ -51,6 +51,31 @@ interface LibreChatJwtClaims {
 interface PublicKeyEntry {
   alg?: JwtAlg;
   key: KeyObject | Buffer;
+  /** When set, the only tenant_id values this key may sign for. */
+  tenants?: ReadonlySet<string>;
+}
+
+type JwksEntry = JsonWebKey & { kid?: string; alg?: string; tenants?: unknown };
+
+/**
+ * A JWKS entry may bind its key to tenants with a `tenants` member: a non-empty
+ * list of tenant_id values. A token signed by that key is then accepted only
+ * for those tenants. A malformed list is a configuration error, never an
+ * unbound key.
+ */
+function parseKeyTenants(kid: string, value: unknown): ReadonlySet<string> | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    !value.every(tenant => typeof tenant === 'string' && tenant.trim() === tenant && tenant !== '')
+  ) {
+    throw new CodeApiJwtAuthError(
+      'config',
+      `CodeAPI JWT key ${kid} tenants must be a non-empty list of tenant ids`,
+    );
+  }
+  return new Set(value as string[]);
 }
 
 interface VerificationConfig {
@@ -172,11 +197,9 @@ function publicKeyFromValue(value: string): KeyObject {
 }
 
 function loadJwks(keys: Map<string, PublicKeyEntry>, raw: string): void {
-  let parsed: { keys?: Array<JsonWebKey & { kid?: string; alg?: string }> };
+  let parsed: { keys?: JwksEntry[] };
   try {
-        parsed = JSON.parse(raw) as {
-            keys?: Array<JsonWebKey & { kid?: string; alg?: string }>;
-        };
+    parsed = JSON.parse(raw) as { keys?: JwksEntry[] };
   } catch {
         throw new CodeApiJwtAuthError(
             'config',
@@ -189,10 +212,11 @@ function loadJwks(keys: Map<string, PublicKeyEntry>, raw: string): void {
             'CODEAPI_JWT_JWKS_JSON must contain a keys array',
         );
   }
-  for (const jwk of parsed.keys) {
+  for (const { tenants, ...jwk } of parsed.keys) {
     if (!jwk.kid) {
       continue;
     }
+    const allowedTenants = parseKeyTenants(jwk.kid, tenants);
     try {
       keys.set(jwk.kid, {
                 alg:
@@ -200,6 +224,7 @@ function loadJwks(keys: Map<string, PublicKeyEntry>, raw: string): void {
                         ? jwk.alg
                         : undefined,
         key: createPublicKey({ key: jwk, format: 'jwk' }),
+        ...(allowedTenants ? { tenants: allowedTenants } : {}),
       });
     } catch {
             throw new CodeApiJwtAuthError(
@@ -635,7 +660,14 @@ export function verifyLibreChatJwt(token: string): CodeApiPrincipal {
             'JWT signature is invalid',
         );
   }
-  return validateClaims(claims, config);
+  const principal = validateClaims(claims, config);
+  if (key.tenants && !key.tenants.has(principal.tenantId)) {
+    throw new CodeApiJwtAuthError(
+      'tenant_not_allowed',
+      'JWT tenant is not allowed for this key',
+    );
+  }
+  return principal;
 }
 
 export class LibreChatJwtAuthProvider implements AuthProvider {
