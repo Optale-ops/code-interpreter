@@ -1886,15 +1886,36 @@ describe('egress gateway routes', () => {
     expect(opaque.status).toBe(404);
     expect(await opaque.text()).toBe('not found');
 
-    const denied = await gatewayFetch('/https-passthrough', {
-      method: 'POST',
-      headers: { ...grantHeader(), 'Content-Type': 'application/json' },
-      body,
-    });
+    const rejections: Record<string, unknown>[] = [];
+    const originalLoggerWarn = logger.warn;
+    logger.warn = ((message: string, fields?: Record<string, unknown>) => {
+      if (message === 'Rejected controlled egress request' && fields) rejections.push(fields);
+    }) as typeof logger.warn;
+    let denied: Response;
+    try {
+      denied = await gatewayFetch('/https-passthrough', {
+        method: 'POST',
+        headers: { ...grantHeader(), 'Content-Type': 'application/json' },
+        body,
+      });
+    } finally {
+      logger.warn = originalLoggerWarn;
+    }
     expect(denied.status).toBe(403);
         expect(await denied.json()).toMatchObject({
             error: 'HOST_NOT_ALLOWED',
         });
+    // A refusal names what was asked for by hash, so an operator can tell which host it was.
+    const hash = (value: string) =>
+      crypto.createHash('sha256').update(value, 'utf8').digest('base64url').slice(0, 16);
+    expect(rejections).toHaveLength(1);
+    expect(rejections[0]).toMatchObject({
+      route: 'https-passthrough',
+      outcome: 'HOST_NOT_ALLOWED',
+      destinationHostHash: hash('unlisted.example'),
+      pathHash: hash('/api/optale/mcp'),
+    });
+    expect(JSON.stringify(rejections[0])).not.toContain('unlisted.example');
   });
 
   test('rejects non-POST external-fetch methods and caller-selected envelope fields', async () => {
