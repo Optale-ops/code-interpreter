@@ -395,7 +395,10 @@ describe('LibreChat JWT auth provider', () => {
       expectJwtReason(signJwt(baseClaims({ tenant_id: 'tenant_abc' })), 'tenant_not_allowed');
     });
 
-    test('does not let a bound key fall back to the single-tenant namespace', () => {
+    test('requires a signed tenant_id even when the default namespace is listed', () => {
+      bindTestKey(['legacy']);
+      expectJwtReason(signJwt(baseClaims({ tenant_id: undefined })), 'tenant_not_allowed');
+      process.env.CODEAPI_JWT_SINGLE_TENANT_ID = 'tenant_staging';
       bindTestKey(['tenant_staging']);
       expectJwtReason(signJwt(baseClaims({ tenant_id: undefined })), 'tenant_not_allowed');
     });
@@ -405,6 +408,28 @@ describe('LibreChat JWT auth provider', () => {
         bindTestKey(tenants);
         expectJwtReason(signJwt(baseClaims({ tenant_id: 'tenant_staging' })), 'config');
       }
+    });
+
+    test('refuses a binding on an entry without a kid', () => {
+      const jwks = JSON.parse(process.env.CODEAPI_JWT_JWKS_JSON!) as { keys: Array<Record<string, unknown>> };
+      const { kid: _kid, ...unnamed } = jwks.keys[0]!;
+      process.env.CODEAPI_JWT_JWKS_JSON = JSON.stringify({
+        keys: [...jwks.keys, { ...unnamed, tenants: [] }],
+      });
+      expectJwtReason(signJwt(baseClaims()), 'config');
+    });
+
+    test('refuses a second source for a bound kid instead of letting it replace the binding', () => {
+      bindTestKey(['tenant_staging']);
+      const bound = JSON.parse(process.env.CODEAPI_JWT_JWKS_JSON!) as { keys: Array<Record<string, unknown>> };
+      const { tenants: _tenants, ...unbound } = bound.keys[0]!;
+      process.env.CODEAPI_JWT_JWKS_JSON = JSON.stringify({ keys: [bound.keys[0], unbound] });
+      expectJwtReason(signJwt(baseClaims({ tenant_id: 'tenant_abc' })), 'config');
+
+      process.env.CODEAPI_JWT_JWKS_JSON = JSON.stringify({ keys: [bound.keys[0]] });
+      process.env.CODEAPI_JWT_PUBLIC_KEY = JSON.stringify(unbound);
+      process.env.CODEAPI_JWT_KID = 'test-kid';
+      expectJwtReason(signJwt(baseClaims({ tenant_id: 'tenant_abc' })), 'config');
     });
   });
 

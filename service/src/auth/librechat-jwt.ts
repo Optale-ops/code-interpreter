@@ -196,6 +196,23 @@ function publicKeyFromValue(value: string): KeyObject {
   }
 }
 
+/**
+ * Adds one verification key. A kid configured twice (two JWKS entries, the
+ * key directory, CODEAPI_JWT_PUBLIC_KEY, the HS256 secret) is refused when
+ * either copy is tenant-bound: the later source would otherwise replace a
+ * bound key with an unbound one.
+ */
+function addKey(keys: Map<string, PublicKeyEntry>, kid: string, entry: PublicKeyEntry): void {
+  const existing = keys.get(kid);
+  if (existing && (existing.tenants || entry.tenants)) {
+    throw new CodeApiJwtAuthError(
+      'config',
+      `CodeAPI JWT key ${kid} is bound to tenants and configured more than once`,
+    );
+  }
+  keys.set(kid, entry);
+}
+
 function loadJwks(keys: Map<string, PublicKeyEntry>, raw: string): void {
   let parsed: { keys?: JwksEntry[] };
   try {
@@ -214,24 +231,29 @@ function loadJwks(keys: Map<string, PublicKeyEntry>, raw: string): void {
   }
   for (const { tenants, ...jwk } of parsed.keys) {
     if (!jwk.kid) {
+      if (tenants !== undefined) {
+        throw new CodeApiJwtAuthError(
+          'config',
+          'A CODEAPI_JWT_JWKS_JSON entry with tenants must have a kid',
+        );
+      }
       continue;
     }
     const allowedTenants = parseKeyTenants(jwk.kid, tenants);
+    let key: KeyObject;
     try {
-      keys.set(jwk.kid, {
-                alg:
-                    jwk.alg === 'EdDSA' || jwk.alg === 'RS256'
-                        ? jwk.alg
-                        : undefined,
-        key: createPublicKey({ key: jwk, format: 'jwk' }),
-        ...(allowedTenants ? { tenants: allowedTenants } : {}),
-      });
+      key = createPublicKey({ key: jwk, format: 'jwk' });
     } catch {
             throw new CodeApiJwtAuthError(
                 'config',
                 `CodeAPI JWT public key ${jwk.kid} is invalid`,
             );
     }
+    addKey(keys, jwk.kid, {
+      alg: jwk.alg === 'EdDSA' || jwk.alg === 'RS256' ? jwk.alg : undefined,
+      key,
+      ...(allowedTenants ? { tenants: allowedTenants } : {}),
+    });
   }
 }
 
@@ -255,7 +277,7 @@ function loadPublicKeyDir(
       if (!kid) {
         continue;
       }
-            keys.set(kid, {
+            addKey(keys, kid, {
                 key: publicKeyFromValue(readFileSync(fullPath, 'utf8')),
             });
     }
@@ -292,7 +314,7 @@ function loadKeys(): Map<string, PublicKeyEntry> {
                 'CODEAPI_JWT_KID is required with CODEAPI_JWT_PUBLIC_KEY',
             );
     }
-    keys.set(kid, { key: publicKeyFromValue(publicKey) });
+    addKey(keys, kid, { key: publicKeyFromValue(publicKey) });
   }
 
   const hsSecret = process.env.CODEAPI_JWT_HS256_SECRET;
@@ -301,7 +323,7 @@ function loadKeys(): Map<string, PublicKeyEntry> {
             process.env.CODEAPI_JWT_HS256_KID ??
             process.env.CODEAPI_JWT_KID ??
             'hs256-dev';
-    keys.set(kid, { alg: 'HS256', key: Buffer.from(hsSecret) });
+    addKey(keys, kid, { alg: 'HS256', key: Buffer.from(hsSecret) });
   }
 
   if (keys.size === 0) {
@@ -661,7 +683,13 @@ export function verifyLibreChatJwt(token: string): CodeApiPrincipal {
         );
   }
   const principal = validateClaims(claims, config);
-  if (key.tenants && !key.tenants.has(principal.tenantId)) {
+  /* A bound key decides on the tenant it signed, never on a configured
+   * default: a token without tenant_id is refused even if the default
+   * namespace happens to be listed. */
+  if (
+    key.tenants &&
+    (typeof claims.tenant_id !== 'string' || !key.tenants.has(claims.tenant_id))
+  ) {
     throw new CodeApiJwtAuthError(
       'tenant_not_allowed',
       'JWT tenant is not allowed for this key',
