@@ -424,7 +424,7 @@ async function requestPinnedPassthrough(
 export async function openHttpsPassthrough(
   args: OpenHttpsPassthroughArgs,
 ): Promise<OpenHttpsPassthroughResponse> {
-  const target = validateHttpsPassthroughUrl(args.url, args.policy);
+  const target = validateHttpsPassthroughUrl(args.url, args.policy, args.method);
     const addresses = await resolveExternalFetchAddresses(
         target.host,
         args.resolver,
