@@ -4,7 +4,7 @@ import IORedis from 'ioredis';
 import express from 'express';
 import { Client } from 'minio';
 import { nanoid } from 'nanoid';
-import { PassThrough } from 'stream';
+import { PassThrough, Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 import type { BucketItem, BucketItemStat, ClientOptions } from 'minio';
 import type { Readable } from 'stream';
@@ -232,7 +232,7 @@ async function uploadFile(
   mimetype: string,
   existingFileId?: string,
   readOnly = false,
-): Promise<t.UploadResult> {
+): Promise<t.StoredUploadResult> {
   const fileId = existingFileId ?? nanoid();
   const fileExtension = path.extname(filename);
   const objectName = `${session_id}/${fileId}${fileExtension}`;
@@ -253,23 +253,40 @@ async function uploadFile(
     metaData['X-Amz-Meta-Read-Only'] = 'true';
   }
 
-  /* Note: this returns UploadedObjectInfo */
   const sessionKey = await redisClient.get(`session:${session_id}`);
   const peeked = await peekStreamForEmpty(fileStream);
+  let receivedBytes = 0;
   if (peeked.empty) {
     /* Empty file: explicit single PUT with size=0 — multipart fails with
      * "You must specify at least one part" on zero-byte streams. */
     await minioClient.putObject(bucketName, objectName, Buffer.alloc(0), 0, metaData);
   } else {
-    await minioClient.putObject(bucketName, objectName, peeked.body, undefined, metaData);
+    const counter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        receivedBytes += chunk.length;
+        callback(null, chunk);
+      },
+    });
+    peeked.body.once('error', (error) => counter.destroy(error));
+    await minioClient.putObject(bucketName, objectName, peeked.body.pipe(counter), undefined, metaData);
   }
-  logger.info(`[${INSTANCE_ID}] File ID: ${fileId} | Filename: ${filename} | Session key: ${sessionKey}`);
+  /* The stored size is the uploader's proof that nothing was lost on the way
+   * in. An object that does not hold every byte this server read is removed
+   * rather than left behind as a truncated input. */
+  const { size } = await minioClient.statObject(bucketName, objectName);
+  if (size !== receivedBytes) {
+    logger.error('Stored object size differs from the bytes received', { session_id, fileId, receivedBytes, storedBytes: size });
+    await minioClient.removeObject(bucketName, objectName);
+    throw new Error('Stored object is incomplete');
+  }
+  logger.info(`[${INSTANCE_ID}] File ID: ${fileId} | Filename: ${filename} | Session key: ${sessionKey} | Bytes: ${size}`);
   await redisClient.set(`upload:${sessionKey}${session_id}${fileId}`, 'true', 'EX', env.SESSION_CACHE_TTL);
   fileUploads.inc();
 
   return {
     filename,
     fileId,
+    size,
   };
 }
 

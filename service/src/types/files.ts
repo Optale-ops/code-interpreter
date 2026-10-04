@@ -4,6 +4,11 @@ export interface UploadResult {
   fileId: string;
 }
 
+/** The file server's answer to an object PUT: the stored object's size in bytes. */
+export interface StoredUploadResult extends UploadResult {
+  size: number;
+}
+
 export type SimpleObject = string;
 
 export interface SummaryObject {
