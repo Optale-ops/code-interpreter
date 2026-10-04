@@ -19,6 +19,7 @@ import { summarizeRequestedFiles } from '../execution-log';
 import { getCredentialId, getPrincipalOrReject, type CodeApiPrincipal } from '../auth/principal';
 import {
   OWNER_BINDING_HEADER,
+  OWNER_DELETE_OPERATION,
   OWNER_EXPECT_HEADER,
   agentRunLogFields,
   ownerBindingValue,
@@ -969,16 +970,49 @@ router.get('/sessions/:session_id/objects/:fileId', fetchLimiter, sessionAuth, a
 
 router.delete('/files/:session_id/:fileId', fetchLimiter, sessionAuth, async (req: t.AuthenticatedRequest, res: Response) => {
   const { session_id, fileId } = req.params;
-  const agentRun = req.codeApiAuthContext?.agentRun;
+
+  /* agent_run deletion after the session cache expired: only the file
+   * server's owner-checked operation may delete, and anything but its explicit
+   * 2xx outcome is a refusal. A file server without that operation answers
+   * 404/405 here, which stays a refusal with the bytes in place; there is no
+   * fallback to the plain delete. */
+  if (req.ownerBindingExpectation) {
+    let outcome: unknown;
+    let status = 0;
+    try {
+      const response = await axios.post(
+        `${env.FILE_SERVER_URL}/sessions/${session_id}/objects/${fileId}/${OWNER_DELETE_OPERATION}`,
+        undefined,
+        {
+          headers: internalServiceHeaders({ [OWNER_EXPECT_HEADER]: req.ownerBindingExpectation }),
+          validateStatus: () => true,
+        },
+      );
+      status = response.status;
+      outcome = (response.data as { outcome?: unknown } | undefined)?.outcome;
+    } catch (error) {
+      logger.error(`[${INSTANCE_ID}] Owner-checked deletion failed - Session ID: ${session_id} | File ID: ${fileId}:`, getAxiosErrorDetails(error));
+      return res.status(500).json({ error: 'Error deleting file' });
+    }
+    if (status >= 200 && status < 300 && outcome === 'deleted') {
+      await connection.del(`upload:${req.sessionKey}${session_id}${fileId}`);
+      logger.info(`[${INSTANCE_ID}] File deleted: Session ID: ${session_id} | File ID: ${fileId}`);
+      return res.status(200).json({ message: 'File deleted successfully', session_id, fileId });
+    }
+    if (status >= 200 && status < 300 && outcome === 'absent') {
+      return res.status(404).json({ error: 'File not found' });
+    }
+    logger.warn(`[${INSTANCE_ID}] Owner-checked deletion refused - Session ID: ${session_id} | File ID: ${fileId}`, { fileServerStatus: status });
+    if (status === 500) {
+      return res.status(500).json({ error: 'Error deleting file' });
+    }
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
 
   try {
     const response = await axios.delete(
       `${env.FILE_SERVER_URL}/sessions/${session_id}/objects/${fileId}`,
-      {
-        headers: internalServiceHeaders(
-          req.ownerBindingExpectation ? { [OWNER_EXPECT_HEADER]: req.ownerBindingExpectation } : {},
-        ),
-      },
+      { headers: internalServiceHeaders() }
     );
 
     await connection.del(`upload:${req.sessionKey}${session_id}${fileId}`);
@@ -987,15 +1021,11 @@ router.delete('/files/:session_id/:fileId', fetchLimiter, sessionAuth, async (re
   } catch (error) {
     const errorDetails = getAxiosErrorDetails(error);
     logger.error(`[${INSTANCE_ID}] Error deleting file - Session ID: ${session_id} | File ID: ${fileId}:`, errorDetails);
-    /* agent_run deletion outcomes are explicit: not-found only when the
-     * scoped bytes are actually absent, a refused owner binding stays a
-     * refusal, anything else is a failure, never success. */
-    const status = axios.isAxiosError(error) ? error.response?.status : undefined;
-    if (agentRun && status === 404) {
+    /* Cache-present agent_run deletes keep the plain route; their outcomes are
+     * explicit: not-found only when the scoped bytes are absent, anything
+     * else is a failure, never success. */
+    if (req.codeApiAuthContext?.agentRun && axios.isAxiosError(error) && error.response?.status === 404) {
       return res.status(404).json({ error: 'File not found' });
-    }
-    if (agentRun && status === 403) {
-      return res.status(403).json({ error: 'Unauthorized' });
     }
     return res.status(500).json({
       error: 'Error deleting file',

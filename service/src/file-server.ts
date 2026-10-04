@@ -19,6 +19,8 @@ import { env } from './config';
 import { streamObjectToResponse } from './file-server-download';
 import { redisKeepAliveOptions } from './redis-options';
 import {
+  OWNER_BINDING_PATTERN,
+  OWNER_DELETE_OPERATION,
   OWNER_EXPECT_HEADER,
   OWNER_METADATA,
   OWNER_METADATA_STAT_KEY,
@@ -733,19 +735,6 @@ app.delete('/sessions/:session_id/objects/:fileId', async (req, res) => {
       });
     }
 
-    /* Deletion against a durable agent-run owner binding: the stored binding
-     * must name the same tenant, Agent and run. An object without a binding
-     * has uncertain ownership and is refused, never reported as deleted. */
-    const expectedOwner = req.headers[OWNER_EXPECT_HEADER.toLowerCase()];
-    if (expectedOwner !== undefined) {
-      const stat = await minioClient.statObject(bucketName, objectName);
-      const storedOwner = stat.metaData?.[OWNER_METADATA_STAT_KEY];
-      if (typeof expectedOwner !== 'string' || !storedOwner || storedOwner !== expectedOwner) {
-        logger.warn('Refusing owner-bound deletion', { session_id, fileId, bound: Boolean(storedOwner) });
-        return res.status(403).json({ error: 'Owner binding does not match' });
-      }
-    }
-
     await minioClient.removeObject(bucketName, objectName);
     logger.info(`[${INSTANCE_ID}] File deleted successfully: ${objectName}`);
     return res.status(200).json({
@@ -759,6 +748,48 @@ app.delete('/sessions/:session_id/objects/:fileId', async (req, res) => {
     return res.status(500).json({
       error: 'Error deleting file',
     });
+  }
+});
+
+/**
+ * Owner-checked deletion for agent_run objects whose session cache has
+ * expired. A separate operation (not the plain DELETE) so a file server that
+ * predates owner bindings answers 404 instead of deleting with the internal
+ * credential. It never deletes without an expected owner, and never deletes an
+ * object that has no stored binding or a different one. Outcomes:
+ * 200 {outcome:'deleted'} | 200 {outcome:'absent'} (no such object) |
+ * 400 missing/malformed expectation | 403 binding mismatch or unbound | 500.
+ */
+app.post(`/sessions/:session_id/objects/:fileId/${OWNER_DELETE_OPERATION}`, async (req, res) => {
+  const { session_id, fileId } = req.params;
+  const expectedOwner = req.headers[OWNER_EXPECT_HEADER.toLowerCase()];
+  if (typeof expectedOwner !== 'string' || !OWNER_BINDING_PATTERN.test(expectedOwner)) {
+    logger.warn('Refusing owner-checked deletion without an expected owner', { session_id, fileId });
+    return res.status(400).json({ error: 'Expected owner is required' });
+  }
+  try {
+    let objectName = '';
+    for await (const obj of minioClient.listObjects(bucketName, `${session_id}/${fileId}`, true)) {
+      if (obj.name.startsWith(`${session_id}/${fileId}`) === true) {
+        objectName = obj.name;
+        break;
+      }
+    }
+    if (!objectName) {
+      return res.status(200).json({ outcome: 'absent', session_id, fileId });
+    }
+    const stat = await minioClient.statObject(bucketName, objectName);
+    const storedOwner = stat.metaData?.[OWNER_METADATA_STAT_KEY];
+    if (!storedOwner || storedOwner !== expectedOwner) {
+      logger.warn('Refusing owner-checked deletion', { session_id, fileId, bound: Boolean(storedOwner) });
+      return res.status(403).json({ error: 'Owner binding does not match' });
+    }
+    await minioClient.removeObject(bucketName, objectName);
+    logger.info(`[${INSTANCE_ID}] Owner-checked deletion: ${objectName}`);
+    return res.status(200).json({ outcome: 'deleted', session_id, fileId });
+  } catch (err) {
+    logger.error('Error in owner-checked deletion:', { error: err, session_id, fileId });
+    return res.status(500).json({ error: 'Error deleting file' });
   }
 });
 

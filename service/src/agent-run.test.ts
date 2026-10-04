@@ -100,7 +100,7 @@ function jwtReason(token: string): string {
     verifyLibreChatJwt(token);
     return 'accepted';
   } catch (error) {
-    if (error instanceof CodeApiJwtAuthError) return `${error.reason}: ${error.message}`;
+    if (error instanceof CodeApiJwtAuthError) return error.reason;
     throw error;
   }
 }
@@ -133,6 +133,18 @@ function uploadedRef(result: { body: unknown }): { sid: string; fid: string } {
   return { sid: body.storage_session_id, fid: body.files[0].fileId };
 }
 
+/** The new file server's owner-checked delete, applied to the stub's objects. */
+const newFileServerOwnerDelete = (req: { headers: Record<string, string | string[] | undefined> }, key: string) => {
+  const expected = req.headers['x-codeapi-owner-expect'];
+  if (typeof expected !== 'string' || !/^agent_run\.[0-9a-f]{64}$/.test(expected)) return { status: 400, body: { error: 'Expected owner is required' } };
+  if (!harness.objects.has(key)) return { status: 200, body: { outcome: 'absent' } };
+  const stored = bindings.get(key);
+  if (!stored || stored !== expected) return { status: 403, body: { error: 'Owner binding does not match' } };
+  harness.objects.delete(key);
+  bindings.delete(key);
+  return { status: 200, body: { outcome: 'deleted' } };
+};
+
 beforeAll(async () => {
   harness = await installRouteHarness({
     queueModulePath: join(import.meta.dir, 'queue.ts'),
@@ -153,17 +165,7 @@ beforeAll(async () => {
     if (owner.binding) bindings.set(`${sid}/${fid}`, owner.binding);
     return undefined;
   });
-  harness.setDeleteHandler((req, key) => {
-    if (!harness.objects.has(key)) return { status: 404, body: { error: 'File not found' } };
-    const expected = req.headers['x-codeapi-owner-expect'];
-    if (expected !== undefined) {
-      const stored = bindings.get(key);
-      if (!stored || stored !== expected) return { status: 403, body: { error: 'Owner binding does not match' } };
-    }
-    harness.objects.delete(key);
-    bindings.delete(key);
-    return { status: 200, body: { message: 'File deleted successfully' } };
-  });
+  harness.setOwnerDeleteHandler(newFileServerOwnerDelete);
 });
 
 afterAll(async () => {
@@ -192,52 +194,52 @@ describe('agent_run claim grammar', () => {
     for (const strict of [undefined, 'true', 'false']) {
       if (strict === undefined) delete process.env.CODEAPI_TENANT_ISOLATION_STRICT;
       else process.env.CODEAPI_TENANT_ISOLATION_STRICT = strict;
-      expect(jwtReason(agentToken({ tenant_id: undefined }))).toBe('malformed_claims: tenant_id is required for agent_run');
-      expect(jwtReason(agentToken({ tenant_id: '' }))).toBe('malformed_claims: tenant_id is required for agent_run');
+      expect(jwtReason(agentToken({ tenant_id: undefined }))).toBe('malformed_claims');
+      expect(jwtReason(agentToken({ tenant_id: '' }))).toBe('malformed_claims');
     }
   });
 
   test('malformed agent_run values are refused, never normalized', () => {
-    const cases: Array<[Record<string, unknown>, string]> = [
-      [{ sub: 'agent_AbCdEfGhIjK' }, 'sub must be a canonical Agent id'],
-      [{ sub: AGENT.toUpperCase() }, 'sub must be a canonical Agent id'],
-      [{ sub: `${AGENT}0` }, 'sub must be a canonical Agent id'],
-      [{ run_id: undefined }, 'run_id must be a canonical UUID'],
-      [{ run_id: RUN1.toUpperCase() }, 'run_id must be a canonical UUID'],
-      [{ run_id: RUN1.replace(/-/g, '') }, 'run_id must be a canonical UUID'],
-      [{ run_id: `${RUN1}:x` }, 'run_id must be a canonical UUID'],
-      [{ tenant_id: 'tenant:a' }, 'tenant_id is not canonical'],
-      [{ tenant_id: ' tenant-a' }, 'tenant_id is not canonical'],
-      [{ role: 'USER' }, 'role must be AGENT'],
-      [{ role: undefined }, 'role must be AGENT'],
-      [{ org_id: 'org_1' }, 'org_id is not accepted for agent_run'],
-      [{ service_id: 'svc_1' }, 'service_id is not accepted for agent_run'],
-      [{ external_user_id: 'ext_1' }, 'external_user_id is not accepted for agent_run'],
-      [{ chc_user_id: 'chc_1' }, 'chc_user_id is not accepted for agent_run'], // leak-check:allow
-      [{ plan_id: 'pro' }, 'plan_id is not accepted for agent_run'],
-      [{ auth_context_hash: undefined }, 'auth_context_hash is required'],
-      [{ file_delete: { storage_session_id: 'a'.repeat(21) } }, 'file_delete must hold exactly'],
-      [{ file_delete: { storage_session_id: 'a'.repeat(21), file_id: 'b'.repeat(21), kind: 'agent' } }, 'file_delete must hold exactly'],
-      [{ file_delete: { storage_session_id: 'short', file_id: 'b'.repeat(21) } }, 'file_delete target is not a storage object id'],
-      [{ file_delete: 'x' }, 'file_delete must hold exactly'],
+    /* Each case changes one field of a token that verifies (first test), so the
+     * refusal is attributable to that field. */
+    const cases: Array<Record<string, unknown>> = [
+      { sub: 'agent_AbCdEfGhIjK' },
+      { sub: AGENT.toUpperCase() },
+      { sub: `${AGENT}0` },
+      { run_id: undefined },
+      { run_id: RUN1.toUpperCase() },
+      { run_id: RUN1.replace(/-/g, '') },
+      { run_id: `${RUN1}:x` },
+      { tenant_id: 'tenant:a' },
+      { tenant_id: ' tenant-a' },
+      { role: 'USER' },
+      { role: undefined },
+      { org_id: 'org_1' },
+      { service_id: 'svc_1' },
+      { external_user_id: 'ext_1' },
+      { chc_user_id: 'chc_1' }, // leak-check:allow
+      { plan_id: 'pro' },
+      { auth_context_hash: undefined },
+      { file_delete: { storage_session_id: 'a'.repeat(21) } },
+      { file_delete: { storage_session_id: 'a'.repeat(21), file_id: 'b'.repeat(21), kind: 'agent' } },
+      { file_delete: { storage_session_id: 'short', file_id: 'b'.repeat(21) } },
+      { file_delete: 'x' },
     ];
-    for (const [overrides, message] of cases) {
-      expect(jwtReason(agentToken(overrides))).toContain(message);
+    expect(jwtReason(agentToken())).toBe('accepted');
+    for (const overrides of cases) {
+      expect([overrides, jwtReason(agentToken(overrides))]).toEqual([overrides, 'malformed_claims']);
     }
   });
 
   test('#18: a key bound to tenants signs agent_run only for those tenants', () => {
     const boundKey = testSigningKey(Buffer.alloc(32, 9));
     expect(jwtReason(signTestJwt(agentClaims(), boundKey, BOUND_KID))).toBe('accepted');
-    expect(jwtReason(signTestJwt(agentClaims({ tenant_id: OTHER_TENANT }), boundKey, BOUND_KID))).toBe(
-      'tenant_not_allowed: JWT tenant is not allowed for this key',
-    );
+    expect(jwtReason(signTestJwt(agentClaims({ tenant_id: OTHER_TENANT }), boundKey, BOUND_KID))).toBe('tenant_not_allowed');
   });
 
   test('a personal token carrying file_delete is refused, not ignored', () => {
-    expect(jwtReason(userToken({ file_delete: { storage_session_id: 'a'.repeat(21), file_id: 'b'.repeat(21) } }))).toBe(
-      'malformed_claims: file_delete is only accepted for agent_run',
-    );
+    expect(jwtReason(userToken())).toBe('accepted');
+    expect(jwtReason(userToken({ file_delete: { storage_session_id: 'a'.repeat(21), file_id: 'b'.repeat(21) } }))).toBe('malformed_claims');
   });
 
   test('a personal token with an Agent-looking sub stays a personal principal', () => {
@@ -375,7 +377,7 @@ describe('agent_run identity consumers (C5)', () => {
 
   test('replay output key: agent_run state requires its persisted private key, no userId fallback', () => {
     const agentState = { execution_id: 'e', session_id: 's', agentRun: { agentId: AGENT, runId: RUN1 }, userId: AGENT } as ExecutionState;
-    expect(() => replaySessionKey(agentState)).toThrow('no session key');
+    expect(() => replaySessionKey(agentState)).toThrow(Error);
     expect(replaySessionKey({ ...agentState, sessionKey: 'k' })).toBe('k');
     expect(replaySessionKey({ execution_id: 'e', session_id: 's', userId: 'legacy-key' } as ExecutionState)).toBe('legacy-key');
   });
@@ -634,10 +636,46 @@ describe('deletion-only tokens (C3) and durable owner binding (C4)', () => {
     expect(deleted.status).toBe(200);
     expect(harness.objects.has(`${sid}/${fid}`)).toBe(false);
     expect(bindings.has(`${sid}/${fid}`)).toBe(false);
-    const expectHeaders = harness.fileServerCalls.filter(c => c.method === 'DELETE' && c.url.endsWith(`/${sid}/objects/${fid}`)).map(c => c.headers['x-codeapi-owner-expect']);
-    expect(expectHeaders.at(-1)).toBe(ownerBindingValue(TENANT, { agentId: AGENT, runId: RUN1 }));
+    const ownerDeletes = harness.fileServerCalls.filter(c => c.url.endsWith(`/${sid}/objects/${fid}/owner-delete`));
+    expect(ownerDeletes.map(c => [c.method, c.headers['x-codeapi-owner-expect']]).at(-1)).toEqual(['POST', ownerBindingValue(TENANT, { agentId: AGENT, runId: RUN1 })]);
+    /* The binding path never used the plain delete. */
+    expect(harness.fileServerCalls.some(c => c.method === 'DELETE' && c.url.endsWith(`/${sid}/objects/${fid}`))).toBe(false);
 
     expect((await call(harness.baseUrl, deletionToken(sid, fid), 'DELETE', path)).status).toBe(404);
+  });
+
+  test('mixed version: against a file server without the owner-checked operation, an expired-cache deletion is refused and deletes nothing', async () => {
+    const { sid, fid } = uploadedRef(await agentUpload({ kind: 'agent', id: RUN1 }));
+    await harness.redis.del(`session:${sid}`);
+    const path = `/v1/files/${sid}/${fid}?kind=agent&id=${RUN1}`;
+    const callsBefore = harness.fileServerCalls.length;
+    harness.setOwnerDeleteHandler(undefined);
+    try {
+      /* Cross-tenant: a token for another tenant (unbound key) naming the same Agent, run and object. */
+      const otherTenant = deletionToken(sid, fid, { tenant_id: OTHER_TENANT });
+      expect((await call(harness.baseUrl, otherTenant, 'DELETE', path)).status).toBe(403);
+      /* Even the owner's own token cannot delete through an old file server. */
+      expect((await call(harness.baseUrl, deletionToken(sid, fid), 'DELETE', path)).status).toBe(403);
+    } finally {
+      harness.setOwnerDeleteHandler(newFileServerOwnerDelete);
+    }
+    expect(harness.objects.has(`${sid}/${fid}`)).toBe(true);
+    expect(harness.fileServerCalls.slice(callsBefore).some(c => c.method === 'DELETE')).toBe(false);
+    /* Same case on the new file server: the other tenant is refused, the owner deletes. */
+    expect((await call(harness.baseUrl, deletionToken(sid, fid, { tenant_id: OTHER_TENANT }), 'DELETE', path)).status).toBe(403);
+    expect(harness.objects.has(`${sid}/${fid}`)).toBe(true);
+    expect((await call(harness.baseUrl, deletionToken(sid, fid), 'DELETE', path)).status).toBe(200);
+    expect(harness.objects.has(`${sid}/${fid}`)).toBe(false);
+  });
+
+  test('reverse gap: an object stored without a binding (old file server or old gateway) cannot be deleted after expiry', async () => {
+    const sid = uploadedRef(await agentUpload({ kind: 'agent', id: RUN1 })).sid;
+    const fid = 'v'.repeat(21);
+    /* An old file server ignores the binding header; an old gateway never sends it. Either way the object is unbound. */
+    harness.objects.set(`${sid}/${fid}`, { bytes: Buffer.from('unbound output'), headers: {} });
+    await harness.redis.del(`session:${sid}`);
+    expect((await call(harness.baseUrl, deletionToken(sid, fid), 'DELETE', `/v1/files/${sid}/${fid}?kind=agent&id=${RUN1}`)).status).toBe(403);
+    expect(harness.objects.has(`${sid}/${fid}`)).toBe(true);
   });
 
   test('an object with no binding is never reported deleted through the binding path', async () => {

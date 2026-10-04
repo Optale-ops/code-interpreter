@@ -63,6 +63,15 @@ export function sessionKeyForLog<T extends string | null | undefined>(sessionKey
 export const OWNER_BINDING_HEADER = 'X-CodeAPI-Owner-Binding';
 /** Internal api → file_server header: delete only if the stored binding equals this. */
 export const OWNER_EXPECT_HEADER = 'X-CodeAPI-Owner-Expect';
+/** Shape of a stored binding (see `ownerBindingValue`). */
+export const OWNER_BINDING_PATTERN = /^agent_run\.[0-9a-f]{64}$/;
+/**
+ * Last path segment of the file server's owner-checked delete operation,
+ * `POST /sessions/:sid/objects/:fid/owner-delete`. File servers that predate
+ * owner bindings have no such route and answer 404, so the api never falls
+ * back to a plain delete.
+ */
+export const OWNER_DELETE_OPERATION = 'owner-delete';
 /** MinIO user-metadata name; stored with the object, so it lives exactly as long as the bytes. */
 export const OWNER_METADATA = 'X-Amz-Meta-Codeapi-Owner';
 /** How MinIO returns `OWNER_METADATA` from statObject. */

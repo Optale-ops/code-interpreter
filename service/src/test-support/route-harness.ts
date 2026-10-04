@@ -21,7 +21,8 @@ type StoreEntry = { value: string; ttl?: number };
 export type CapturedLog = { level: string; message: string; meta?: unknown };
 export type CapturedPut = { url: string; headers: Record<string, string>; bytes: number };
 export type CapturedFileServerCall = { method: string; url: string; headers: Record<string, string> };
-export type DeleteHandler = (req: IncomingMessage, key: string) => { status: number; body: unknown };
+/** Handles `POST .../objects/:fid/owner-delete`. Unset = a file server that predates the operation (404). */
+export type OwnerDeleteHandler = (req: IncomingMessage, key: string) => { status: number; body: unknown };
 /** Runs before the stub stores a PUT; a returned outcome refuses the write. */
 export type PutHandler = (headers: Record<string, string>, sessionId: string, fileId: string) => { status: number; body: unknown } | undefined;
 
@@ -146,7 +147,7 @@ export interface RouteHarness {
   puts: CapturedPut[];
   fileServerCalls: CapturedFileServerCall[];
   objects: Map<string, { bytes: Buffer; headers: Record<string, string> }>;
-  setDeleteHandler(handler: DeleteHandler | undefined): void;
+  setOwnerDeleteHandler(handler: OwnerDeleteHandler | undefined): void;
   setPutHandler(handler: PutHandler | undefined): void;
   close(): Promise<void>;
 }
@@ -222,7 +223,7 @@ export async function installRouteHarness(options: {
   const puts: CapturedPut[] = [];
   const fileServerCalls: CapturedFileServerCall[] = [];
   const objects = new Map<string, { bytes: Buffer; headers: Record<string, string> }>();
-  let deleteHandler: DeleteHandler | undefined;
+  let ownerDeleteHandler: OwnerDeleteHandler | undefined;
   let putHandler: PutHandler | undefined;
   const fileServer = createServer(async (req, res) => {
     const url = req.url ?? '';
@@ -232,6 +233,12 @@ export async function installRouteHarness(options: {
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(body));
     };
+    const ownerDelete = url.match(/^\/sessions\/([^/?]+)\/objects\/([^/?]+)\/owner-delete$/);
+    if (ownerDelete) {
+      if (req.method !== 'POST' || !ownerDeleteHandler) return send(404, { error: 'not found' });
+      const outcome = ownerDeleteHandler(req, `${ownerDelete[1]}/${ownerDelete[2]}`);
+      return send(outcome.status, outcome.body);
+    }
     const match = url.match(/^\/sessions\/([^/?]+)\/objects(?:\/([^/?]+))?(\/metadata)?/);
     if (!match) return send(404, { error: 'not found' });
     const [, sessionId, fileId, metadata] = match;
@@ -259,10 +266,6 @@ export async function installRouteHarness(options: {
       return send(200, [...objects.keys()].filter(name => name.startsWith(`${sessionId}/`)));
     }
     if (req.method === 'DELETE' && fileId) {
-      if (deleteHandler) {
-        const outcome = deleteHandler(req, key);
-        return send(outcome.status, outcome.body);
-      }
       if (!objects.delete(key)) return send(404, { error: 'File not found' });
       return send(200, { message: 'File deleted successfully', session_id: sessionId, fileId });
     }
@@ -314,8 +317,8 @@ export async function installRouteHarness(options: {
     puts,
     fileServerCalls,
     objects,
-    setDeleteHandler(handler) {
-      deleteHandler = handler;
+    setOwnerDeleteHandler(handler) {
+      ownerDeleteHandler = handler;
     },
     setPutHandler(handler) {
       putHandler = handler;

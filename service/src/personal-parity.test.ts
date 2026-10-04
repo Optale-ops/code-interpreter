@@ -269,6 +269,19 @@ test('personal identity consumers, routes and log lines are byte-identical to th
   expect(existsSync(GOLDEN_PATH)).toBe(true);
   const golden = JSON.parse(readFileSync(GOLDEN_PATH, 'utf8'));
   expect(snapshot).toEqual(golden);
-  /* toEqual ignores key order; serialized log lines, claims and state do not. */
-  expect(JSON.stringify(snapshot)).toBe(JSON.stringify(golden));
+  /* toEqual ignores key order; serialized log lines, claims and state do not.
+   * HTTP header maps are the one unordered input: their enumeration order
+   * depends on the Bun/axios build, so both sides sort them before the
+   * order-sensitive comparison. Nothing else is canonicalized. */
+  const sortHeaderMaps = (value: { routes: { puts: Array<{ headers: Record<string, string> }> } }): unknown => ({
+    ...value,
+    routes: {
+      ...value.routes,
+      puts: value.routes.puts.map(put => ({
+        ...put,
+        headers: Object.fromEntries(Object.entries(put.headers).sort(([a], [b]) => a.localeCompare(b))),
+      })),
+    },
+  });
+  expect(JSON.stringify(sortHeaderMaps(snapshot as never))).toBe(JSON.stringify(sortHeaderMaps(golden)));
 });
