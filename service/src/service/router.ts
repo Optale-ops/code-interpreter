@@ -10,13 +10,22 @@ import { checkServiceStartUp, checkServiceShutDown } from '../lifecycle';
 import { sessionAuth } from '../middleware/auth';
 import { executionLimiter, uploadLimiter, downloadLimiter, fetchLimiter } from '../middleware/limits';
 import { internalServiceHeaders } from '../internal-service-auth';
-import { resolveSessionKey, resolveOutputBucketSessionKey, SessionKeyResolutionError, parseUploadSessionKeyInput, type SessionKeyInput } from '../session-key';
+import { resolveSessionKey, resolveUploadSessionKey, resolveOutputBucketSessionKey, SessionKeyResolutionError, parseUploadSessionKeyInput, type SessionKeyInput } from '../session-key';
 import { pyQueue, otherQueue, pyQueueEvents, otherQueueEvents, queueNames, connection } from '../queue';
 import { sleep, getAxiosErrorDetails, publicExecutionFailure } from '../utils';
 import { env, jobCompletionWaitTimeoutMs, planLimits, resolveLanguage } from '../config';
 import { createPayload } from '../payload';
 import { summarizeRequestedFiles } from '../execution-log';
-import { getCredentialId, getPrincipalOrReject } from '../auth/principal';
+import { getCredentialId, getPrincipalOrReject, type CodeApiPrincipal } from '../auth/principal';
+import {
+  OWNER_BINDING_HEADER,
+  OWNER_DELETE_OPERATION,
+  OWNER_EXPECT_HEADER,
+  agentRunLogFields,
+  ownerBindingValue,
+  sessionKeyForLog,
+  signOwnerBinding,
+} from '../agent-run';
 import { isSyntheticPrincipalSource } from '../auth/synthetic';
 import { getExecutionIdentity } from '../execution-identity';
 import { resolveRuntimeSessionIdForExecRequest, RuntimeSessionHintError } from '../runtime-session/id';
@@ -44,7 +53,7 @@ const UPLOAD_TIMEOUT_MS = 30_000;
  * caller. */
 const MAX_BATCH_FILES = 200;
 
-function validateUploadRequest(req: t.AuthenticatedRequest, res: Response): string | null {
+function validateUploadRequest(req: t.AuthenticatedRequest, res: Response): CodeApiPrincipal | null {
   const principal = getPrincipalOrReject(req, res);
   if (!principal) return null;
   if (req.headers['content-type']?.includes('multipart/form-data') !== true) {
@@ -59,7 +68,30 @@ function validateUploadRequest(req: t.AuthenticatedRequest, res: Response): stri
     res.status(503).json({ error: 'Service is starting up' });
     return null;
   }
-  return principal.userId;
+  return principal;
+}
+
+/** `User ID: <id>` for people; kind plus hashed ids for an agent_run. */
+function uploadSubjectLabel(principal: CodeApiPrincipal): string {
+  if (!principal.agentRun) return `User ID: ${principal.userId}`;
+  const fields = agentRunLogFields(principal.tenantId, principal.agentRun);
+  return `Subject: agent_run | Tenant: ${fields.tenantHash} | Agent: ${fields.agentHash} | Run: ${fields.runHash}`;
+}
+
+/**
+ * C4 at upload: objects in an agent_run's private key carry a binding to the
+ * verified (tenant, Agent, run), written by the api for the file server.
+ * Nothing from the request body or headers feeds it.
+ */
+function ownerBindingHeaders(
+  principal: CodeApiPrincipal,
+  input: SessionKeyInput,
+  sessionId: string,
+  fileId: string,
+): Record<string, string> {
+  if (!principal.agentRun || input.kind !== 'agent') return {};
+  const signed = signOwnerBinding(sessionId, fileId, ownerBindingValue(principal.tenantId, principal.agentRun));
+  return signed ? { [OWNER_BINDING_HEADER]: signed } : {};
 }
 
 function sendFileRefAuthorizationError(
@@ -68,6 +100,19 @@ function sendFileRefAuthorizationError(
   req?: t.AuthenticatedRequest,
 ): boolean {
   if (error instanceof FileRefAuthorizationError) {
+    const agentRun = req?.codeApiAuthContext?.agentRun;
+    if (agentRun) {
+      /* The rejection context carries resource ids and session keys that
+       * embed the raw run id; an agent_run rejection logs hashes only. */
+      logger.warn('File reference authorization rejected', {
+        status: error.status,
+        reason: error.reason,
+        message: error.message,
+        ...agentRunLogFields(req?.codeApiAuthContext?.tenantId, agentRun),
+      });
+      res.status(error.status).json({ error: error.message });
+      return true;
+    }
     const queryEntityId = typeof req?.query?.entity_id === 'string' ? req.query.entity_id : undefined;
     logger.warn('File reference authorization rejected', {
       status: error.status,
@@ -102,14 +147,19 @@ function sendSessionKeyResolutionError(
   context: string,
 ): boolean {
   if (error instanceof SessionKeyResolutionError) {
+    const agentRun = req.codeApiAuthContext?.agentRun;
     logger.error(`[${INSTANCE_ID}] sessionKey resolution failed (${context})`, {
       status: error.status,
       message: error.message,
       method: req.method,
       path: req.path,
-      requestUserId: req.codeApiAuthContext?.userId,
-      authContextUserId: req.codeApiAuthContext?.userId,
-      tenantId: req.codeApiAuthContext?.tenantId,
+      ...(agentRun
+        ? agentRunLogFields(req.codeApiAuthContext?.tenantId, agentRun)
+        : {
+          requestUserId: req.codeApiAuthContext?.userId,
+          authContextUserId: req.codeApiAuthContext?.userId,
+          tenantId: req.codeApiAuthContext?.tenantId,
+        }),
     });
     res.status(error.status).json({ error: error.message });
     return true;
@@ -125,6 +175,7 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
   const apiKeyId = getCredentialId(req);
   const userId = principal.userId;
   const identity = getExecutionIdentity(req, userId);
+  const agentRun = identity.agentRun;
   const isSyntheticRequest = isSyntheticPrincipalSource(identity.principalSource);
 
   if (checkServiceShutDown()) {
@@ -144,13 +195,21 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
 
   let runtimeSessionId: string | undefined;
   try {
-    runtimeSessionId = resolveRuntimeSessionIdForExecRequest({
-      mode: env.RUNTIME_SESSION_MODE,
-      storageNamespace: identity.storageNamespace,
-      canonicalUserId: identity.canonicalUserId,
-      runtimeSessionHint: body.runtime_session_hint,
-      isSynthetic: isSyntheticRequest,
-    });
+    runtimeSessionId = resolveRuntimeSessionIdForExecRequest(agentRun
+      ? {
+        mode: env.RUNTIME_SESSION_MODE,
+        storageNamespace: identity.storageNamespace,
+        agentRun,
+        runtimeSessionHint: body.runtime_session_hint,
+        isSynthetic: isSyntheticRequest,
+      }
+      : {
+        mode: env.RUNTIME_SESSION_MODE,
+        storageNamespace: identity.storageNamespace,
+        canonicalUserId: identity.canonicalUserId,
+        runtimeSessionHint: body.runtime_session_hint,
+        isSynthetic: isSyntheticRequest,
+      });
   } catch (error) {
     if (error instanceof RuntimeSessionHintError) {
       return res.status(error.status).json({ error: error.message });
@@ -200,15 +259,24 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
 
   try {
     if (!isSyntheticRequest) {
-      logger.info('Request received', {
-        userId,
-        apiKeyId,
-        user: user_id,
-        session_id,
-        language,
-        files: summarizeRequestedFiles(authorizedFiles),
-        sessionKey,
-      });
+      logger.info('Request received', agentRun
+        ? {
+          ...agentRunLogFields(identity.storageNamespace, agentRun),
+          apiKeyId,
+          session_id,
+          language,
+          files: summarizeRequestedFiles(authorizedFiles),
+          sessionKey: sessionKeyForLog(sessionKey),
+        }
+        : {
+          userId,
+          apiKeyId,
+          user: user_id,
+          session_id,
+          language,
+          files: summarizeRequestedFiles(authorizedFiles),
+          sessionKey,
+        });
     }
 
     const isPyPlot = language === Languages.py && (code.includes('import matplotlib') || code.includes('import seaborn'));
@@ -220,7 +288,7 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
     const sandboxSecurity = prepareSandboxJobSecurity({
       req,
       executionId: execution_id,
-      userId,
+      ...(agentRun ? { agentRun } : { userId }),
       sessionKey,
       outputSessionId: session_id,
       payload: rawPayload,
@@ -239,7 +307,7 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
       const traceCarrier = captureTraceCarrier();
       return queue.add(Jobs.execute, {
         code,
-        userId,
+        ...(agentRun ? {} : { userId }),
         payload: sandboxSecurity.payload,
         apiKeyId,
         isSynthetic: isSyntheticRequest,
@@ -247,7 +315,7 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
         principalSource: identity.principalSource,
         executionId: execution_id,
         tenantId: identity.storageNamespace,
-        canonicalUserId: identity.canonicalUserId,
+        ...(agentRun ? { agentRun } : { canonicalUserId: identity.canonicalUserId }),
         executionProfile: env.EXECUTION_PROFILE,
         ...(runtimeSessionId != null ? { runtimeSessionId } : {}),
         runtimeSessionMode,
@@ -351,8 +419,8 @@ router.get('/download/:session_id/:fileId', downloadLimiter, sessionAuth, async 
 
 router.post('/upload', uploadLimiter, async (req: t.AuthenticatedRequest, res: Response) => {
   try {
-    const userId = validateUploadRequest(req, res);
-    if (userId == null) return;
+    const principal = validateUploadRequest(req, res);
+    if (principal == null) return;
 
     const session_id = nanoid();
     /* `kind`/`id`/`version?` form fields drive the upload-bucket
@@ -424,11 +492,14 @@ router.post('/upload', uploadLimiter, async (req: t.AuthenticatedRequest, res: R
 
         let sessionKeyInput: SessionKeyInput;
         try {
+          if (principal.agentRun && uploadKind === 'user') {
+            throw new SessionKeyResolutionError(403, "agent_run: kind 'user' is not available");
+          }
           sessionKeyInput = parseUploadSessionKeyInput({
             kind: uploadKind,
             id: uploadId,
             version: uploadVersionRaw,
-            authContextUserId: req.codeApiAuthContext?.userId ?? userId,
+            authContextUserId: req.codeApiAuthContext?.userId ?? principal.userId ?? '',
           });
         } catch (err) {
           clearTimeout(uploadTimeout);
@@ -439,7 +510,7 @@ router.post('/upload', uploadLimiter, async (req: t.AuthenticatedRequest, res: R
 
         let sessionKey: string;
         try {
-          sessionKey = resolveSessionKey(req, sessionKeyInput);
+          sessionKey = resolveUploadSessionKey(req, sessionKeyInput, readOnly);
         } catch (err) {
           clearTimeout(uploadTimeout);
           file.resume();
@@ -452,13 +523,14 @@ router.post('/upload', uploadLimiter, async (req: t.AuthenticatedRequest, res: R
            * Encoding here preserves `/` as `%2F` in transit and keeps
            * non-ASCII filenames legal as HTTP header values. */
           'X-Original-Filename': encodeURIComponent(filename),
+          ...ownerBindingHeaders(principal, sessionKeyInput, session_id, fileId),
         };
         if (readOnly) {
           putHeaders['X-Read-Only'] = 'true';
         }
         connection.set(`session:${session_id}`, sessionKey, 'EX', env.SESSION_CACHE_TTL)
           .then(() => {
-            logger.info(`[${INSTANCE_ID}] Upload: Session ID: ${session_id} | User ID: ${userId} | Session key: ${sessionKey}`);
+            logger.info(`[${INSTANCE_ID}] Upload: Session ID: ${session_id} | ${uploadSubjectLabel(principal)} | Session key: ${sessionKeyForLog(sessionKey)}`);
             return enqueueForward(() => forwardUploadToFileServer({
               file,
               url: `${env.FILE_SERVER_URL}/sessions/${session_id}/objects/${fileId}`,
@@ -513,7 +585,10 @@ router.post('/upload', uploadLimiter, async (req: t.AuthenticatedRequest, res: R
       } catch (error) {
         logger.error(`[${INSTANCE_ID}] Error uploading files for session ${session_id}:`, error);
         if (!res.headersSent) {
-          if (error instanceof Error) {
+          if (error instanceof SessionKeyResolutionError && error.status === 403) {
+            /* An agent_run upload outside its permitted kinds (C1). */
+            res.status(403).json({ error: error.message });
+          } else if (error instanceof Error) {
             if (error.message === 'Upload timeout') {
               res.status(504).json({ error: 'Upload timeout' });
             } else {
@@ -548,8 +623,8 @@ router.post('/upload', uploadLimiter, async (req: t.AuthenticatedRequest, res: R
 
 router.post('/upload/batch', uploadLimiter, async (req: t.AuthenticatedRequest, res: Response) => {
   try {
-    const userId = validateUploadRequest(req, res);
-    if (userId == null) return;
+    const principal = validateUploadRequest(req, res);
+    if (principal == null) return;
 
     const session_id = nanoid();
     /* `kind`/`id`/`version?` form fields drive the batch's sessionKey
@@ -572,9 +647,11 @@ router.post('/upload/batch', uploadLimiter, async (req: t.AuthenticatedRequest, 
     /* Redis registration is also a batch-level dependency fault. Keep file
      * promises fulfilled while Busboy drains, then surface one 500. */
     let sessionRegistrationError: Error | undefined;
+    /* agent_run uploads outside the permitted kinds (C1) refuse the batch. */
+    let forbiddenError: SessionKeyResolutionError | undefined;
 
     const ensureSessionRegistered = createUploadSessionRegistrar((sessionKey) => {
-      logger.info(`[${INSTANCE_ID}] Batch upload: Session ID: ${session_id} | User ID: ${userId} | Session key: ${sessionKey}`);
+      logger.info(`[${INSTANCE_ID}] Batch upload: Session ID: ${session_id} | ${uploadSubjectLabel(principal)} | Session key: ${sessionKeyForLog(sessionKey)}`);
       return connection.set(`session:${session_id}`, sessionKey, 'EX', env.SESSION_CACHE_TTL);
     });
 
@@ -638,15 +715,21 @@ router.post('/upload/batch', uploadLimiter, async (req: t.AuthenticatedRequest, 
 
         let sessionKeyInput: SessionKeyInput;
         try {
+          if (principal.agentRun && uploadKind === 'user') {
+            throw new SessionKeyResolutionError(403, "agent_run: kind 'user' is not available");
+          }
           sessionKeyInput = parseUploadSessionKeyInput({
             kind: uploadKind,
             id: uploadId,
             version: uploadVersionRaw,
-            authContextUserId: req.codeApiAuthContext?.userId ?? userId,
+            authContextUserId: req.codeApiAuthContext?.userId ?? principal.userId ?? '',
           });
         } catch (err) {
           clearTimeout(uploadTimeout);
           file.resume();
+          if (err instanceof SessionKeyResolutionError && err.status === 403) {
+            forbiddenError ??= err;
+          }
           const message = err instanceof Error ? err.message : 'Invalid upload identity';
           resolve({ status: 'error', filename, error: message });
           return;
@@ -654,7 +737,7 @@ router.post('/upload/batch', uploadLimiter, async (req: t.AuthenticatedRequest, 
 
         let sessionKey: string;
         try {
-          sessionKey = resolveSessionKey(req, sessionKeyInput);
+          sessionKey = resolveUploadSessionKey(req, sessionKeyInput, readOnly);
         } catch (err) {
           clearTimeout(uploadTimeout);
           file.resume();
@@ -664,6 +747,9 @@ router.post('/upload/batch', uploadLimiter, async (req: t.AuthenticatedRequest, 
            * misconfiguration. */
           if (err instanceof SessionKeyResolutionError && err.status === 500 && !serverError) {
             serverError = err;
+          }
+          if (err instanceof SessionKeyResolutionError && err.status === 403) {
+            forbiddenError ??= err;
           }
           const message = err instanceof Error ? err.message : 'Failed to resolve sessionKey';
           resolve({ status: 'error', filename, error: message });
@@ -675,6 +761,7 @@ router.post('/upload/batch', uploadLimiter, async (req: t.AuthenticatedRequest, 
            * Encoding here preserves `/` as `%2F` in transit and keeps
            * non-ASCII filenames legal as HTTP header values. */
           'X-Original-Filename': encodeURIComponent(filename),
+          ...ownerBindingHeaders(principal, sessionKeyInput, session_id, fileId),
         };
         if (readOnly) {
           putHeaders['X-Read-Only'] = 'true';
@@ -758,6 +845,11 @@ router.post('/upload/batch', uploadLimiter, async (req: t.AuthenticatedRequest, 
             { session_id, files: results.length },
           );
           res.status(500).json({ error: serverError.message });
+          return;
+        }
+
+        if (forbiddenError) {
+          res.status(403).json({ error: forbiddenError.message });
           return;
         }
 
@@ -879,6 +971,44 @@ router.get('/sessions/:session_id/objects/:fileId', fetchLimiter, sessionAuth, a
 router.delete('/files/:session_id/:fileId', fetchLimiter, sessionAuth, async (req: t.AuthenticatedRequest, res: Response) => {
   const { session_id, fileId } = req.params;
 
+  /* agent_run deletion after the session cache expired: only the file
+   * server's owner-checked operation may delete, and anything but its explicit
+   * 2xx outcome is a refusal. A file server without that operation answers
+   * 404/405 here, which stays a refusal with the bytes in place; there is no
+   * fallback to the plain delete. */
+  if (req.ownerBindingExpectation) {
+    let outcome: unknown;
+    let status = 0;
+    try {
+      const response = await axios.post(
+        `${env.FILE_SERVER_URL}/sessions/${session_id}/objects/${fileId}/${OWNER_DELETE_OPERATION}`,
+        undefined,
+        {
+          headers: internalServiceHeaders({ [OWNER_EXPECT_HEADER]: req.ownerBindingExpectation }),
+          validateStatus: () => true,
+        },
+      );
+      status = response.status;
+      outcome = (response.data as { outcome?: unknown } | undefined)?.outcome;
+    } catch (error) {
+      logger.error(`[${INSTANCE_ID}] Owner-checked deletion failed - Session ID: ${session_id} | File ID: ${fileId}:`, getAxiosErrorDetails(error));
+      return res.status(500).json({ error: 'Error deleting file' });
+    }
+    if (status >= 200 && status < 300 && outcome === 'deleted') {
+      await connection.del(`upload:${req.sessionKey}${session_id}${fileId}`);
+      logger.info(`[${INSTANCE_ID}] File deleted: Session ID: ${session_id} | File ID: ${fileId}`);
+      return res.status(200).json({ message: 'File deleted successfully', session_id, fileId });
+    }
+    if (status >= 200 && status < 300 && outcome === 'absent') {
+      return res.status(404).json({ error: 'File not found' });
+    }
+    logger.warn(`[${INSTANCE_ID}] Owner-checked deletion refused - Session ID: ${session_id} | File ID: ${fileId}`, { fileServerStatus: status });
+    if (status === 500) {
+      return res.status(500).json({ error: 'Error deleting file' });
+    }
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+
   try {
     const response = await axios.delete(
       `${env.FILE_SERVER_URL}/sessions/${session_id}/objects/${fileId}`,
@@ -891,6 +1021,12 @@ router.delete('/files/:session_id/:fileId', fetchLimiter, sessionAuth, async (re
   } catch (error) {
     const errorDetails = getAxiosErrorDetails(error);
     logger.error(`[${INSTANCE_ID}] Error deleting file - Session ID: ${session_id} | File ID: ${fileId}:`, errorDetails);
+    /* Cache-present agent_run deletes keep the plain route; their outcomes are
+     * explicit: not-found only when the scoped bytes are absent, anything
+     * else is a failure, never success. */
+    if (req.codeApiAuthContext?.agentRun && axios.isAxiosError(error) && error.response?.status === 404) {
+      return res.status(404).json({ error: 'File not found' });
+    }
     return res.status(500).json({
       error: 'Error deleting file',
     });

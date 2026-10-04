@@ -1,0 +1,1276 @@
+{
+  "unit": {
+    "console_personal": {
+      "tokenSha256": "a8f119ff04134e976b90d11d82e00d351d16065112d12cec78eb951d975ef124",
+      "principal": {
+        "userId": "65f0c0ffee0000000000abcd",
+        "tenantId": "tenant-parity",
+        "role": "USER",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "authContext": {
+        "userId": "65f0c0ffee0000000000abcd",
+        "tenantId": "tenant-parity",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "executionIdentity": {
+        "userId": "65f0c0ffee0000000000abcd",
+        "canonicalUserId": "65f0c0ffee0000000000abcd",
+        "storageNamespace": "tenant-parity",
+        "tenantId": "tenant-parity",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "planId": null,
+      "sessionKeys": {
+        "user": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "agentRun": "tenant-parity:agent:0b7f3c2e-9d4a-4c1b-8e2f-5a6b7c8d9e0f",
+        "agentPublic": "tenant-parity:agent:agent_AbCdEfGhIjK",
+        "skill": "tenant-parity:skill:65f0c0ffee0000000000beef:v:3",
+        "outputBucket": "tenant-parity:user:65f0c0ffee0000000000abcd"
+      },
+      "rateLimitKey": "tenant-parity:user:65f0c0ffee0000000000abcd",
+      "runtimeSessionId": "rt_4fa5a133a9e76a2a52b6c3a1b10555fc021bbc91",
+      "manifest": {
+        "v": 1,
+        "exec_id": "exec_parity_0000000001",
+        "tenant_id": "tenant-parity",
+        "user_id": "65f0c0ffee0000000000abcd",
+        "session_key": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "input_files": [
+          {
+            "id": "<id1>",
+            "session_id": "<id2>",
+            "name": "in.csv"
+          }
+        ],
+        "read_sessions": [
+          "<id2>"
+        ],
+        "output_session_id": "<id3>",
+        "max_upload_bytes": 26214400,
+        "max_output_files": 50,
+        "max_requests": 1000,
+        "iat": 1790000000,
+        "exp": 1790000360,
+        "tool_call_socket": false,
+        "principal_source": "librechat_jwt",
+        "auth_context_hash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "grant": {
+        "grant_id": "<id4>",
+        "exec_id": "exec_parity_0000000001",
+        "tenant_id": "tenant-parity",
+        "user_id": "65f0c0ffee0000000000abcd",
+        "session_key": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "input_files": [
+          {
+            "id": "<id1>",
+            "session_id": "<id2>",
+            "name": "in.csv"
+          }
+        ],
+        "read_sessions": [
+          "<id2>"
+        ],
+        "output_session_id": "<id3>",
+        "max_upload_bytes": 26214400,
+        "max_output_files": 50,
+        "max_requests": 1000,
+        "iat": 1790000000,
+        "exp": 1790000360,
+        "principal_source": "librechat_jwt",
+        "auth_context_hash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "replayState": {
+        "execution_id": "exec_parity_0000000001",
+        "session_id": "<id3>",
+        "sessionKey": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "userId": "65f0c0ffee0000000000abcd",
+        "tenantId": "tenant-parity",
+        "canonicalUserId": "65f0c0ffee0000000000abcd",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+        "apiKeyId": "",
+        "startTime": 1790000000000,
+        "lastActivity": 1790000000000,
+        "mode": "replay",
+        "userCode": "print(1)",
+        "tools": [],
+        "isPyPlot": false,
+        "timeout": 1000,
+        "callCount": 0,
+        "language": "python"
+      },
+      "continuationSameUser": {
+        "ok": true
+      },
+      "<id5>": {
+        "ok": false,
+        "status": 403,
+        "error": "Forbidden"
+      }
+    },
+    "with_plan_and_org": {
+      "tokenSha256": "5b077067ef2c2e88b96eabf1a53933a62290e28157f8b72fea17d436be6c4850",
+      "principal": {
+        "userId": "65f0c0ffee0000000000abcd",
+        "tenantId": "tenant-parity",
+        "role": "USER",
+        "orgId": "org_1",
+        "serviceId": "svc_1",
+        "externalUserId": "ext_1",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+        "planId": "pro"
+      },
+      "authContext": {
+        "userId": "65f0c0ffee0000000000abcd",
+        "tenantId": "tenant-parity",
+        "orgId": "org_1",
+        "serviceId": "svc_1",
+        "externalUserId": "ext_1",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "executionIdentity": {
+        "userId": "65f0c0ffee0000000000abcd",
+        "canonicalUserId": "65f0c0ffee0000000000abcd",
+        "storageNamespace": "tenant-parity",
+        "tenantId": "tenant-parity",
+        "orgId": "org_1",
+        "serviceId": "svc_1",
+        "externalUserId": "ext_1",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+        "planId": "pro"
+      },
+      "planId": "pro",
+      "sessionKeys": {
+        "user": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "agentRun": "tenant-parity:agent:0b7f3c2e-9d4a-4c1b-8e2f-5a6b7c8d9e0f",
+        "agentPublic": "tenant-parity:agent:agent_AbCdEfGhIjK",
+        "skill": "tenant-parity:skill:65f0c0ffee0000000000beef:v:3",
+        "outputBucket": "tenant-parity:user:65f0c0ffee0000000000abcd"
+      },
+      "rateLimitKey": "tenant-parity:user:65f0c0ffee0000000000abcd",
+      "runtimeSessionId": "rt_4fa5a133a9e76a2a52b6c3a1b10555fc021bbc91",
+      "manifest": {
+        "v": 1,
+        "exec_id": "exec_parity_0000000001",
+        "tenant_id": "tenant-parity",
+        "user_id": "65f0c0ffee0000000000abcd",
+        "session_key": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "input_files": [
+          {
+            "id": "<id1>",
+            "session_id": "<id2>",
+            "name": "in.csv"
+          }
+        ],
+        "read_sessions": [
+          "<id2>"
+        ],
+        "output_session_id": "<id3>",
+        "max_upload_bytes": 26214400,
+        "max_output_files": 50,
+        "max_requests": 1000,
+        "iat": 1790000000,
+        "exp": 1790000360,
+        "tool_call_socket": false,
+        "external_user_id": "ext_1",
+        "org_id": "org_1",
+        "service_id": "svc_1",
+        "principal_source": "librechat_jwt",
+        "auth_context_hash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "grant": {
+        "grant_id": "<id4>",
+        "exec_id": "exec_parity_0000000001",
+        "tenant_id": "tenant-parity",
+        "user_id": "65f0c0ffee0000000000abcd",
+        "session_key": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "input_files": [
+          {
+            "id": "<id1>",
+            "session_id": "<id2>",
+            "name": "in.csv"
+          }
+        ],
+        "read_sessions": [
+          "<id2>"
+        ],
+        "output_session_id": "<id3>",
+        "max_upload_bytes": 26214400,
+        "max_output_files": 50,
+        "max_requests": 1000,
+        "iat": 1790000000,
+        "exp": 1790000360,
+        "external_user_id": "ext_1",
+        "org_id": "org_1",
+        "service_id": "svc_1",
+        "principal_source": "librechat_jwt",
+        "auth_context_hash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "replayState": {
+        "execution_id": "exec_parity_0000000001",
+        "session_id": "<id3>",
+        "sessionKey": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "userId": "65f0c0ffee0000000000abcd",
+        "tenantId": "tenant-parity",
+        "canonicalUserId": "65f0c0ffee0000000000abcd",
+        "orgId": "org_1",
+        "serviceId": "svc_1",
+        "externalUserId": "ext_1",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+        "apiKeyId": "",
+        "startTime": 1790000000000,
+        "lastActivity": 1790000000000,
+        "mode": "replay",
+        "userCode": "print(1)",
+        "tools": [],
+        "isPyPlot": false,
+        "timeout": 1000,
+        "callCount": 0,
+        "language": "python"
+      },
+      "continuationSameUser": {
+        "ok": true
+      },
+      "<id5>": {
+        "ok": false,
+        "status": 403,
+        "error": "Forbidden"
+      }
+    },
+    "legacy_chc_alias": {
+      "tokenSha256": "9da35cdc028322ccc8473de703be6e47b434da48af558ed4ca3dcac313424879",
+      "principal": {
+        "userId": "65f0c0ffee0000000000abcd",
+        "tenantId": "tenant-parity",
+        "role": "USER",
+        "externalUserId": "chc_legacy_1",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "authContext": {
+        "userId": "65f0c0ffee0000000000abcd",
+        "tenantId": "tenant-parity",
+        "externalUserId": "chc_legacy_1",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "executionIdentity": {
+        "userId": "65f0c0ffee0000000000abcd",
+        "canonicalUserId": "65f0c0ffee0000000000abcd",
+        "storageNamespace": "tenant-parity",
+        "tenantId": "tenant-parity",
+        "externalUserId": "chc_legacy_1",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "planId": null,
+      "sessionKeys": {
+        "user": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "agentRun": "tenant-parity:agent:0b7f3c2e-9d4a-4c1b-8e2f-5a6b7c8d9e0f",
+        "agentPublic": "tenant-parity:agent:agent_AbCdEfGhIjK",
+        "skill": "tenant-parity:skill:65f0c0ffee0000000000beef:v:3",
+        "outputBucket": "tenant-parity:user:65f0c0ffee0000000000abcd"
+      },
+      "rateLimitKey": "tenant-parity:user:65f0c0ffee0000000000abcd",
+      "runtimeSessionId": "rt_4fa5a133a9e76a2a52b6c3a1b10555fc021bbc91",
+      "manifest": {
+        "v": 1,
+        "exec_id": "exec_parity_0000000001",
+        "tenant_id": "tenant-parity",
+        "user_id": "65f0c0ffee0000000000abcd",
+        "session_key": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "input_files": [
+          {
+            "id": "<id1>",
+            "session_id": "<id2>",
+            "name": "in.csv"
+          }
+        ],
+        "read_sessions": [
+          "<id2>"
+        ],
+        "output_session_id": "<id3>",
+        "max_upload_bytes": 26214400,
+        "max_output_files": 50,
+        "max_requests": 1000,
+        "iat": 1790000000,
+        "exp": 1790000360,
+        "tool_call_socket": false,
+        "external_user_id": "chc_legacy_1",
+        "principal_source": "librechat_jwt",
+        "auth_context_hash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "grant": {
+        "grant_id": "<id4>",
+        "exec_id": "exec_parity_0000000001",
+        "tenant_id": "tenant-parity",
+        "user_id": "65f0c0ffee0000000000abcd",
+        "session_key": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "input_files": [
+          {
+            "id": "<id1>",
+            "session_id": "<id2>",
+            "name": "in.csv"
+          }
+        ],
+        "read_sessions": [
+          "<id2>"
+        ],
+        "output_session_id": "<id3>",
+        "max_upload_bytes": 26214400,
+        "max_output_files": 50,
+        "max_requests": 1000,
+        "iat": 1790000000,
+        "exp": 1790000360,
+        "external_user_id": "chc_legacy_1",
+        "principal_source": "librechat_jwt",
+        "auth_context_hash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "replayState": {
+        "execution_id": "exec_parity_0000000001",
+        "session_id": "<id3>",
+        "sessionKey": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "userId": "65f0c0ffee0000000000abcd",
+        "tenantId": "tenant-parity",
+        "canonicalUserId": "65f0c0ffee0000000000abcd",
+        "externalUserId": "chc_legacy_1",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+        "apiKeyId": "",
+        "startTime": 1790000000000,
+        "lastActivity": 1790000000000,
+        "mode": "replay",
+        "userCode": "print(1)",
+        "tools": [],
+        "isPyPlot": false,
+        "timeout": 1000,
+        "callCount": 0,
+        "language": "python"
+      },
+      "continuationSameUser": {
+        "ok": true
+      },
+      "<id5>": {
+        "ok": false,
+        "status": 403,
+        "error": "Forbidden"
+      }
+    },
+    "openid_reuse": {
+      "tokenSha256": "b19a74709c62b6e4389c2fcdbb34a281e7272979093fe4120820e1b97e9a6af9",
+      "principal": {
+        "userId": "65f0c0ffee0000000000abcd",
+        "tenantId": "tenant-parity",
+        "role": "USER",
+        "principalSource": "openid_reuse",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "authContext": {
+        "userId": "65f0c0ffee0000000000abcd",
+        "tenantId": "tenant-parity",
+        "principalSource": "openid_reuse",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "executionIdentity": {
+        "userId": "65f0c0ffee0000000000abcd",
+        "canonicalUserId": "65f0c0ffee0000000000abcd",
+        "storageNamespace": "tenant-parity",
+        "tenantId": "tenant-parity",
+        "principalSource": "openid_reuse",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "planId": null,
+      "sessionKeys": {
+        "user": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "agentRun": "tenant-parity:agent:0b7f3c2e-9d4a-4c1b-8e2f-5a6b7c8d9e0f",
+        "agentPublic": "tenant-parity:agent:agent_AbCdEfGhIjK",
+        "skill": "tenant-parity:skill:65f0c0ffee0000000000beef:v:3",
+        "outputBucket": "tenant-parity:user:65f0c0ffee0000000000abcd"
+      },
+      "rateLimitKey": "tenant-parity:user:65f0c0ffee0000000000abcd",
+      "runtimeSessionId": "rt_4fa5a133a9e76a2a52b6c3a1b10555fc021bbc91",
+      "manifest": {
+        "v": 1,
+        "exec_id": "exec_parity_0000000001",
+        "tenant_id": "tenant-parity",
+        "user_id": "65f0c0ffee0000000000abcd",
+        "session_key": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "input_files": [
+          {
+            "id": "<id1>",
+            "session_id": "<id2>",
+            "name": "in.csv"
+          }
+        ],
+        "read_sessions": [
+          "<id2>"
+        ],
+        "output_session_id": "<id3>",
+        "max_upload_bytes": 26214400,
+        "max_output_files": 50,
+        "max_requests": 1000,
+        "iat": 1790000000,
+        "exp": 1790000360,
+        "tool_call_socket": false,
+        "principal_source": "openid_reuse",
+        "auth_context_hash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "grant": {
+        "grant_id": "<id4>",
+        "exec_id": "exec_parity_0000000001",
+        "tenant_id": "tenant-parity",
+        "user_id": "65f0c0ffee0000000000abcd",
+        "session_key": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "input_files": [
+          {
+            "id": "<id1>",
+            "session_id": "<id2>",
+            "name": "in.csv"
+          }
+        ],
+        "read_sessions": [
+          "<id2>"
+        ],
+        "output_session_id": "<id3>",
+        "max_upload_bytes": 26214400,
+        "max_output_files": 50,
+        "max_requests": 1000,
+        "iat": 1790000000,
+        "exp": 1790000360,
+        "principal_source": "openid_reuse",
+        "auth_context_hash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "replayState": {
+        "execution_id": "exec_parity_0000000001",
+        "session_id": "<id3>",
+        "sessionKey": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "userId": "65f0c0ffee0000000000abcd",
+        "tenantId": "tenant-parity",
+        "canonicalUserId": "65f0c0ffee0000000000abcd",
+        "principalSource": "openid_reuse",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+        "apiKeyId": "",
+        "startTime": 1790000000000,
+        "lastActivity": 1790000000000,
+        "mode": "replay",
+        "userCode": "print(1)",
+        "tools": [],
+        "isPyPlot": false,
+        "timeout": 1000,
+        "callCount": 0,
+        "language": "python"
+      },
+      "continuationSameUser": {
+        "ok": true
+      },
+      "<id5>": {
+        "ok": false,
+        "status": 403,
+        "error": "Forbidden"
+      }
+    },
+    "aud_array": {
+      "tokenSha256": "6b64094ac90df282fe7a4205e0a11e77d16330f12c5f0a8b4a3a42a4e895e4da",
+      "principal": {
+        "userId": "65f0c0ffee0000000000abcd",
+        "tenantId": "tenant-parity",
+        "role": "USER",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "authContext": {
+        "userId": "65f0c0ffee0000000000abcd",
+        "tenantId": "tenant-parity",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "executionIdentity": {
+        "userId": "65f0c0ffee0000000000abcd",
+        "canonicalUserId": "65f0c0ffee0000000000abcd",
+        "storageNamespace": "tenant-parity",
+        "tenantId": "tenant-parity",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "planId": null,
+      "sessionKeys": {
+        "user": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "agentRun": "tenant-parity:agent:0b7f3c2e-9d4a-4c1b-8e2f-5a6b7c8d9e0f",
+        "agentPublic": "tenant-parity:agent:agent_AbCdEfGhIjK",
+        "skill": "tenant-parity:skill:65f0c0ffee0000000000beef:v:3",
+        "outputBucket": "tenant-parity:user:65f0c0ffee0000000000abcd"
+      },
+      "rateLimitKey": "tenant-parity:user:65f0c0ffee0000000000abcd",
+      "runtimeSessionId": "rt_4fa5a133a9e76a2a52b6c3a1b10555fc021bbc91",
+      "manifest": {
+        "v": 1,
+        "exec_id": "exec_parity_0000000001",
+        "tenant_id": "tenant-parity",
+        "user_id": "65f0c0ffee0000000000abcd",
+        "session_key": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "input_files": [
+          {
+            "id": "<id1>",
+            "session_id": "<id2>",
+            "name": "in.csv"
+          }
+        ],
+        "read_sessions": [
+          "<id2>"
+        ],
+        "output_session_id": "<id3>",
+        "max_upload_bytes": 26214400,
+        "max_output_files": 50,
+        "max_requests": 1000,
+        "iat": 1790000000,
+        "exp": 1790000360,
+        "tool_call_socket": false,
+        "principal_source": "librechat_jwt",
+        "auth_context_hash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "grant": {
+        "grant_id": "<id4>",
+        "exec_id": "exec_parity_0000000001",
+        "tenant_id": "tenant-parity",
+        "user_id": "65f0c0ffee0000000000abcd",
+        "session_key": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "input_files": [
+          {
+            "id": "<id1>",
+            "session_id": "<id2>",
+            "name": "in.csv"
+          }
+        ],
+        "read_sessions": [
+          "<id2>"
+        ],
+        "output_session_id": "<id3>",
+        "max_upload_bytes": 26214400,
+        "max_output_files": 50,
+        "max_requests": 1000,
+        "iat": 1790000000,
+        "exp": 1790000360,
+        "principal_source": "librechat_jwt",
+        "auth_context_hash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "replayState": {
+        "execution_id": "exec_parity_0000000001",
+        "session_id": "<id3>",
+        "sessionKey": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "userId": "65f0c0ffee0000000000abcd",
+        "tenantId": "tenant-parity",
+        "canonicalUserId": "65f0c0ffee0000000000abcd",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+        "apiKeyId": "",
+        "startTime": 1790000000000,
+        "lastActivity": 1790000000000,
+        "mode": "replay",
+        "userCode": "print(1)",
+        "tools": [],
+        "isPyPlot": false,
+        "timeout": 1000,
+        "callCount": 0,
+        "language": "python"
+      },
+      "continuationSameUser": {
+        "ok": true
+      },
+      "<id5>": {
+        "ok": false,
+        "status": 403,
+        "error": "Forbidden"
+      }
+    },
+    "control_agent_looking_sub_with_run_id": {
+      "tokenSha256": "cc926025f2bdef447e72495add2f50e4acb5046cd0b2c7a4a252846d6866680e",
+      "principal": {
+        "userId": "65f0c0ffee0000000000f00d",
+        "tenantId": "tenant-parity",
+        "role": "AGENT",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "authContext": {
+        "userId": "65f0c0ffee0000000000f00d",
+        "tenantId": "tenant-parity",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "executionIdentity": {
+        "userId": "65f0c0ffee0000000000f00d",
+        "canonicalUserId": "65f0c0ffee0000000000f00d",
+        "storageNamespace": "tenant-parity",
+        "tenantId": "tenant-parity",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "planId": null,
+      "sessionKeys": {
+        "user": "tenant-parity:user:65f0c0ffee0000000000f00d",
+        "agentRun": "tenant-parity:agent:0b7f3c2e-9d4a-4c1b-8e2f-5a6b7c8d9e0f",
+        "agentPublic": "tenant-parity:agent:agent_AbCdEfGhIjK",
+        "skill": "tenant-parity:skill:65f0c0ffee0000000000beef:v:3",
+        "outputBucket": "tenant-parity:user:65f0c0ffee0000000000f00d"
+      },
+      "rateLimitKey": "tenant-parity:user:65f0c0ffee0000000000f00d",
+      "runtimeSessionId": "rt_0c7c040bf7dc346b5533a738be6f9372dfcfc686",
+      "manifest": {
+        "v": 1,
+        "exec_id": "exec_parity_0000000001",
+        "tenant_id": "tenant-parity",
+        "user_id": "65f0c0ffee0000000000f00d",
+        "session_key": "tenant-parity:user:65f0c0ffee0000000000f00d",
+        "input_files": [
+          {
+            "id": "<id1>",
+            "session_id": "<id2>",
+            "name": "in.csv"
+          }
+        ],
+        "read_sessions": [
+          "<id2>"
+        ],
+        "output_session_id": "<id3>",
+        "max_upload_bytes": 26214400,
+        "max_output_files": 50,
+        "max_requests": 1000,
+        "iat": 1790000000,
+        "exp": 1790000360,
+        "tool_call_socket": false,
+        "principal_source": "librechat_jwt",
+        "auth_context_hash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "grant": {
+        "grant_id": "<id4>",
+        "exec_id": "exec_parity_0000000001",
+        "tenant_id": "tenant-parity",
+        "user_id": "65f0c0ffee0000000000f00d",
+        "session_key": "tenant-parity:user:65f0c0ffee0000000000f00d",
+        "input_files": [
+          {
+            "id": "<id1>",
+            "session_id": "<id2>",
+            "name": "in.csv"
+          }
+        ],
+        "read_sessions": [
+          "<id2>"
+        ],
+        "output_session_id": "<id3>",
+        "max_upload_bytes": 26214400,
+        "max_output_files": 50,
+        "max_requests": 1000,
+        "iat": 1790000000,
+        "exp": 1790000360,
+        "principal_source": "librechat_jwt",
+        "auth_context_hash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+      },
+      "replayState": {
+        "execution_id": "exec_parity_0000000001",
+        "session_id": "<id3>",
+        "sessionKey": "tenant-parity:user:65f0c0ffee0000000000f00d",
+        "userId": "65f0c0ffee0000000000f00d",
+        "tenantId": "tenant-parity",
+        "canonicalUserId": "65f0c0ffee0000000000f00d",
+        "principalSource": "librechat_jwt",
+        "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+        "apiKeyId": "",
+        "startTime": 1790000000000,
+        "lastActivity": 1790000000000,
+        "mode": "replay",
+        "userCode": "print(1)",
+        "tools": [],
+        "isPyPlot": false,
+        "timeout": 1000,
+        "callCount": 0,
+        "language": "python"
+      },
+      "continuationSameUser": {
+        "ok": true
+      },
+      "<id5>": {
+        "ok": false,
+        "status": 403,
+        "error": "Forbidden"
+      }
+    }
+  },
+  "routes": {
+    "steps": [
+      {
+        "name": "upload user",
+        "status": 200,
+        "body": {
+          "message": "success",
+          "storage_session_id": "<id6>",
+          "files": [
+            {
+              "filename": "notes.txt",
+              "fileId": "<id7>"
+            }
+          ]
+        }
+      },
+      {
+        "name": "upload/batch agent",
+        "status": 200,
+        "body": {
+          "message": "success",
+          "storage_session_id": "<id8>",
+          "files": [
+            {
+              "status": "success",
+              "filename": "a.txt",
+              "fileId": "<id9>"
+            },
+            {
+              "status": "success",
+              "filename": "dir/b.txt",
+              "fileId": "<id10>"
+            }
+          ],
+          "succeeded": 2,
+          "failed": 0
+        }
+      },
+      {
+        "name": "upload/batch skill",
+        "status": 200,
+        "body": {
+          "message": "success",
+          "storage_session_id": "<id11>",
+          "files": [
+            {
+              "status": "success",
+              "filename": "SKILL.md",
+              "fileId": "<id12>"
+            }
+          ],
+          "succeeded": 1,
+          "failed": 0
+        }
+      },
+      {
+        "name": "metadata user",
+        "status": 200,
+        "body": {
+          "name": "<id6>/<id7>",
+          "size": 5
+        }
+      },
+      {
+        "name": "download agent",
+        "status": 200,
+        "body": "aa"
+      },
+      {
+        "name": "files list user",
+        "status": 200,
+        "body": [
+          "<id6>/<id7>"
+        ]
+      },
+      {
+        "name": "download wrong kind",
+        "status": 403,
+        "body": {
+          "error": "Unauthorized"
+        }
+      },
+      {
+        "name": "download other user",
+        "status": 403,
+        "body": {
+          "error": "Unauthorized"
+        }
+      },
+      {
+        "name": "exec",
+        "status": 200,
+        "body": {
+          "session_id": "<id13>",
+          "files": [],
+          "stdout": "ok\n",
+          "stderr": ""
+        }
+      },
+      {
+        "name": "exec foreign file",
+        "status": 403,
+        "body": {
+          "error": "Unauthorized file reference"
+        }
+      },
+      {
+        "name": "delete user",
+        "status": 200,
+        "body": {
+          "message": "File deleted successfully",
+          "session_id": "<id6>",
+          "fileId": "<id7>"
+        }
+      }
+    ],
+    "redisWrites": [
+      {
+        "op": "set",
+        "key": "session:<id6>",
+        "value": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "ttl": 86400
+      },
+      {
+        "op": "set",
+        "key": "upload:tenant-parity:user:65f0c0ffee0000000000abcd<id6><id7>",
+        "value": "true",
+        "ttl": 86400
+      },
+      {
+        "op": "set",
+        "key": "session:<id8>",
+        "value": "tenant-parity:agent:0b7f3c2e-9d4a-4c1b-8e2f-5a6b7c8d9e0f",
+        "ttl": 86400
+      },
+      {
+        "op": "set",
+        "key": "upload:tenant-parity:agent:0b7f3c2e-9d4a-4c1b-8e2f-5a6b7c8d9e0f<id8><id9>",
+        "value": "true",
+        "ttl": 86400
+      },
+      {
+        "op": "set",
+        "key": "upload:tenant-parity:agent:0b7f3c2e-9d4a-4c1b-8e2f-5a6b7c8d9e0f<id8><id10>",
+        "value": "true",
+        "ttl": 86400
+      },
+      {
+        "op": "set",
+        "key": "session:<id11>",
+        "value": "tenant-parity:skill:65f0c0ffee0000000000beef:v:3",
+        "ttl": 86400
+      },
+      {
+        "op": "set",
+        "key": "upload:tenant-parity:skill:65f0c0ffee0000000000beef:v:3<id11><id12>",
+        "value": "true",
+        "ttl": 86400
+      },
+      {
+        "op": "set",
+        "key": "session:<id13>",
+        "value": "tenant-parity:user:65f0c0ffee0000000000abcd",
+        "ttl": 86400
+      },
+      {
+        "op": "del",
+        "key": "upload:tenant-parity:user:65f0c0ffee0000000000abcd<id6><id7>"
+      }
+    ],
+    "puts": [
+      {
+        "url": "/sessions/<id6>/objects/<id7>",
+        "bytes": 5,
+        "internalTokenPresent": true,
+        "headers": {
+          "accept": "application/json, text/plain, */*",
+          "content-type": "text/plain",
+          "x-original-filename": "notes.txt",
+          "content-length": "5",
+          "user-agent": "axios/1.13.2",
+          "accept-encoding": "gzip, compress, deflate, br",
+          "connection": "keep-alive"
+        }
+      },
+      {
+        "url": "/sessions/<id8>/objects/<id9>",
+        "bytes": 2,
+        "internalTokenPresent": true,
+        "headers": {
+          "accept": "application/json, text/plain, */*",
+          "content-type": "text/plain",
+          "x-original-filename": "a.txt",
+          "content-length": "2",
+          "user-agent": "axios/1.13.2",
+          "accept-encoding": "gzip, compress, deflate, br",
+          "connection": "keep-alive"
+        }
+      },
+      {
+        "url": "/sessions/<id8>/objects/<id10>",
+        "bytes": 3,
+        "internalTokenPresent": true,
+        "headers": {
+          "accept": "application/json, text/plain, */*",
+          "content-type": "text/plain",
+          "x-original-filename": "dir%2Fb.txt",
+          "content-length": "3",
+          "user-agent": "axios/1.13.2",
+          "accept-encoding": "gzip, compress, deflate, br",
+          "connection": "keep-alive"
+        }
+      },
+      {
+        "url": "/sessions/<id11>/objects/<id12>",
+        "bytes": 7,
+        "internalTokenPresent": true,
+        "headers": {
+          "accept": "application/json, text/plain, */*",
+          "content-type": "text/plain",
+          "x-original-filename": "SKILL.md",
+          "x-read-only": "true",
+          "content-length": "7",
+          "user-agent": "axios/1.13.2",
+          "accept-encoding": "gzip, compress, deflate, br",
+          "connection": "keep-alive"
+        }
+      }
+    ],
+    "jobs": [
+      {
+        "code": "print(1)",
+        "userId": "65f0c0ffee0000000000abcd",
+        "payload": {
+          "run_memory_limit": 268435456,
+          "language": "python",
+          "version": "3.14.4",
+          "files": [
+            {
+              "name": "main.py",
+              "content": "print(1)"
+            },
+            {
+              "id": "<id7>",
+              "storage_session_id": "<id6>",
+              "name": "notes.txt"
+            },
+            {
+              "id": "<id9>",
+              "storage_session_id": "<id8>",
+              "name": "a.txt"
+            }
+          ],
+          "session_id": "<id13>"
+        },
+        "apiKeyId": "",
+        "isSynthetic": false,
+        "isPyPlot": false,
+        "principalSource": "librechat_jwt",
+        "executionId": "<id14>",
+        "tenantId": "tenant-parity",
+        "canonicalUserId": "65f0c0ffee0000000000abcd",
+        "executionProfile": "default",
+        "runtimeSessionId": "rt_4fa5a133a9e76a2a52b6c3a1b10555fc021bbc91",
+        "runtimeSessionMode": "affinity",
+        "_otel": {},
+        "egressGrantClaims": {
+          "v": 1,
+          "exec_id": "<id14>",
+          "tenant_id": "tenant-parity",
+          "user_id": "65f0c0ffee0000000000abcd",
+          "session_key": "tenant-parity:user:65f0c0ffee0000000000abcd",
+          "input_files": [
+            {
+              "id": "<id7>",
+              "session_id": "<id6>",
+              "name": "notes.txt"
+            },
+            {
+              "id": "<id9>",
+              "session_id": "<id8>",
+              "name": "a.txt"
+            }
+          ],
+          "read_sessions": [
+            "<id6>",
+            "<id8>"
+          ],
+          "output_session_id": "<id13>",
+          "max_upload_bytes": 26214400,
+          "max_output_files": 50,
+          "max_requests": 1000,
+          "tool_call_socket": false,
+          "principal_source": "librechat_jwt",
+          "auth_context_hash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de"
+        }
+      }
+    ],
+    "logs": [
+      {
+        "level": "debug",
+        "message": "CodeAPI request authenticated",
+        "meta": {
+          "method": "POST",
+          "path": "/v1/upload",
+          "ip": "127.0.0.1",
+          "authProvider": "librechat-jwt",
+          "hasBearerToken": true,
+          "hasApiKeyHeader": false,
+          "hasSyntheticToken": false,
+          "principalSource": "librechat_jwt",
+          "userId": "65f0c0ffee0000000000abcd",
+          "tenantId": "tenant-parity",
+          "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+          "mode": "librechat-jwt"
+        }
+      },
+      {
+        "level": "info",
+        "message": "[<id15>] Upload: Session ID: <id6> | User ID: 65f0c0ffee0000000000abcd | Session key: tenant-parity:user:65f0c0ffee0000000000abcd"
+      },
+      {
+        "level": "debug",
+        "message": "CodeAPI request authenticated",
+        "meta": {
+          "method": "POST",
+          "path": "/v1/upload/batch",
+          "ip": "127.0.0.1",
+          "authProvider": "librechat-jwt",
+          "hasBearerToken": true,
+          "hasApiKeyHeader": false,
+          "hasSyntheticToken": false,
+          "principalSource": "librechat_jwt",
+          "userId": "65f0c0ffee0000000000abcd",
+          "tenantId": "tenant-parity",
+          "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+          "mode": "librechat-jwt"
+        }
+      },
+      {
+        "level": "info",
+        "message": "[<id15>] Batch upload: Session ID: <id8> | User ID: 65f0c0ffee0000000000abcd | Session key: tenant-parity:agent:0b7f3c2e-9d4a-4c1b-8e2f-5a6b7c8d9e0f"
+      },
+      {
+        "level": "debug",
+        "message": "CodeAPI request authenticated",
+        "meta": {
+          "method": "POST",
+          "path": "/v1/upload/batch",
+          "ip": "127.0.0.1",
+          "authProvider": "librechat-jwt",
+          "hasBearerToken": true,
+          "hasApiKeyHeader": false,
+          "hasSyntheticToken": false,
+          "principalSource": "librechat_jwt",
+          "userId": "65f0c0ffee0000000000abcd",
+          "tenantId": "tenant-parity",
+          "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+          "mode": "librechat-jwt"
+        }
+      },
+      {
+        "level": "info",
+        "message": "[<id15>] Batch upload: Session ID: <id11> | User ID: 65f0c0ffee0000000000abcd | Session key: tenant-parity:skill:65f0c0ffee0000000000beef:v:3"
+      },
+      {
+        "level": "debug",
+        "message": "CodeAPI request authenticated",
+        "meta": {
+          "method": "GET",
+          "path": "/v1/sessions/<id6>/objects/<id7>?kind=user",
+          "ip": "127.0.0.1",
+          "authProvider": "librechat-jwt",
+          "hasBearerToken": true,
+          "hasApiKeyHeader": false,
+          "hasSyntheticToken": false,
+          "principalSource": "librechat_jwt",
+          "userId": "65f0c0ffee0000000000abcd",
+          "tenantId": "tenant-parity",
+          "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+          "mode": "librechat-jwt"
+        }
+      },
+      {
+        "level": "debug",
+        "message": "CodeAPI request authenticated",
+        "meta": {
+          "method": "GET",
+          "path": "/v1/download/<id8>/<id9>?kind=agent&id=0b7f3c2e-9d4a-4c1b-8e2f-5a6b7c8d9e0f",
+          "ip": "127.0.0.1",
+          "authProvider": "librechat-jwt",
+          "hasBearerToken": true,
+          "hasApiKeyHeader": false,
+          "hasSyntheticToken": false,
+          "principalSource": "librechat_jwt",
+          "userId": "65f0c0ffee0000000000abcd",
+          "tenantId": "tenant-parity",
+          "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+          "mode": "librechat-jwt"
+        }
+      },
+      {
+        "level": "debug",
+        "message": "CodeAPI request authenticated",
+        "meta": {
+          "method": "GET",
+          "path": "/v1/files/<id6>?kind=user",
+          "ip": "127.0.0.1",
+          "authProvider": "librechat-jwt",
+          "hasBearerToken": true,
+          "hasApiKeyHeader": false,
+          "hasSyntheticToken": false,
+          "principalSource": "librechat_jwt",
+          "userId": "65f0c0ffee0000000000abcd",
+          "tenantId": "tenant-parity",
+          "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+          "mode": "librechat-jwt"
+        }
+      },
+      {
+        "level": "debug",
+        "message": "CodeAPI request authenticated",
+        "meta": {
+          "method": "GET",
+          "path": "/v1/download/<id6>/<id7>?kind=agent&id=0b7f3c2e-9d4a-4c1b-8e2f-5a6b7c8d9e0f",
+          "ip": "127.0.0.1",
+          "authProvider": "librechat-jwt",
+          "hasBearerToken": true,
+          "hasApiKeyHeader": false,
+          "hasSyntheticToken": false,
+          "principalSource": "librechat_jwt",
+          "userId": "65f0c0ffee0000000000abcd",
+          "tenantId": "tenant-parity",
+          "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+          "mode": "librechat-jwt"
+        }
+      },
+      {
+        "level": "error",
+        "message": "Unauthorized download: Cached session key: tenant-parity:user:65f0c0ffee0000000000abcd | Expected session key: tenant-parity:agent:0b7f3c2e-9d4a-4c1b-8e2f-5a6b7c8d9e0f | Session ID: <id6> | File ID: <id7>"
+      },
+      {
+        "level": "debug",
+        "message": "CodeAPI request authenticated",
+        "meta": {
+          "method": "GET",
+          "path": "/v1/download/<id6>/<id7>?kind=user",
+          "ip": "127.0.0.1",
+          "authProvider": "librechat-jwt",
+          "hasBearerToken": true,
+          "hasApiKeyHeader": false,
+          "hasSyntheticToken": false,
+          "principalSource": "librechat_jwt",
+          "userId": "65f0c0ffee0000000000dddd",
+          "tenantId": "tenant-parity",
+          "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+          "mode": "librechat-jwt"
+        }
+      },
+      {
+        "level": "error",
+        "message": "Unauthorized download: Cached session key: tenant-parity:user:65f0c0ffee0000000000abcd | Expected session key: tenant-parity:user:65f0c0ffee0000000000dddd | Session ID: <id6> | File ID: <id7>"
+      },
+      {
+        "level": "debug",
+        "message": "CodeAPI request authenticated",
+        "meta": {
+          "method": "POST",
+          "path": "/v1/exec",
+          "ip": "127.0.0.1",
+          "authProvider": "librechat-jwt",
+          "hasBearerToken": true,
+          "hasApiKeyHeader": false,
+          "hasSyntheticToken": false,
+          "principalSource": "librechat_jwt",
+          "userId": "65f0c0ffee0000000000abcd",
+          "tenantId": "tenant-parity",
+          "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+          "mode": "librechat-jwt"
+        }
+      },
+      {
+        "level": "info",
+        "message": "Request received",
+        "meta": {
+          "userId": "65f0c0ffee0000000000abcd",
+          "apiKeyId": "",
+          "session_id": "<id13>",
+          "language": "py",
+          "files": {
+            "count": 2,
+            "skillCount": 0,
+            "agentCount": 1,
+            "userCount": 1
+          },
+          "sessionKey": "tenant-parity:user:65f0c0ffee0000000000abcd"
+        }
+      },
+      {
+        "level": "info",
+        "message": "Execution completed",
+        "meta": {
+          "session_id": "<id13>"
+        }
+      },
+      {
+        "level": "debug",
+        "message": "CodeAPI request authenticated",
+        "meta": {
+          "method": "POST",
+          "path": "/v1/exec",
+          "ip": "127.0.0.1",
+          "authProvider": "librechat-jwt",
+          "hasBearerToken": true,
+          "hasApiKeyHeader": false,
+          "hasSyntheticToken": false,
+          "principalSource": "librechat_jwt",
+          "userId": "65f0c0ffee0000000000dddd",
+          "tenantId": "tenant-parity",
+          "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+          "mode": "librechat-jwt"
+        }
+      },
+      {
+        "level": "warn",
+        "message": "File reference authorization rejected",
+        "meta": {
+          "status": 403,
+          "reason": "session_key_mismatch",
+          "message": "Unauthorized file reference",
+          "requestUserId": "65f0c0ffee0000000000dddd",
+          "requestApiKeyId": "",
+          "tenantId": "tenant-parity",
+          "file": {
+            "id": "<id7>",
+            "resource_id": "65f0c0ffee0000000000abcd",
+            "storage_session_id": "<id6>",
+            "name": "notes.txt",
+            "kind": "user"
+          },
+          "resolvedSessionKey": "tenant-parity:user:65f0c0ffee0000000000dddd",
+          "cachedSessionKey": "tenant-parity:user:65f0c0ffee0000000000abcd"
+        }
+      },
+      {
+        "level": "debug",
+        "message": "CodeAPI request authenticated",
+        "meta": {
+          "method": "DELETE",
+          "path": "/v1/files/<id6>/<id7>?kind=user",
+          "ip": "127.0.0.1",
+          "authProvider": "librechat-jwt",
+          "hasBearerToken": true,
+          "hasApiKeyHeader": false,
+          "hasSyntheticToken": false,
+          "principalSource": "librechat_jwt",
+          "userId": "65f0c0ffee0000000000abcd",
+          "tenantId": "tenant-parity",
+          "authContextHash": "b1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0deb1f1c0de",
+          "mode": "librechat-jwt"
+        }
+      },
+      {
+        "level": "info",
+        "message": "[<id15>] File deleted: Session ID: <id6> | File ID: <id7>"
+      }
+    ]
+  }
+}

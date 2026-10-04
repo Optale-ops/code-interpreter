@@ -7,7 +7,8 @@ export interface BuildReplayExecutionStateParams {
   executionId: string;
   sessionId: string;
   sessionKey: string;
-  userId: string;
+  /** Personal subject; unused for an agent_run identity. */
+  userId?: string;
   apiKeyId: string;
   authContext?: t.CodeApiAuthContext;
   identity?: ExecutionIdentity;
@@ -24,6 +25,36 @@ export function buildReplayExecutionState(
   params: BuildReplayExecutionStateParams,
 ): ExecutionState {
   const now = params.now ?? Date.now();
+  const replay = {
+    apiKeyId: params.apiKeyId,
+    startTime: now,
+    lastActivity: now,
+    mode: 'replay' as const,
+    userCode: params.code,
+    tools: params.tools,
+    files: params.files,
+    isPyPlot: params.isPyPlot,
+    timeout: params.timeout,
+    callCount: 0,
+    language: params.language,
+  };
+  /* agent_run state persists the Agent subject and its private sessionKey;
+   * it never gains a userId. */
+  if (params.identity?.agentRun) {
+    return {
+      execution_id: params.executionId,
+      session_id: params.sessionId,
+      sessionKey: params.sessionKey,
+      agentRun: params.identity.agentRun,
+      tenantId: params.identity.storageNamespace,
+      principalSource: params.identity.principalSource,
+      authContextHash: params.identity.authContextHash,
+      ...replay,
+    };
+  }
+  if (params.userId === undefined) {
+    throw new Error('replay execution state requires a user or an agent_run subject');
+  }
   const identity = params.identity ?? buildExecutionIdentity({
     userId: params.userId,
     authContext: params.authContext,
@@ -40,16 +71,6 @@ export function buildReplayExecutionState(
     externalUserId: identity.externalUserId,
     principalSource: identity.principalSource,
     authContextHash: identity.authContextHash,
-    apiKeyId: params.apiKeyId,
-    startTime: now,
-    lastActivity: now,
-    mode: 'replay',
-    userCode: params.code,
-    tools: params.tools,
-    files: params.files,
-    isPyPlot: params.isPyPlot,
-    timeout: params.timeout,
-    callCount: 0,
-    language: params.language,
+    ...replay,
   };
 }

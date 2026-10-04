@@ -66,7 +66,11 @@ export interface ExecutionManifestClaims {
   v: typeof EXECUTION_MANIFEST_VERSION;
   exec_id: string;
   tenant_id: string;
-  user_id: string;
+  /** Personal subject. Absent for agent_run, which carries agent_id/run_id. */
+  user_id?: string;
+  /** agent_run only: the Agent's Mongo id and the producing run id. */
+  agent_id?: string;
+  run_id?: string;
   session_key: string;
   input_files: ExecutionManifestInputFile[];
   read_sessions: string[];
@@ -218,10 +222,25 @@ function validateClaimsShape(
         );
   }
 
+  /* The subject is either a user or an agent_run, never both: an agent_run
+   * manifest must not carry a user_id, a personal one must. */
+  const isAgentRun = claims.principal_source === 'agent_run';
+  if (isAgentRun && claims.user_id !== undefined) {
+        throw new ExecutionManifestError(
+            'malformed',
+            'Execution manifest user_id is not accepted for agent_run',
+        );
+  }
+  if (!isAgentRun && (claims.agent_id !== undefined || claims.run_id !== undefined)) {
+        throw new ExecutionManifestError(
+            'malformed',
+            'Execution manifest agent_id/run_id require agent_run',
+        );
+  }
   const stringFields: Array<keyof ExecutionManifestClaims> = [
     'exec_id',
     'tenant_id',
-    'user_id',
+    ...(isAgentRun ? (['agent_id', 'run_id'] as const) : (['user_id'] as const)),
     'session_key',
     'output_session_id',
   ];

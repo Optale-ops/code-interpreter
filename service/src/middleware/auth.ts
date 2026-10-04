@@ -5,8 +5,10 @@ import { isValidId } from '../utils';
 import { env } from '../config';
 import { resolveSessionKey, parseUploadSessionKeyInput, SessionKeyResolutionError } from '../session-key';
 import { LibreChatJwtAuthProvider, CodeApiJwtAuthError } from '../auth/librechat-jwt';
-import { applyPrincipal, type CodeApiPrincipal } from '../auth/principal';
+import { applyPrincipal, type AgentRunPrincipal, type CodeApiPrincipal } from '../auth/principal';
 import { applyLocalPrincipal } from '../auth/local';
+import { agentRunLogFields, ownerBindingValue, sessionKeyForLog } from '../agent-run';
+import { internalServiceAuthEnabled } from '../internal-service-auth';
 import { AuthProviderConfigError, getAuthProviderMode } from '../auth/provider';
 import {
   authenticateSyntheticRequest,
@@ -30,14 +32,19 @@ const logSessionKeyResolutionError = (
   context: string,
 ): boolean => {
   if (err instanceof SessionKeyResolutionError) {
+    const agentRun = req.codeApiAuthContext?.agentRun;
     logger.error(`sessionKey resolution failed (${context})`, {
       status: err.status,
       message: err.message,
       method: req.method,
       path: req.path,
-      requestUserId: req.codeApiAuthContext?.userId,
-      authContextUserId: req.codeApiAuthContext?.userId,
-      tenantId: req.codeApiAuthContext?.tenantId,
+      ...(agentRun
+        ? agentRunLogFields(req.codeApiAuthContext?.tenantId, agentRun)
+        : {
+          requestUserId: req.codeApiAuthContext?.userId,
+          authContextUserId: req.codeApiAuthContext?.userId,
+          tenantId: req.codeApiAuthContext?.tenantId,
+        }),
     });
     res.status(err.status).json({ error: err.message });
     return true;
@@ -47,21 +54,63 @@ const logSessionKeyResolutionError = (
 
 const jwtProvider = new LibreChatJwtAuthProvider();
 
+/**
+ * True when an unverified bearer token declares agent_run. Used only to drop
+ * the query string (which carries the run id) from refusal logs; it grants
+ * nothing.
+ */
+function bearerDeclaresAgentRun(req: AuthenticatedRequest): boolean {
+  const payload = req.header('Authorization')?.match(/^Bearer\s+[^.\s]+\.([^.\s]+)\./i)?.[1];
+  if (!payload) return false;
+  try {
+    return (JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { principal_source?: unknown })
+      .principal_source === 'agent_run';
+  } catch {
+    return false;
+  }
+}
+
 function authLogMeta(req: AuthenticatedRequest, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  const agentRun = req.codeApiAuthContext?.agentRun;
+  const redactQuery = agentRun !== undefined || (!req.codeApiPrincipal && bearerDeclaresAgentRun(req));
+  const path = req.originalUrl || req.path;
   return {
     method: req.method,
-    path: req.originalUrl || req.path,
+    path: redactQuery ? path.split('?')[0] : path,
     ip: req.ip,
     authProvider: process.env.CODEAPI_AUTH_PROVIDER || 'librechat-jwt',
     hasBearerToken: Boolean(req.header('Authorization')?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim()),
     hasApiKeyHeader: Boolean(req.header('X-API-Key')),
     hasSyntheticToken: hasSyntheticAccessToken(req),
     principalSource: req.codeApiPrincipal?.principalSource,
-    userId: req.codeApiAuthContext?.userId,
-    tenantId: req.codeApiAuthContext?.tenantId,
-    authContextHash: req.codeApiAuthContext?.authContextHash,
+    /* agent_run: subject kind and hashed ids only; no raw ids or context hash. */
+    ...(agentRun
+      ? agentRunLogFields(req.codeApiAuthContext?.tenantId, agentRun)
+      : {
+        userId: req.codeApiAuthContext?.userId,
+        tenantId: req.codeApiAuthContext?.tenantId,
+        authContextHash: req.codeApiAuthContext?.authContextHash,
+      }),
     ...extra,
   };
+}
+
+/**
+ * C3: a deletion-only token is honoured for exactly one request shape,
+ * `DELETE /files/<sid>/<fid>?kind=agent&id=<run>` with the signed target, and
+ * refused for every other method, route and query before any handler runs.
+ */
+function fileDeleteRequestMatches(req: AuthenticatedRequest, principal: AgentRunPrincipal): boolean {
+  const target = principal.agentRun.fileDelete;
+  if (!target) return false;
+  const queryKeys = Object.keys(req.query).sort().join(',');
+  return (
+    req.method === 'DELETE' &&
+    req.path === `/files/${target.storageSessionId}/${target.fileId}` &&
+    queryKeys === 'id,kind' &&
+    req.query.kind === 'agent' &&
+    req.query.id === principal.agentRun.runId
+  );
 }
 
 export const apiKeyAuth = async (
@@ -141,7 +190,21 @@ export const apiKeyAuth = async (
       logger.warn('CodeAPI auth provider returned no principal', authLogMeta(req, { mode }));
       return res.status(401).json({ error: 'Authentication is required' });
     }
+    /* agent_run relies on the hardened sandbox path: the egress gateway writes
+     * output owner bindings from the sealed grant, and internal service auth
+     * keys those bindings. Without both, agent_run is unavailable. */
+    if (principal.agentRun && !(env.HARDENED_SANDBOX_MODE && internalServiceAuthEnabled())) {
+      logger.warn('JWT auth failure request: agent_run_unavailable', authLogMeta(req, { mode, reason: 'agent_run_unavailable' }));
+      return res.status(401).json({ error: 'Invalid bearer token' });
+    }
     applyPrincipal(req, principal);
+    if (principal.agentRun?.fileDelete && !fileDeleteRequestMatches(req, principal)) {
+      logger.warn(
+        'Refusing deletion-only agent_run token outside its signed target',
+        authLogMeta(req, { mode }),
+      );
+      return res.status(403).json({ error: 'Token is limited to one file deletion' });
+    }
     logger.debug('CodeAPI request authenticated', authLogMeta(req, { mode }));
     next();
   } catch (error) {
@@ -194,8 +257,10 @@ export const sessionAuth = async (req: AuthenticatedRequest, res: Response, next
     return res.status(400).json({ error: 'Bad request' });
   }
 
+  const principal = req.codeApiPrincipal;
+  const agentRunPrincipal = principal?.agentRun ? principal : undefined;
   const userId = req.codeApiAuthContext?.userId ?? '';
-  if (!userId) {
+  if (!agentRunPrincipal && !userId) {
     logger.warn('Rejecting session auth without authContext.userId', authLogMeta(req));
     return res.status(401).json({ error: 'User not found' });
   }
@@ -238,9 +303,27 @@ export const sessionAuth = async (req: AuthenticatedRequest, res: Response, next
     }
     throw err;
   }
+  /* C1: shared skill objects are read-only for an Agent; it deletes only its
+   * own run's private objects. */
+  if (agentRunPrincipal && req.method === 'DELETE' && sessionKeyInput.kind !== 'agent') {
+    logger.warn('Refusing agent_run deletion outside its private run key', authLogMeta(req));
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
   const cachedSessionKey = await connection.get(`session:${session_id}`);
   if (cachedSessionKey !== sessionKey) {
-    logger.error(`Unauthorized download: Cached session key: ${cachedSessionKey} | Expected session key: ${sessionKey} | Session ID: ${session_id} | File ID: ${fileId}`);
+    /* The session cache expires after SESSION_CACHE_TTL. A deletion-only
+     * agent_run token may then still delete, but only against the durable
+     * owner binding stored with the bytes: the file server removes the object
+     * only if that binding names this tenant, Agent and run. A present but
+     * different cache entry is a refusal. */
+    if (cachedSessionKey === null && agentRunPrincipal?.agentRun.fileDelete && req.method === 'DELETE') {
+      req.sessionKey = sessionKey;
+      req.ownerBindingExpectation = ownerBindingValue(agentRunPrincipal.tenantId, agentRunPrincipal.agentRun);
+      logger.info('Session cache absent; deleting against the durable owner binding', authLogMeta(req));
+      next();
+      return;
+    }
+    logger.error(`Unauthorized download: Cached session key: ${sessionKeyForLog(cachedSessionKey)} | Expected session key: ${sessionKeyForLog(sessionKey)} | Session ID: ${session_id} | File ID: ${fileId}`);
     return res.status(403).json({ error: 'Unauthorized' });
   }
 

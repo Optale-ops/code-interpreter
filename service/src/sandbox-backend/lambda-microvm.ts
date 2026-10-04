@@ -40,6 +40,7 @@ import { SandboxBackendError } from './types';
 import { Jobs } from '../enum';
 import { checkpointPipelineBudgetMs } from '../config';
 import logger from '../logger';
+import { AGENT_RUN_PRINCIPAL_SOURCE } from '../agent-run';
 
 /** Header that opts a proxied /execute into the runner's persistent session
  *  workspace (see api/src/session-workspace.ts). Session mode is delivered
@@ -821,7 +822,13 @@ export class LambdaMicrovmSandboxBackend implements SandboxBackend {
     let launchIntent: RuntimeSessionRecord = {
       runtime_session_id: runtimeSessionId,
       tenant_id: ctx.tenantId ?? '',
-      canonical_user_id: ctx.canonicalUserId ?? '',
+      ...(ctx.agentRun
+        ? {
+          principal_source: AGENT_RUN_PRINCIPAL_SOURCE,
+          agent_id: ctx.agentRun.agentId,
+          run_id: ctx.agentRun.runId,
+        }
+        : { canonical_user_id: ctx.canonicalUserId ?? '' }),
       port: this.config.port,
       image_arn: this.config.imageArn,
       image_version: this.config.imageVersion,

@@ -44,6 +44,12 @@ import {
   sealPtcCallbackToken,
   type EgressGrantClaims,
 } from './egress-grant';
+import {
+  AGENT_RUN_PRINCIPAL_SOURCE,
+  OWNER_BINDING_HEADER,
+  ownerBindingValue,
+  signOwnerBinding,
+} from './agent-run';
 import type { ExecutionManifestClaims } from './execution-manifest';
 import { openEgressRouteHandle } from './egress-route-params';
 import {
@@ -260,6 +266,8 @@ type EgressAuditFields = {
   requestExecHash?: string;
   tenantHash?: string;
   userHash?: string;
+  agentHash?: string;
+  runHash?: string;
   authContextHash?: string;
   principalSource?: string;
   grantHash?: string;
@@ -277,6 +285,8 @@ type ExternalFetchAuditFields = Pick<
   | 'execHash'
   | 'tenantHash'
   | 'userHash'
+  | 'agentHash'
+  | 'runHash'
   | 'grantHash'
   | 'destinationHost'
   | 'destinationHostHash'
@@ -334,6 +344,23 @@ function hashLabel(value: string | undefined): string | undefined {
         .slice(0, 16);
 }
 
+function agentRunOutputOwnerHeaders(
+    grant: EgressGrantClaims,
+    sessionId: string,
+    fileId: string,
+): Record<string, string> {
+  if (grant.principal_source !== AGENT_RUN_PRINCIPAL_SOURCE) return {};
+  if (!grant.agent_id || !grant.run_id) {
+    throw new EgressGrantError('malformed', 'agent_run grant has no Agent subject');
+  }
+  const signed = signOwnerBinding(
+    sessionId,
+    fileId,
+    ownerBindingValue(grant.tenant_id, { agentId: grant.agent_id, runId: grant.run_id }),
+  );
+  return signed ? { [OWNER_BINDING_HEADER]: signed } : {};
+}
+
 function auditFields(res: Response): EgressAuditFields {
     return (
         (res.locals.egressAuditFields as EgressAuditFields | undefined) ?? {}
@@ -367,6 +394,7 @@ function externalFetchAuditFields(res: Response): ExternalFetchAuditFields {
     execHash: fields.execHash,
     tenantHash: fields.tenantHash,
     userHash: fields.userHash,
+    ...(fields.agentHash ? { agentHash: fields.agentHash, runHash: fields.runHash } : {}),
     grantHash: fields.grantHash,
     destinationHost: fields.destinationHost,
     // Only for requests that never reached a validated destination: once the host passed
@@ -394,6 +422,9 @@ function setGrantAudit(res: Response, grant: EgressGrantClaims): void {
     grantHash: hashLabel(grant.grant_id),
     tenantHash: hashLabel(grant.tenant_id),
     userHash: hashLabel(grant.user_id),
+    ...(grant.agent_id
+      ? { agentHash: hashLabel(grant.agent_id), runHash: hashLabel(grant.run_id) }
+      : {}),
     authContextHash: hashLabel(grant.auth_context_hash),
         ...(grant.principal_source
             ? { principalSource: grant.principal_source }
@@ -1240,6 +1271,9 @@ app.post(
         execHash: hashLabel(grant.exec_id),
         tenantHash: hashLabel(grant.tenant_id),
         userHash: hashLabel(grant.user_id),
+        ...(grant.agent_id
+          ? { agentHash: hashLabel(grant.agent_id), runHash: hashLabel(grant.run_id) }
+          : {}),
       });
     }
     return res.status(201).json({ grant_id: grantId, ...prepared });
@@ -1641,6 +1675,9 @@ app.put('/sessions/:sessionHandle/objects/:fileId', async (req, res) => {
                     req.header('content-type') ?? 'application/octet-stream',
       'Content-Length': String(contentLength),
       'X-Original-Filename': originalFilename,
+      /* C4: an agent_run output's owner binding comes from the verified
+       * grant, never from a sandbox-supplied header. */
+      ...agentRunOutputOwnerHeaders(grant, sessionId, fileId),
             }),
         );
     const upstream = await fetch(

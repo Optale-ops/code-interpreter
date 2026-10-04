@@ -1,6 +1,7 @@
 import { env } from './config';
 import type * as t from './types';
 import { buildExecutionIdentity } from './execution-identity';
+import { AGENT_RUN_PRINCIPAL_SOURCE, type AgentRunSubject } from './agent-run';
 import {
   EXECUTION_MANIFEST_VERSION,
   type ExecutionManifestClaims,
@@ -52,7 +53,10 @@ export function collectManifestInputFiles(
 export function buildExecutionManifestClaims(args: {
   req: t.AuthenticatedRequest;
   executionId: string;
-  userId: string;
+  /** Personal subject. Exactly one of `userId` / `agentRun` is set. */
+  userId?: string;
+  /** agent_run subject: the manifest carries agent_id/run_id and no user_id. */
+  agentRun?: AgentRunSubject;
   sessionKey: string;
   outputSessionId: string;
   payload: t.PayloadBody;
@@ -71,6 +75,38 @@ export function buildExecutionManifestClaims(args: {
         new Set(inputFiles.map(file => file.session_id)),
     ).sort();
   const ctx = args.req.codeApiAuthContext;
+  if (args.agentRun) {
+    const tenantId = args.tenantId ?? ctx?.tenantId;
+    if (!tenantId) {
+      throw new Error('agent_run execution manifest requires a tenant');
+    }
+    return {
+      v: EXECUTION_MANIFEST_VERSION,
+      exec_id: args.executionId,
+      tenant_id: tenantId,
+      agent_id: args.agentRun.agentId,
+      run_id: args.agentRun.runId,
+      session_key: args.sessionKey,
+      input_files: inputFiles,
+      read_sessions: readSessions,
+      output_session_id: args.outputSessionId,
+      max_upload_bytes: env.EXECUTION_MANIFEST_MAX_UPLOAD_BYTES,
+      max_output_files: env.EXECUTION_MANIFEST_MAX_OUTPUT_FILES,
+      max_requests: env.EXECUTION_MANIFEST_MAX_REQUESTS,
+      iat: now,
+      exp: now + env.EXECUTION_MANIFEST_TTL_SECONDS,
+      tool_call_socket: args.payload.tool_call_socket === true,
+      principal_source: AGENT_RUN_PRINCIPAL_SOURCE,
+      ...(args.authContextHash ?? ctx?.authContextHash
+        ? { auth_context_hash: args.authContextHash ?? ctx?.authContextHash }
+        : {}),
+      ...(ctx?.networkPolicy ? { network_policy: ctx.networkPolicy } : {}),
+      ...(ctx?.networkPolicyDigest ? { network_policy_digest: ctx.networkPolicyDigest } : {}),
+    };
+  }
+  if (args.userId === undefined) {
+    throw new Error('execution manifest requires a user or an agent_run subject');
+  }
   const identity = buildExecutionIdentity({
     userId: args.userId,
     authContext: ctx,

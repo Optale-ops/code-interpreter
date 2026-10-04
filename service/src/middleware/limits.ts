@@ -8,6 +8,7 @@ import type { NextFunction, Request, Response } from 'express';
 import type { AuthenticatedRequest } from '../types';
 import { env } from '../config';
 import { getExecutionIdentity } from '../execution-identity';
+import { agentRunLogFields } from '../agent-run';
 import logger from '../logger';
 
 type RedisCommandTarget = {
@@ -92,6 +93,11 @@ export function rateLimitResponseBody(message: string, retryAfter: number): {
 export const keyGenerator = (req: Request): string => {
   const authReq = req as AuthenticatedRequest;
   const identity = getExecutionIdentity(authReq);
+  /* One stable bucket per Agent, not per run: starting runs must not reset
+   * the allowance. `:agent:` here is a rate-limit key space only. */
+  if (identity.agentRun) {
+    return `${keySegment(identity.storageNamespace, 'legacy')}:agent:${keySegment(identity.agentRun.agentId)}`;
+  }
   if (identity.canonicalUserId) {
     return `${keySegment(identity.storageNamespace, 'legacy')}:user:${keySegment(identity.canonicalUserId)}`;
   }
@@ -127,17 +133,28 @@ const buildRateLimiter = (
         const principal = authReq.codeApiPrincipal;
         const identity = getExecutionIdentity(authReq);
         const hasIdentity = Boolean(identity.canonicalUserId);
-        logger.warn('CodeAPI rate limit rejected', {
-          limiter: prefix,
-          path: req.originalUrl || req.path,
-          retryAfterSeconds: retryAfter,
-          limit: rateLimit?.limit ?? max,
-          windowMs,
-          principalSource: hasIdentity ? identity.principalSource : undefined,
-          tenantHash: hasIdentity ? hashLabel(identity.storageNamespace) : undefined,
-          userHash: hasIdentity ? hashLabel(identity.canonicalUserId) : undefined,
-          credentialHash: hashLabel(principal?.credentialId),
-        });
+        logger.warn('CodeAPI rate limit rejected', identity.agentRun
+          ? {
+            limiter: prefix,
+            path: (req.originalUrl || req.path).split('?')[0],
+            retryAfterSeconds: retryAfter,
+            limit: rateLimit?.limit ?? max,
+            windowMs,
+            principalSource: identity.principalSource,
+            ...agentRunLogFields(identity.storageNamespace, identity.agentRun),
+            credentialHash: hashLabel(principal?.credentialId),
+          }
+          : {
+            limiter: prefix,
+            path: req.originalUrl || req.path,
+            retryAfterSeconds: retryAfter,
+            limit: rateLimit?.limit ?? max,
+            windowMs,
+            principalSource: hasIdentity ? identity.principalSource : undefined,
+            tenantHash: hasIdentity ? hashLabel(identity.storageNamespace) : undefined,
+            userHash: hasIdentity ? hashLabel(identity.canonicalUserId) : undefined,
+            credentialHash: hashLabel(principal?.credentialId),
+          });
       }
 
       if (options.structuredBody) {

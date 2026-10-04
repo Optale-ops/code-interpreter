@@ -9,7 +9,14 @@ import { join, parse } from 'path';
 import type { JsonWebKey, KeyObject } from 'crypto';
 import type { Request } from 'express';
 import type { AuthProvider } from './provider';
-import type { CodeApiPrincipal } from './principal';
+import type { AgentRunPrincipal, CodeApiPrincipal } from './principal';
+import {
+  AGENT_ID_PATTERN,
+  AGENT_RUN_PRINCIPAL_SOURCE,
+  RUN_ID_PATTERN,
+  type FileDeleteTarget,
+} from '../agent-run';
+import { isValidId } from '../utils';
 import {
     externalFetchPolicyDigest,
     parseExternalFetchPolicy,
@@ -46,6 +53,10 @@ interface LibreChatJwtClaims {
   plan_id?: string;
     network_policy?: ExternalFetchPolicySnapshot;
     network_policy_digest?: string;
+  /** agent_run only: the producing run's UUID. */
+  run_id?: unknown;
+  /** agent_run deletion-only tokens: the one object they may delete. */
+  file_delete?: unknown;
 }
 
 interface PublicKeyEntry {
@@ -556,26 +567,15 @@ function assertPrincipalSource(value: unknown): LibreChatPrincipalSource {
     );
 }
 
-function validateClaims(
+/** Issuer, audience and token-window checks shared by every subject kind,
+ *  in the order the personal path has always applied them. */
+function assertTokenWindow(
     claims: LibreChatJwtClaims,
     config: VerificationConfig,
-): CodeApiPrincipal {
+    window: { issuer: string; jti: string; iat: number; nbf: number; exp: number },
+): void {
   const now = Math.floor(Date.now() / 1000);
-  const issuer = assertString(claims.iss, 'iss');
-  const userId = assertString(claims.sub, 'sub');
-  const tenantId = resolveTenantIdClaim(claims.tenant_id);
-  const jti = assertString(claims.jti, 'jti');
-  const iat = assertNumericDate(claims.iat, 'iat');
-  const nbf = assertNumericDate(claims.nbf, 'nbf');
-  const exp = assertNumericDate(claims.exp, 'exp');
-  const planId = optionalString(claims.plan_id, 'plan_id');
-  const principalSource = assertPrincipalSource(claims.principal_source);
-    const authContextHash = assertString(
-        claims.auth_context_hash,
-        'auth_context_hash',
-    );
-    const networkPolicyBinding = validatedNetworkPolicyBinding(claims);
-
+  const { issuer, jti, iat, nbf, exp } = window;
   if (jti.length > 256) {
     throw new CodeApiJwtAuthError('malformed_claims', 'jti is too long');
   }
@@ -607,6 +607,40 @@ function validateClaims(
             'JWT lifetime exceeds CodeAPI maximum',
         );
   }
+}
+
+function validateClaims(
+    claims: LibreChatJwtClaims,
+    config: VerificationConfig,
+): CodeApiPrincipal {
+  if (claims.principal_source === AGENT_RUN_PRINCIPAL_SOURCE) {
+    return validateAgentRunClaims(claims, config);
+  }
+  const issuer = assertString(claims.iss, 'iss');
+  const userId = assertString(claims.sub, 'sub');
+  const tenantId = resolveTenantIdClaim(claims.tenant_id);
+  const jti = assertString(claims.jti, 'jti');
+  const iat = assertNumericDate(claims.iat, 'iat');
+  const nbf = assertNumericDate(claims.nbf, 'nbf');
+  const exp = assertNumericDate(claims.exp, 'exp');
+  const planId = optionalString(claims.plan_id, 'plan_id');
+  const principalSource = assertPrincipalSource(claims.principal_source);
+    const authContextHash = assertString(
+        claims.auth_context_hash,
+        'auth_context_hash',
+    );
+    const networkPolicyBinding = validatedNetworkPolicyBinding(claims);
+
+  assertTokenWindow(claims, config, { issuer, jti, iat, nbf, exp });
+  /* A deletion-only claim belongs to agent_run tokens alone (C3). A personal
+   * token carrying one is malformed, not a personal token with an ignored
+   * extra field. */
+  if (claims.file_delete !== undefined) {
+    throw new CodeApiJwtAuthError(
+      'malformed_claims',
+      'file_delete is only accepted for agent_run',
+    );
+  }
 
   return {
     userId,
@@ -629,6 +663,101 @@ function validateClaims(
     planId,
         ...networkPolicyBinding,
   };
+}
+
+/** Claims a human principal carries that an Agent must never borrow. */
+const HUMAN_ONLY_CLAIMS = [
+  'org_id',
+  'service_id',
+  'external_user_id',
+  'chc_user_id', // leak-check:allow
+  'plan_id',
+] as const;
+
+function agentRunMalformed(message: string): CodeApiJwtAuthError {
+  return new CodeApiJwtAuthError('malformed_claims', message);
+}
+
+/**
+ * agent_run grammar. Values are refused, never normalized into another
+ * principal: sub is the Agent's canonical lowercase 24-hex Mongo id, run_id
+ * the run's canonical lowercase UUID, tenant_id is required whatever
+ * CODEAPI_TENANT_ISOLATION_STRICT says (no single-tenant default) and has no
+ * colon, so `<tenant>:agent-run:<A>:<R>` stays unambiguous.
+ */
+function validateAgentRunClaims(
+    claims: LibreChatJwtClaims,
+    config: VerificationConfig,
+): AgentRunPrincipal {
+  const issuer = assertString(claims.iss, 'iss');
+  const agentId = assertString(claims.sub, 'sub');
+  if (!AGENT_ID_PATTERN.test(agentId)) {
+    throw agentRunMalformed('sub must be a canonical Agent id for agent_run');
+  }
+  if (typeof claims.tenant_id !== 'string' || claims.tenant_id === '') {
+    throw agentRunMalformed('tenant_id is required for agent_run');
+  }
+  const tenantId = claims.tenant_id;
+  if (tenantId.trim() !== tenantId || tenantId.includes(':')) {
+    throw agentRunMalformed('tenant_id is not canonical for agent_run');
+  }
+  const jti = assertString(claims.jti, 'jti');
+  const iat = assertNumericDate(claims.iat, 'iat');
+  const nbf = assertNumericDate(claims.nbf, 'nbf');
+  const exp = assertNumericDate(claims.exp, 'exp');
+  if (typeof claims.run_id !== 'string' || !RUN_ID_PATTERN.test(claims.run_id)) {
+    throw agentRunMalformed('run_id must be a canonical UUID for agent_run');
+  }
+  const runId = claims.run_id;
+  if (claims.role !== 'AGENT') {
+    throw agentRunMalformed('role must be AGENT for agent_run');
+  }
+  for (const field of HUMAN_ONLY_CLAIMS) {
+    if (claims[field] !== undefined) {
+      throw agentRunMalformed(`${field} is not accepted for agent_run`);
+    }
+  }
+  const authContextHash = assertString(claims.auth_context_hash, 'auth_context_hash');
+  const networkPolicyBinding = validatedNetworkPolicyBinding(claims);
+  const fileDelete = parseFileDeleteClaim(claims.file_delete);
+
+  assertTokenWindow(claims, config, { issuer, jti, iat, nbf, exp });
+
+  return {
+    tenantId,
+    role: 'AGENT',
+    principalSource: AGENT_RUN_PRINCIPAL_SOURCE,
+    authContextHash,
+    agentRun: {
+      agentId,
+      runId,
+      ...(fileDelete ? { fileDelete } : {}),
+    },
+    ...networkPolicyBinding,
+  };
+}
+
+/** `{ storage_session_id, file_id }`, both storage ids, nothing else. */
+function parseFileDeleteClaim(value: unknown): FileDeleteTarget | undefined {
+  if (value === undefined) return undefined;
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    Object.keys(value).sort().join(',') !== 'file_id,storage_session_id'
+  ) {
+    throw agentRunMalformed('file_delete must hold exactly storage_session_id and file_id');
+  }
+  const target = value as { storage_session_id: unknown; file_id: unknown };
+  if (
+    typeof target.storage_session_id !== 'string' ||
+    typeof target.file_id !== 'string' ||
+    !isValidId(target.storage_session_id) ||
+    !isValidId(target.file_id)
+  ) {
+    throw agentRunMalformed('file_delete target is not a storage object id');
+  }
+  return { storageSessionId: target.storage_session_id, fileId: target.file_id };
 }
 
 export function validateLibreChatJwtVerifierConfig(): void {

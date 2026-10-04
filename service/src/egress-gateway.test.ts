@@ -26,6 +26,7 @@ import {
   type EgressGrantClaims,
 } from './egress-grant';
 import { INTERNAL_SERVICE_TOKEN_HEADER } from './internal-service-auth';
+import { OWNER_BINDING_HEADER, ownerBindingFromHeader, ownerBindingValue, signOwnerBinding } from './agent-run';
 import {
     externalFetchPolicyDigest,
     parseExternalFetchPolicy,
@@ -1268,6 +1269,57 @@ describe('egress gateway routes', () => {
         expect(header(upstreamCalls[0].init, 'X-Original-Filename')).toBe(
             'out.txt',
         );
+  });
+
+  test('agent_run output PUT carries the grant owner binding and drops a sandbox-supplied one', async () => {
+    upstreamResponse = Response.json({ id: 'abcdefghijklmnopqrstu' }, { status: 201 });
+    const agentRun = { agentId: '65f0c0ffee0000000000aaaa', runId: '0b7f3c2e-9d4a-4c1b-8e2f-5a6b7c8d9e01' };
+    const otherRun = { agentId: agentRun.agentId, runId: '0b7f3c2e-9d4a-4c1b-8e2f-5a6b7c8d9e02' };
+    const { user_id: _userId, ...agentClaims } = claims({
+      principal_source: 'agent_run',
+      session_key: `tenant_abc:agent-run:${agentRun.agentId}:${agentRun.runId}`,
+    });
+    const grant = { ...agentClaims, agent_id: agentRun.agentId, run_id: agentRun.runId } as EgressGrantClaims;
+    const writeSession = sessionHandle({ dir: 'write', sessionId: 'sess_output' });
+    const forged = signOwnerBinding('sess_output', 'abcdefghijklmnopqrstu', ownerBindingValue('tenant_abc', otherRun));
+
+    const response = await gatewayFetch(`/sessions/${writeSession}/objects/abcdefghijklmnopqrstu`, {
+      method: 'PUT',
+      headers: {
+        ...grantHeader(grant),
+        'Content-Type': 'text/plain',
+        'Content-Length': '3',
+        'X-Original-Filename': 'out.txt',
+        [OWNER_BINDING_HEADER]: forged ?? 'forged',
+      },
+      body: 'abc',
+    });
+
+    expect(response.status).toBe(201);
+    const forwarded = header(upstreamCalls[0].init, OWNER_BINDING_HEADER);
+    expect(ownerBindingFromHeader(forwarded ?? undefined, 'sess_output', 'abcdefghijklmnopqrstu')).toEqual({
+      ok: true,
+      binding: ownerBindingValue('tenant_abc', agentRun),
+    });
+    expect(forwarded).not.toBe(forged);
+  });
+
+  test('personal output PUT carries no owner binding', async () => {
+    upstreamResponse = Response.json({ id: 'abcdefghijklmnopqrstu' }, { status: 201 });
+    const writeSession = sessionHandle({ dir: 'write', sessionId: 'sess_output' });
+    const response = await gatewayFetch(`/sessions/${writeSession}/objects/abcdefghijklmnopqrstu`, {
+      method: 'PUT',
+      headers: {
+        ...grantHeader(),
+        'Content-Type': 'text/plain',
+        'Content-Length': '3',
+        'X-Original-Filename': 'out.txt',
+        [OWNER_BINDING_HEADER]: 'agent_run.forged',
+      },
+      body: 'abc',
+    });
+    expect(response.status).toBe(201);
+    expect(header(upstreamCalls[0].init, OWNER_BINDING_HEADER)).toBeFalsy();
   });
 
   test('rolls back upload reservations when upstream PUT throws', async () => {

@@ -203,7 +203,7 @@ describe('LibreChat JWT auth provider', () => {
                 }),
             ),
     );
-    expect(principal.externalUserId).toBe('chc_legacy_456');
+    expect(principal).toMatchObject({ externalUserId: 'chc_legacy_456' });
   });
 
   test('prefers external_user_id over the legacy claim when both are present', () => {
@@ -215,7 +215,7 @@ describe('LibreChat JWT auth provider', () => {
                 }),
             ),
     );
-    expect(principal.externalUserId).toBe('ext_789');
+    expect(principal).toMatchObject({ externalUserId: 'ext_789' });
   });
 
   test('rejects expired tokens', () => {

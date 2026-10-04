@@ -28,6 +28,7 @@ import { connection } from '../queue';
 import { env } from '../config';
 import { internalServiceHeaders } from '../internal-service-auth';
 import logger from '../logger';
+import { AGENT_RUN_PRINCIPAL_SOURCE, type AgentRunSubject } from '../agent-run';
 import {
   ptcReplayHistorySize,
   ptcReplayHistoryEntries,
@@ -91,7 +92,10 @@ export interface ExecutionState {
   execution_id: string;
   session_id: string;
   sessionKey?: string;
-  userId: string;
+  /** Personal subject. Absent on agent_run state, which carries `agentRun`
+   *  and always a persisted private `sessionKey`. */
+  userId?: string;
+  agentRun?: AgentRunSubject;
   tenantId?: string;
   canonicalUserId?: string;
   orgId?: string;
@@ -943,6 +947,45 @@ export function validateContinuationBatch(tool_results: unknown[]):
   return { ok: true, results };
 }
 
+/**
+ * Whose continuation this is. A personal request matches only personal state
+ * of the same user. An agent_run request matches only agent_run state of the
+ * same Agent and run in the same tenant with the same context hash; none of
+ * those is optional for an Agent, and a sub string alone never matches.
+ */
+export function continuationSubjectMatches(
+  state: ExecutionState,
+  request: { userId?: string; agentRun?: AgentRunSubject; tenantId?: string; authContextHash?: string },
+): boolean {
+  if (request.agentRun) {
+    return (
+      state.agentRun !== undefined &&
+      state.userId === undefined &&
+      state.principalSource === AGENT_RUN_PRINCIPAL_SOURCE &&
+      state.agentRun.agentId === request.agentRun.agentId &&
+      state.agentRun.runId === request.agentRun.runId &&
+      state.tenantId !== undefined &&
+      state.tenantId === request.tenantId &&
+      state.authContextHash !== undefined &&
+      state.authContextHash === request.authContextHash
+    );
+  }
+  return state.agentRun === undefined && request.userId !== undefined && state.userId === request.userId;
+}
+
+/**
+ * Output session key a replay iteration writes to. agent_run state always
+ * persisted its private key; it has no userId or legacy fallback. The legacy
+ * `sessionKey ?? userId` fallback stays personal-only.
+ */
+export function replaySessionKey(state: ExecutionState): string {
+  const sessionKey = state.agentRun ? state.sessionKey : (state.sessionKey ?? state.userId);
+  if (!sessionKey) {
+    throw new Error('Execution state has no session key');
+  }
+  return sessionKey;
+}
+
 /** Apply the post-state-load pre-checks to a continuation request:
  * mode, ownership/auth, that every incoming call_id was actually emitted
  * by the sandbox, and the projected aggregate caps after applying
@@ -954,7 +997,8 @@ export function validateContinuationBatch(tool_results: unknown[]):
 export function checkContinuationPreconditions(params: {
   state: ExecutionState;
   results: ValidatedContinuationResult[];
-  userId: string;
+  userId?: string;
+  agentRun?: AgentRunSubject;
   apiKeyId?: string;
   tenantId?: string;
   authContextHash?: string;
@@ -962,7 +1006,7 @@ export function checkContinuationPreconditions(params: {
 }):
   | { ok: true }
   | { ok: false; status: number; error: string; cleanupOnReject?: boolean } {
-  const { state, results, userId, apiKeyId, tenantId, authContextHash, delta } = params;
+  const { state, results, userId, agentRun, apiKeyId, tenantId, authContextHash, delta } = params;
   if (state.mode !== 'replay') {
     return {
       ok: false,
@@ -971,7 +1015,7 @@ export function checkContinuationPreconditions(params: {
     };
   }
   if (
-    state.userId !== userId ||
+    !continuationSubjectMatches(state, { userId, agentRun, tenantId, authContextHash }) ||
     (state.apiKeyId != null && state.apiKeyId !== apiKeyId) ||
     (state.tenantId != null && state.tenantId !== tenantId) ||
     (state.authContextHash != null && state.authContextHash !== authContextHash)
