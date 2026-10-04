@@ -1767,12 +1767,10 @@ describe('egress gateway routes', () => {
       close: () => undefined,
     }));
     let commitAttempts = 0;
-    const completionOutcomes: unknown[] = [];
+    const completions: Record<string, unknown>[] = [];
     const originalLoggerInfo = logger.info;
-    logger.info = ((message: string, fields?: Record<string, unknown>) => {
-      if (message === 'Egress gateway request completed' && fields?.route === 'external-fetch') {
-        completionOutcomes.push(fields.outcome);
-      }
+    logger.info = ((_message: string, fields?: Record<string, unknown>) => {
+      if (fields?.route === 'external-fetch' && fields.outcome !== undefined) completions.push(fields);
     }) as typeof logger.info;
     setEgressFetchCommitForTest(async args => {
       commitAttempts += 1;
@@ -1793,7 +1791,11 @@ describe('egress gateway routes', () => {
       expect(response.status).toBe(200);
       expect(response.body).toBe(body.toString('utf8'));
       expect(commitAttempts).toBe(2);
-      expect(completionOutcomes).toContain('success');
+      const success = completions.find(fields => fields.outcome === 'success');
+      expect(success).toMatchObject({
+        destinationHost: 'temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com',
+      });
+      expect(success?.destinationHostHash).toBeUndefined();
       const ledger = await assertEgressGrantActive(grant);
       expect(ledger.fetched_bytes).toBe(body.length);
     } finally {
@@ -1886,15 +1888,37 @@ describe('egress gateway routes', () => {
     expect(opaque.status).toBe(404);
     expect(await opaque.text()).toBe('not found');
 
-    const denied = await gatewayFetch('/https-passthrough', {
-      method: 'POST',
-      headers: { ...grantHeader(), 'Content-Type': 'application/json' },
-      body,
-    });
+    const rejections: Record<string, unknown>[] = [];
+    const originalLoggerWarn = logger.warn;
+    logger.warn = ((_message: string, fields?: Record<string, unknown>) => {
+      if (fields?.route === 'https-passthrough' && fields.outcome === 'HOST_NOT_ALLOWED')
+        rejections.push(fields);
+    }) as typeof logger.warn;
+    let denied: Response;
+    try {
+      denied = await gatewayFetch('/https-passthrough', {
+        method: 'POST',
+        headers: { ...grantHeader(), 'Content-Type': 'application/json' },
+        body,
+      });
+    } finally {
+      logger.warn = originalLoggerWarn;
+    }
     expect(denied.status).toBe(403);
         expect(await denied.json()).toMatchObject({
             error: 'HOST_NOT_ALLOWED',
         });
+    // A refusal names what was asked for by hash, so an operator can tell which host it was.
+    const hash = (value: string) =>
+      crypto.createHash('sha256').update(value, 'utf8').digest('base64url').slice(0, 16);
+    expect(rejections).toHaveLength(1);
+    expect(rejections[0]).toMatchObject({
+      route: 'https-passthrough',
+      outcome: 'HOST_NOT_ALLOWED',
+      destinationHostHash: hash('unlisted.example'),
+      pathHash: hash('/api/optale/mcp'),
+    });
+    expect(JSON.stringify(rejections[0])).not.toContain('unlisted.example');
   });
 
   test('rejects non-POST external-fetch methods and caller-selected envelope fields', async () => {

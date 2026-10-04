@@ -264,6 +264,7 @@ type EgressAuditFields = {
   principalSource?: string;
   grantHash?: string;
   destinationHost?: string;
+  destinationHostHash?: string;
   pathHash?: string;
   queryPresent?: boolean;
   redirectCount?: number;
@@ -278,6 +279,7 @@ type ExternalFetchAuditFields = Pick<
   | 'userHash'
   | 'grantHash'
   | 'destinationHost'
+  | 'destinationHostHash'
   | 'pathHash'
   | 'queryPresent'
   | 'redirectCount'
@@ -338,6 +340,27 @@ function auditFields(res: Response): EgressAuditFields {
     );
 }
 
+/**
+ * Hashes of the host and path a sandbox asked for, recorded before policy validation so that a
+ * refused request is attributable too: `destinationHostHash` is hashLabel of the lowercased host,
+ * comparable against hashLabel of a candidate host; `pathHash` uses the same algorithm as the
+ * validated one. The host itself is not logged for refusals, since code chooses it freely.
+ */
+function recordRequestedTarget(res: Response, rawUrl: unknown): void {
+  if (typeof rawUrl !== 'string') return;
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return;
+  }
+  const fields = auditFields(res);
+  fields.destinationHostHash = hashLabel(url.hostname.toLowerCase());
+  fields.pathHash = hashLabel(url.pathname);
+  fields.queryPresent = url.search.length > 0;
+  res.locals.egressAuditFields = fields;
+}
+
 function externalFetchAuditFields(res: Response): ExternalFetchAuditFields {
   const fields = auditFields(res);
   return {
@@ -346,6 +369,9 @@ function externalFetchAuditFields(res: Response): ExternalFetchAuditFields {
     userHash: fields.userHash,
     grantHash: fields.grantHash,
     destinationHost: fields.destinationHost,
+    // Only for requests that never reached a validated destination: once the host passed
+    // validation, destinationHost names it and the hash adds nothing.
+    destinationHostHash: fields.destinationHost ? undefined : fields.destinationHostHash,
     pathHash: fields.pathHash,
     queryPresent: fields.queryPresent,
     redirectCount: fields.redirectCount,
@@ -1675,6 +1701,7 @@ app.post('/package-transport', async (req, res) => {
         }
         const activeGrant = await getGrant(req, res);
         grant = activeGrant;
+        recordRequestedTarget(res, envelope.url);
         const policy = effectivePolicyForGrant(activeGrant);
         opened = await packageTransportOpen({
             ...envelope,
@@ -1840,6 +1867,7 @@ app.post('/https-passthrough', async (req, res) => {
     }
     const activeGrant = await getGrant(req, res);
     grant = activeGrant;
+    recordRequestedTarget(res, envelope.url);
         const policy = effectivePolicyForGrant(activeGrant);
     opened = await httpsPassthroughOpen({
       ...envelope,
@@ -2004,6 +2032,7 @@ app.post('/external-fetch', async (req, res) => {
     }
     const activeGrant = await getGrant(req, res);
     grant = activeGrant;
+    recordRequestedTarget(res, url);
         const policy = effectivePolicyForGrant(activeGrant);
     const initial = validateExternalFetchUrl(url, policy);
     const fields = auditFields(res);
