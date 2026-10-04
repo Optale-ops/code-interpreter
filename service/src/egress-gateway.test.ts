@@ -1767,12 +1767,10 @@ describe('egress gateway routes', () => {
       close: () => undefined,
     }));
     let commitAttempts = 0;
-    const completionOutcomes: unknown[] = [];
+    const completions: Record<string, unknown>[] = [];
     const originalLoggerInfo = logger.info;
-    logger.info = ((message: string, fields?: Record<string, unknown>) => {
-      if (message === 'Egress gateway request completed' && fields?.route === 'external-fetch') {
-        completionOutcomes.push(fields.outcome);
-      }
+    logger.info = ((_message: string, fields?: Record<string, unknown>) => {
+      if (fields?.route === 'external-fetch' && fields.outcome !== undefined) completions.push(fields);
     }) as typeof logger.info;
     setEgressFetchCommitForTest(async args => {
       commitAttempts += 1;
@@ -1793,7 +1791,11 @@ describe('egress gateway routes', () => {
       expect(response.status).toBe(200);
       expect(response.body).toBe(body.toString('utf8'));
       expect(commitAttempts).toBe(2);
-      expect(completionOutcomes).toContain('success');
+      const success = completions.find(fields => fields.outcome === 'success');
+      expect(success).toMatchObject({
+        destinationHost: 'temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com',
+      });
+      expect(success?.destinationHostHash).toBeUndefined();
       const ledger = await assertEgressGrantActive(grant);
       expect(ledger.fetched_bytes).toBe(body.length);
     } finally {
@@ -1888,8 +1890,9 @@ describe('egress gateway routes', () => {
 
     const rejections: Record<string, unknown>[] = [];
     const originalLoggerWarn = logger.warn;
-    logger.warn = ((message: string, fields?: Record<string, unknown>) => {
-      if (message === 'Rejected controlled egress request' && fields) rejections.push(fields);
+    logger.warn = ((_message: string, fields?: Record<string, unknown>) => {
+      if (fields?.route === 'https-passthrough' && fields.outcome === 'HOST_NOT_ALLOWED')
+        rejections.push(fields);
     }) as typeof logger.warn;
     let denied: Response;
     try {

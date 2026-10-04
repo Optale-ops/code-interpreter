@@ -369,7 +369,9 @@ function externalFetchAuditFields(res: Response): ExternalFetchAuditFields {
     userHash: fields.userHash,
     grantHash: fields.grantHash,
     destinationHost: fields.destinationHost,
-    destinationHostHash: fields.destinationHostHash,
+    // Only for requests that never reached a validated destination: once the host passed
+    // validation, destinationHost names it and the hash adds nothing.
+    destinationHostHash: fields.destinationHost ? undefined : fields.destinationHostHash,
     pathHash: fields.pathHash,
     queryPresent: fields.queryPresent,
     redirectCount: fields.redirectCount,
