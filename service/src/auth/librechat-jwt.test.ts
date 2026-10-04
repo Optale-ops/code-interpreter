@@ -379,6 +379,60 @@ describe('LibreChat JWT auth provider', () => {
         );
   });
 
+  describe('tenant-bound keys', () => {
+    function bindTestKey(tenants: unknown): void {
+      const jwks = JSON.parse(process.env.CODEAPI_JWT_JWKS_JSON!) as { keys: object[] };
+      process.env.CODEAPI_JWT_JWKS_JSON = JSON.stringify({
+        keys: jwks.keys.map(key => ({ ...key, tenants })),
+      });
+    }
+
+    test('accepts a key only for the tenants it is bound to', () => {
+      bindTestKey(['tenant_staging']);
+      expect(
+        verifyLibreChatJwt(signJwt(baseClaims({ tenant_id: 'tenant_staging' }))).tenantId,
+      ).toBe('tenant_staging');
+      expectJwtReason(signJwt(baseClaims({ tenant_id: 'tenant_abc' })), 'tenant_not_allowed');
+    });
+
+    test('requires a signed tenant_id even when the default namespace is listed', () => {
+      bindTestKey(['legacy']);
+      expectJwtReason(signJwt(baseClaims({ tenant_id: undefined })), 'tenant_not_allowed');
+      process.env.CODEAPI_JWT_SINGLE_TENANT_ID = 'tenant_staging';
+      bindTestKey(['tenant_staging']);
+      expectJwtReason(signJwt(baseClaims({ tenant_id: undefined })), 'tenant_not_allowed');
+    });
+
+    test('refuses a malformed binding as configuration instead of trusting the key unbound', () => {
+      for (const tenants of [[], 'tenant_staging', [''], [' tenant_staging'], [42]]) {
+        bindTestKey(tenants);
+        expectJwtReason(signJwt(baseClaims({ tenant_id: 'tenant_staging' })), 'config');
+      }
+    });
+
+    test('refuses a binding on an entry without a kid', () => {
+      const jwks = JSON.parse(process.env.CODEAPI_JWT_JWKS_JSON!) as { keys: Array<Record<string, unknown>> };
+      const { kid: _kid, ...unnamed } = jwks.keys[0]!;
+      process.env.CODEAPI_JWT_JWKS_JSON = JSON.stringify({
+        keys: [...jwks.keys, { ...unnamed, tenants: [] }],
+      });
+      expectJwtReason(signJwt(baseClaims()), 'config');
+    });
+
+    test('refuses a second source for a bound kid instead of letting it replace the binding', () => {
+      bindTestKey(['tenant_staging']);
+      const bound = JSON.parse(process.env.CODEAPI_JWT_JWKS_JSON!) as { keys: Array<Record<string, unknown>> };
+      const { tenants: _tenants, ...unbound } = bound.keys[0]!;
+      process.env.CODEAPI_JWT_JWKS_JSON = JSON.stringify({ keys: [bound.keys[0], unbound] });
+      expectJwtReason(signJwt(baseClaims({ tenant_id: 'tenant_abc' })), 'config');
+
+      process.env.CODEAPI_JWT_JWKS_JSON = JSON.stringify({ keys: [bound.keys[0]] });
+      process.env.CODEAPI_JWT_PUBLIC_KEY = JSON.stringify(unbound);
+      process.env.CODEAPI_JWT_KID = 'test-kid';
+      expectJwtReason(signJwt(baseClaims({ tenant_id: 'tenant_abc' })), 'config');
+    });
+  });
+
   test('rejects tampered signatures and malformed required claims', () => {
     const token = signJwt(baseClaims());
         const [encodedHeader, encodedPayload, encodedSignature] = token.split(

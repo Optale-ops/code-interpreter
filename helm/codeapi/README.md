@@ -125,6 +125,12 @@ api:
 
 `CODEAPI_JWT_PUBLIC_KEYS_DIR` (a mounted directory of PEM files) and
 `CODEAPI_JWT_JWKS_JSON` (inline JWKS) are also supported for key rotation.
+A JWKS entry may carry a `tenants` member, a non-empty list of `tenant_id`
+values; tokens signed by that key are then accepted only when they carry one
+of those `tenant_id` values explicitly (for example, a staging key bound to the
+staging tenant). A malformed list, a list on an entry without a `kid`, or a
+bound `kid` configured again in another key source fails startup rather than
+trusting the key for every tenant.
 For development only, `LOCAL_MODE=true` bypasses authentication — see
 `values-local.yaml`.
 

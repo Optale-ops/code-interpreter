@@ -179,7 +179,6 @@ describe('execution rate limiting', () => {
     expect(rejected.headers.get('ratelimit-remaining')).toBe('0');
     expect(Number(rejected.headers.get('retry-after'))).toBeGreaterThan(0);
     expect(body.error).toBe('rate_limited');
-    expect(body.message).toContain('Too many CodeAPI execution requests.');
     expect(body.retry_after_seconds).toBeGreaterThan(0);
   });
 

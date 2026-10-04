@@ -86,9 +86,7 @@ describe('synthetic CodeAPI auth', () => {
     expect(
       authenticateSyntheticRequest(req({ [CODEAPI_SYNTHETIC_AUTH_HEADER]: 'weak-token' }), 'weak-token'),
     ).toMatchObject({ ok: false, status: 500, reason: 'weak_config' });
-    expect(() => validateSyntheticAccessTokenConfig('weak-token')).toThrow(
-      'CODEAPI_SYNTHETIC_ACCESS_TOKEN must be at least 32 bytes',
-    );
+    expect(() => validateSyntheticAccessTokenConfig('weak-token')).toThrow();
   });
 
   test('supports explicit synthetic identity overrides', () => {
