@@ -8,6 +8,7 @@ import { LibreChatJwtAuthProvider, CodeApiJwtAuthError } from '../auth/librechat
 import { applyPrincipal, type AgentRunPrincipal, type CodeApiPrincipal } from '../auth/principal';
 import { applyLocalPrincipal } from '../auth/local';
 import { agentRunLogFields, ownerBindingValue, sessionKeyForLog } from '../agent-run';
+import { internalServiceAuthEnabled } from '../internal-service-auth';
 import { AuthProviderConfigError, getAuthProviderMode } from '../auth/provider';
 import {
   authenticateSyntheticRequest,
@@ -188,6 +189,13 @@ export const apiKeyAuth = async (
     if (!principal) {
       logger.warn('CodeAPI auth provider returned no principal', authLogMeta(req, { mode }));
       return res.status(401).json({ error: 'Authentication is required' });
+    }
+    /* agent_run relies on the hardened sandbox path: the egress gateway writes
+     * output owner bindings from the sealed grant, and internal service auth
+     * keys those bindings. Without both, agent_run is unavailable. */
+    if (principal.agentRun && !(env.HARDENED_SANDBOX_MODE && internalServiceAuthEnabled())) {
+      logger.warn('JWT auth failure request: agent_run_unavailable', authLogMeta(req, { mode, reason: 'agent_run_unavailable' }));
+      return res.status(401).json({ error: 'Invalid bearer token' });
     }
     applyPrincipal(req, principal);
     if (principal.agentRun?.fileDelete && !fileDeleteRequestMatches(req, principal)) {

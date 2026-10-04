@@ -491,6 +491,9 @@ router.post('/upload', uploadLimiter, async (req: t.AuthenticatedRequest, res: R
 
         let sessionKeyInput: SessionKeyInput;
         try {
+          if (principal.agentRun && uploadKind === 'user') {
+            throw new SessionKeyResolutionError(403, "agent_run: kind 'user' is not available");
+          }
           sessionKeyInput = parseUploadSessionKeyInput({
             kind: uploadKind,
             id: uploadId,
@@ -711,6 +714,9 @@ router.post('/upload/batch', uploadLimiter, async (req: t.AuthenticatedRequest, 
 
         let sessionKeyInput: SessionKeyInput;
         try {
+          if (principal.agentRun && uploadKind === 'user') {
+            throw new SessionKeyResolutionError(403, "agent_run: kind 'user' is not available");
+          }
           sessionKeyInput = parseUploadSessionKeyInput({
             kind: uploadKind,
             id: uploadId,
@@ -720,6 +726,9 @@ router.post('/upload/batch', uploadLimiter, async (req: t.AuthenticatedRequest, 
         } catch (err) {
           clearTimeout(uploadTimeout);
           file.resume();
+          if (err instanceof SessionKeyResolutionError && err.status === 403) {
+            forbiddenError ??= err;
+          }
           const message = err instanceof Error ? err.message : 'Invalid upload identity';
           resolve({ status: 'error', filename, error: message });
           return;

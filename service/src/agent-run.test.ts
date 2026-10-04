@@ -34,6 +34,7 @@ import { continuationSubjectMatches, replaySessionKey, type ExecutionState } fro
 import { buildReplayExecutionState } from './service/programmatic-state';
 import { getExecutionIdentity } from './execution-identity';
 import type * as t from './types';
+import { env } from './config';
 
 const TENANT = 'tenant-a';
 const OTHER_TENANT = 'tenant-b';
@@ -47,6 +48,7 @@ const BOUND_KID = 'bound-kid';
 const SKILL_ID = '65f0c0ffee0000000000beef';
 
 let harness: RouteHarness;
+let savedHardened = false;
 const bindings = new Map<string, string>();
 
 function nowSeconds(): number {
@@ -143,6 +145,8 @@ beforeAll(async () => {
   /* The stub file server applies the real file server's owner-binding rules
    * through the same exported helper: only a signed binding for this exact
    * object is stored; owner-bound deletion requires an exact match. */
+  savedHardened = env.HARDENED_SANDBOX_MODE;
+  env.HARDENED_SANDBOX_MODE = true;
   harness.setPutHandler((headers, sid, fid) => {
     const owner = ownerBindingFromHeader(headers[OWNER_BINDING_HEADER.toLowerCase()], sid, fid);
     if (!owner.ok) return { status: 400, body: { error: owner.error } };
@@ -163,6 +167,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  env.HARDENED_SANDBOX_MODE = savedHardened;
   await harness?.close();
 });
 
@@ -408,7 +413,8 @@ describe('agent_run routes', () => {
 
   test('C1: upload kind=user is refused for agent_run', async () => {
     const putsBefore = harness.puts.length;
-    expect((await agentUpload({ kind: 'user' })).status).not.toBe(200);
+    expect((await agentUpload({ kind: 'user' })).status).toBe(403);
+    expect((await agentUpload({ kind: 'user' }, agentToken(), '/v1/upload/batch')).status).toBe(403);
     expect((await agentUpload({ kind: 'user', id: AGENT })).status).toBe(403);
     expect((await agentUpload({ kind: 'user', id: AGENT }, agentToken(), '/v1/upload/batch')).status).toBe(403);
     expect(harness.puts.length).toBe(putsBefore);
@@ -669,5 +675,28 @@ describe('deletion-only tokens (C3) and durable owner binding (C4)', () => {
       expect((await call(harness.baseUrl, agentToken({ run_id: 'not-a-uuid' }), 'GET', `/v1/files/${'s'.repeat(21)}?kind=agent&id=${RUN1}`)).status).toBe(401);
       expect((await call(harness.baseUrl, deletionToken('s'.repeat(21), 'f'.repeat(21)), 'GET', `/v1/files/${'s'.repeat(21)}?kind=agent&id=${RUN1}`)).status).toBe(403);
     });
+  });
+});
+
+describe('agent_run availability (hardened sandbox + internal service auth)', () => {
+  test('agent_run is refused with 401 unless hardened mode and internal service auth are both on; personal is unaffected', async () => {
+    const path = `/v1/files/${'s'.repeat(21)}?kind=agent&id=${RUN1}`;
+    const savedToken = process.env.CODEAPI_INTERNAL_SERVICE_TOKEN;
+    try {
+      env.HARDENED_SANDBOX_MODE = false;
+      expect((await call(harness.baseUrl, agentToken(), 'GET', path)).status).toBe(401);
+      expect((await call(harness.baseUrl, userToken(), 'GET', `/v1/files/${'s'.repeat(21)}?kind=user`)).status).toBe(403);
+      env.HARDENED_SANDBOX_MODE = true;
+      delete process.env.CODEAPI_INTERNAL_SERVICE_TOKEN;
+      expect((await call(harness.baseUrl, agentToken(), 'GET', path)).status).toBe(401);
+      expect((await call(harness.baseUrl, userToken(), 'GET', `/v1/files/${'s'.repeat(21)}?kind=user`)).status).toBe(403);
+      process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = savedToken;
+      /* Both on: the token is accepted (403 here is the session-key refusal past auth). */
+      expect((await call(harness.baseUrl, agentToken(), 'GET', path)).status).toBe(403);
+      expect(harness.logs.some(l => l.message.includes('agent_run_unavailable'))).toBe(true);
+    } finally {
+      env.HARDENED_SANDBOX_MODE = true;
+      process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = savedToken;
+    }
   });
 });
