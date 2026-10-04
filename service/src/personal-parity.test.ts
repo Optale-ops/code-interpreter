@@ -61,12 +61,12 @@ const TOKEN_VARIANTS: Record<string, Record<string, unknown>> = {
 };
 
 beforeAll(async () => {
-  process.env.CODEAPI_TENANT_ISOLATION_STRICT = 'true';
   harness = await installRouteHarness({
     queueModulePath: join(import.meta.dir, 'queue.ts'),
     srcDir: import.meta.dir,
     jwksJson: jwksFor([{ kid: 'parity-kid', key: testSigningKey() }]),
   });
+  process.env.CODEAPI_TENANT_ISOLATION_STRICT = 'true';
 });
 
 afterAll(async () => {
@@ -93,9 +93,11 @@ async function unitSnapshot(): Promise<Record<string, unknown>> {
     for (const [name, overrides] of Object.entries(TOKEN_VARIANTS)) {
       const token = signTestJwt(personalClaims(FIXED_NOW_SECONDS, overrides));
       const principal = verifyLibreChatJwt(token);
+      if (principal.agentRun) throw new Error('personal fixture verified as agent_run');
       const req = { ip: '127.0.0.1', headers: {}, header: () => undefined } as unknown as Req;
       applyPrincipal(req, principal);
       const identity = getExecutionIdentity(req);
+      if (identity.agentRun) throw new Error('personal fixture resolved an agent_run identity');
       const sessionKeys = {
         user: resolveSessionKey(req, parseUploadSessionKeyInput({ kind: 'user', id: undefined, version: undefined, authContextUserId: principal.userId })),
         agentRun: resolveSessionKey(req, { kind: 'agent', id: RUN_UUID }),
@@ -265,5 +267,8 @@ test('personal identity consumers, routes and log lines are byte-identical to th
     writeFileSync(GOLDEN_PATH, `${JSON.stringify(snapshot, null, 2)}\n`);
   }
   expect(existsSync(GOLDEN_PATH)).toBe(true);
-  expect(snapshot).toEqual(JSON.parse(readFileSync(GOLDEN_PATH, 'utf8')));
+  const golden = JSON.parse(readFileSync(GOLDEN_PATH, 'utf8'));
+  expect(snapshot).toEqual(golden);
+  /* toEqual ignores key order; serialized log lines, claims and state do not. */
+  expect(JSON.stringify(snapshot)).toBe(JSON.stringify(golden));
 });

@@ -182,7 +182,10 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
         signal: controller.signal,
         deadlineAtMs,
         tenantId: job.data.tenantId,
-        canonicalUserId: job.data.canonicalUserId,
+        /* agent_run jobs carry their Agent subject; they have no user id. */
+        ...(job.data.agentRun
+          ? { agentRun: job.data.agentRun }
+          : { canonicalUserId: job.data.canonicalUserId }),
         runtimeSessionId: runtimeSession.runtimeSessionId,
         runtimeSessionMode: runtimeSession.runtimeSessionMode,
         /* Stateful backends run this as a commit barrier after user code but

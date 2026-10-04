@@ -29,7 +29,11 @@ export type RuntimeSessionState = 'PENDING' | 'RUNNING' | 'SUSPENDED' | 'TERMINA
 export interface RuntimeSessionRecord {
   runtime_session_id: string;
   tenant_id: string;
-  canonical_user_id: string;
+  /** Personal sessions. agent_run sessions carry principal_source/agent_id/run_id instead. */
+  canonical_user_id?: string;
+  principal_source?: string;
+  agent_id?: string;
+  run_id?: string;
   microvm_id?: string;
   endpoint?: string;
   port?: number;

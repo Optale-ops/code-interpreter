@@ -15,6 +15,7 @@ import { internalServiceHeaders } from '../internal-service-auth';
 import { resolveOutputBucketSessionKey, SessionKeyResolutionError } from '../session-key';
 import { getCredentialId, getPrincipalOrReject } from '../auth/principal';
 import { getExecutionIdentity } from '../execution-identity';
+import { agentRunLogFields, sessionKeyForLog } from '../agent-run';
 import { PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION } from '../runtime-session/job-policy';
 import {
   jobsSubmitted,
@@ -45,6 +46,8 @@ import {
   acquireExecutionLock,
   releaseExecutionLock,
   checkContinuationPreconditions,
+  continuationSubjectMatches,
+  replaySessionKey,
   cleanupExecution,
   cleanupStaleExecutions,
   commitToolHistoryAndState,
@@ -81,6 +84,18 @@ function sendFileRefAuthorizationError(
   req?: t.AuthenticatedRequest,
 ): boolean {
   if (error instanceof FileRefAuthorizationError) {
+    const agentRun = req?.codeApiAuthContext?.agentRun;
+    if (agentRun) {
+      /* The rejection context embeds the raw run id; log hashes only. */
+      logger.warn('File reference authorization rejected', {
+        status: error.status,
+        reason: error.reason,
+        message: error.message,
+        ...agentRunLogFields(req?.codeApiAuthContext?.tenantId, agentRun),
+      });
+      res.status(error.status).json({ error: error.message });
+      return true;
+    }
     logger.warn('File reference authorization rejected', {
       status: error.status,
       reason: error.reason,
@@ -108,14 +123,19 @@ function sendSessionKeyResolutionError(
   context: string,
 ): boolean {
   if (error instanceof SessionKeyResolutionError) {
+    const agentRun = req.codeApiAuthContext?.agentRun;
     logger.error(`sessionKey resolution failed (${context})`, {
       status: error.status,
       message: error.message,
       method: req.method,
       path: req.path,
-      requestUserId: req.codeApiAuthContext?.userId,
-      authContextUserId: req.codeApiAuthContext?.userId,
-      tenantId: req.codeApiAuthContext?.tenantId,
+      ...(agentRun
+        ? agentRunLogFields(req.codeApiAuthContext?.tenantId, agentRun)
+        : {
+          requestUserId: req.codeApiAuthContext?.userId,
+          authContextUserId: req.codeApiAuthContext?.userId,
+          tenantId: req.codeApiAuthContext?.tenantId,
+        }),
     });
     res.status(error.status).json({ error: error.message });
     return true;
@@ -360,19 +380,32 @@ function buildReplayPayload(
   });
 }
 
+/** Continuation refusal involving an agent_run: kind and hashed ids only. */
+function continuationRejectionLogFields(
+  state: ExecutionState,
+  requestAgentRun: { agentId: string; runId: string } | undefined,
+  requestTenantId: string,
+): Record<string, unknown> {
+  return {
+    execution_id: state.execution_id,
+    request: requestAgentRun ? agentRunLogFields(requestTenantId, requestAgentRun) : { subjectKind: 'user' },
+    execution: state.agentRun ? agentRunLogFields(state.tenantId, state.agentRun) : { subjectKind: 'user' },
+  };
+}
+
 async function runReplayIteration(
   req: t.AuthenticatedRequest,
   state: ExecutionState,
   apiKeyId: string,
-  userId: string,
+  userId: string | undefined,
 ): Promise<t.ExecuteResult> {
   const history = await loadToolHistory(state.execution_id);
   const rawPayload = buildReplayPayload(req, state, history);
-  const sessionKey = state.sessionKey ?? state.userId;
+  const sessionKey = replaySessionKey(state);
   const sandboxSecurity = prepareSandboxJobSecurity({
     req,
     executionId: state.execution_id,
-    userId,
+    ...(state.agentRun ? { agentRun: state.agentRun } : { userId }),
     sessionKey,
     outputSessionId: state.session_id,
     payload: rawPayload,
@@ -399,14 +432,14 @@ async function runReplayIteration(
   const { queue, events, language } = pickQueue(state.language ?? 'python');
   const job = await queue.add(Jobs.execute, {
     code: state.userCode ?? '',
-    userId,
+    ...(state.agentRun ? {} : { userId }),
     payload: sandboxSecurity.payload,
     apiKeyId,
     isPyPlot: state.isPyPlot ?? false,
     principalSource: state.principalSource,
     executionId: state.execution_id,
     tenantId: state.tenantId,
-    canonicalUserId: state.canonicalUserId,
+    ...(state.agentRun ? { agentRun: state.agentRun } : { canonicalUserId: state.canonicalUserId }),
     executionProfile: env.EXECUTION_PROFILE,
     runtimeSessionMode: 'stateless',
     runtimeSessionExemption: PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION,
@@ -438,7 +471,7 @@ async function handleReplayInitial(
   res: Response,
   params: {
     apiKeyId: string;
-    userId: string;
+    userId: string | undefined;
   },
 ): Promise<void> {
   const { apiKeyId, userId } = params;
@@ -573,7 +606,7 @@ async function handleReplayInitial(
     if (err instanceof ExecutionStateTooLargeError) {
       logger.warn('Rejecting replay request: ExecutionState exceeds Redis cap', {
         execution_id,
-        userId,
+        ...(identity.agentRun ? agentRunLogFields(identity.storageNamespace, identity.agentRun) : { userId }),
         apiKeyId,
         bytes: err.bytes,
         cap: err.cap,
@@ -588,19 +621,32 @@ async function handleReplayInitial(
     throw err;
   }
 
-  logger.info('Programmatic execution request received (replay)', {
-    userId,
-    apiKeyId,
-    user: user_id,
-    session_id,
-    execution_id,
-    language,
-    toolCount: tools.length,
-    codeLength: code.length,
-    files: summarizeRequestedFiles(authorizedFiles),
-    sessionKey,
-    timeout,
-  });
+  logger.info('Programmatic execution request received (replay)', identity.agentRun
+    ? {
+      ...agentRunLogFields(identity.storageNamespace, identity.agentRun),
+      apiKeyId,
+      session_id,
+      execution_id,
+      language,
+      toolCount: tools.length,
+      codeLength: code.length,
+      files: summarizeRequestedFiles(authorizedFiles),
+      sessionKey: sessionKeyForLog(sessionKey),
+      timeout,
+    }
+    : {
+      userId,
+      apiKeyId,
+      user: user_id,
+      session_id,
+      execution_id,
+      language,
+      toolCount: tools.length,
+      codeLength: code.length,
+      files: summarizeRequestedFiles(authorizedFiles),
+      sessionKey,
+      timeout,
+    });
 
   await runAndRespond(req, res, state, apiKeyId, userId);
 }
@@ -610,7 +656,7 @@ async function handleReplayContinuation(
   res: Response,
   params: {
     apiKeyId: string;
-    userId: string;
+    userId: string | undefined;
     decoded: { execution_id: string };
     tool_results: NonNullable<t.ProgrammaticRequestBody['tool_results']>;
   },
@@ -700,6 +746,7 @@ async function handleReplayContinuation(
       state,
       results: enrichedResults,
       userId,
+      agentRun: identity.agentRun,
       apiKeyId,
       tenantId: identity.storageNamespace,
       authContextHash: req.codeApiAuthContext?.authContextHash,
@@ -707,15 +754,18 @@ async function handleReplayContinuation(
     });
     if (!pre.ok) {
       if (pre.status === 403) {
-        logger.warn('Unauthorized replay continuation request rejected', {
-          execution_id: state.execution_id,
-          requestUserId: userId,
-          requestApiKeyId: apiKeyId,
-          requestTenantId: identity.storageNamespace,
-          executionUserId: state.userId,
-          executionApiKeyId: state.apiKeyId,
-          executionTenantId: state.tenantId,
-        });
+        logger.warn('Unauthorized replay continuation request rejected',
+          identity.agentRun || state.agentRun
+            ? continuationRejectionLogFields(state, identity.agentRun, identity.storageNamespace)
+            : {
+              execution_id: state.execution_id,
+              requestUserId: userId,
+              requestApiKeyId: apiKeyId,
+              requestTenantId: identity.storageNamespace,
+              executionUserId: state.userId,
+              executionApiKeyId: state.apiKeyId,
+              executionTenantId: state.tenantId,
+            });
       }
       if (pre.cleanupOnReject === true) {
         await cleanupExecution(state.execution_id, 'replay');
@@ -811,7 +861,7 @@ async function runAndRespond(
   res: Response,
   state: ExecutionState,
   apiKeyId: string,
-  userId: string,
+  userId: string | undefined,
 ): Promise<void> {
   /** Read disconnect state through `isDisconnected()` rather than a
    * direct boolean. The `req.on('close', ...)` handler flips the flag
@@ -1099,7 +1149,7 @@ router.post('/exec/programmatic', executionLimiter, async (req: t.AuthenticatedR
 async function handleBlocking(
   req: t.AuthenticatedRequest,
   res: Response,
-  params: { apiKeyId: string; userId: string },
+  params: { apiKeyId: string; userId: string | undefined },
 ): Promise<void | ReturnType<typeof res.status>> {
   const { apiKeyId, userId } = params;
   const {
@@ -1132,7 +1182,12 @@ async function handleBlocking(
 
     const identity = getExecutionIdentity(req, userId);
     if (
-      execution.userId !== userId ||
+      !continuationSubjectMatches(execution, {
+        userId,
+        agentRun: identity.agentRun,
+        tenantId: identity.storageNamespace,
+        authContextHash: req.codeApiAuthContext?.authContextHash,
+      }) ||
       (execution.apiKeyId != null && execution.apiKeyId !== apiKeyId) ||
       (
         execution.tenantId != null &&
@@ -1143,15 +1198,18 @@ async function handleBlocking(
         execution.authContextHash !== req.codeApiAuthContext?.authContextHash
       )
     ) {
-      logger.warn('Unauthorized blocking continuation request rejected', {
-        execution_id,
-        requestUserId: userId,
-        requestApiKeyId: apiKeyId,
-        requestTenantId: identity.storageNamespace,
-        executionUserId: execution.userId,
-        executionApiKeyId: execution.apiKeyId,
-        executionTenantId: execution.tenantId,
-      });
+      logger.warn('Unauthorized blocking continuation request rejected',
+        identity.agentRun || execution.agentRun
+          ? continuationRejectionLogFields(execution, identity.agentRun, identity.storageNamespace)
+          : {
+            execution_id,
+            requestUserId: userId,
+            requestApiKeyId: apiKeyId,
+            requestTenantId: identity.storageNamespace,
+            executionUserId: execution.userId,
+            executionApiKeyId: execution.apiKeyId,
+            executionTenantId: execution.tenantId,
+          });
       return res.status(403).json({ error: 'Forbidden' });
     }
 
@@ -1221,7 +1279,9 @@ async function handleBlocking(
   if (tools.length > MAX_TOOLS_PER_REQUEST) {
     logger.warn(`Too many tools provided: ${tools.length}, limit is ${MAX_TOOLS_PER_REQUEST}`, {
       execution_id: 'pre-creation',
-      userId,
+      ...(req.codeApiAuthContext?.agentRun
+        ? agentRunLogFields(req.codeApiAuthContext.tenantId, req.codeApiAuthContext.agentRun)
+        : { userId }),
       toolCount: tools.length,
     });
     return res.status(400).json({
@@ -1269,38 +1329,64 @@ async function handleBlocking(
 
   connection.set(`session:${session_id}`, sessionKey, 'EX', env.SESSION_CACHE_TTL);
 
-  const executionState: ExecutionState = {
-    execution_id,
-    session_id,
-    sessionKey,
-    userId,
-    tenantId: identity.storageNamespace,
-    canonicalUserId: identity.canonicalUserId,
-    orgId: identity.orgId,
-    serviceId: identity.serviceId,
-    externalUserId: identity.externalUserId,
-    principalSource: identity.principalSource,
-    authContextHash: identity.authContextHash,
-    apiKeyId,
-    startTime: Date.now(),
-    lastActivity: Date.now(),
-    mode: 'blocking',
-  };
+  const executionState: ExecutionState = identity.agentRun
+    ? {
+      execution_id,
+      session_id,
+      sessionKey,
+      agentRun: identity.agentRun,
+      tenantId: identity.storageNamespace,
+      principalSource: identity.principalSource,
+      authContextHash: identity.authContextHash,
+      apiKeyId,
+      startTime: Date.now(),
+      lastActivity: Date.now(),
+      mode: 'blocking',
+    }
+    : {
+      execution_id,
+      session_id,
+      sessionKey,
+      userId,
+      tenantId: identity.storageNamespace,
+      canonicalUserId: identity.canonicalUserId,
+      orgId: identity.orgId,
+      serviceId: identity.serviceId,
+      externalUserId: identity.externalUserId,
+      principalSource: identity.principalSource,
+      authContextHash: identity.authContextHash,
+      apiKeyId,
+      startTime: Date.now(),
+      lastActivity: Date.now(),
+      mode: 'blocking',
+    };
   await setExecutionState(executionState);
 
   try {
-    logger.info('Programmatic execution request received', {
-      userId,
-      apiKeyId,
-      user: user_id,
-      session_id,
-      execution_id,
-      toolCount: tools.length,
-      codeLength: code.length,
-      files: summarizeRequestedFiles(authorizedFiles),
-      sessionKey,
-      timeout,
-    });
+    logger.info('Programmatic execution request received', identity.agentRun
+      ? {
+        ...agentRunLogFields(identity.storageNamespace, identity.agentRun),
+        apiKeyId,
+        session_id,
+        execution_id,
+        toolCount: tools.length,
+        codeLength: code.length,
+        files: summarizeRequestedFiles(authorizedFiles),
+        sessionKey: sessionKeyForLog(sessionKey),
+        timeout,
+      }
+      : {
+        userId,
+        apiKeyId,
+        user: user_id,
+        session_id,
+        execution_id,
+        toolCount: tools.length,
+        codeLength: code.length,
+        files: summarizeRequestedFiles(authorizedFiles),
+        sessionKey,
+        timeout,
+      });
 
     let callbackUrl: string;
     try {
@@ -1361,7 +1447,7 @@ async function handleBlocking(
     const sandboxSecurity = prepareSandboxJobSecurity({
       req,
       executionId: execution_id,
-      userId,
+      ...(identity.agentRun ? { agentRun: identity.agentRun } : { userId }),
       sessionKey,
       outputSessionId: session_id,
       payload: rawPayload,
@@ -1369,14 +1455,14 @@ async function handleBlocking(
 
     const job = await pyQueue.add(Jobs.execute, {
       code,
-      userId,
+      ...(identity.agentRun ? {} : { userId }),
       payload: sandboxSecurity.payload,
       apiKeyId,
       isPyPlot: false,
       principalSource: identity.principalSource,
       executionId: execution_id,
       tenantId: identity.storageNamespace,
-      canonicalUserId: identity.canonicalUserId,
+      ...(identity.agentRun ? { agentRun: identity.agentRun } : { canonicalUserId: identity.canonicalUserId }),
       executionProfile: env.EXECUTION_PROFILE,
       runtimeSessionMode: 'stateless',
       runtimeSessionExemption: PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION,

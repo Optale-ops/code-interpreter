@@ -1,6 +1,7 @@
 import { CODE_ENV_KINDS } from './types';
 import type { AuthenticatedRequest, CodeEnvKind } from './types';
 import { getExecutionIdentity, resolveStorageNamespace } from './execution-identity';
+import { agentRunSessionKey, type AgentRunSubject } from './agent-run';
 
 /* Read directly from `process.env` (not the snapshotted `env` object)
  * so test suites can flip the flag between cases without module-cache
@@ -31,8 +32,8 @@ export interface SessionKeyInput {
 }
 
 export class SessionKeyResolutionError extends Error {
-  readonly status: 400 | 500;
-  constructor(status: 400 | 500, message: string) {
+  readonly status: 400 | 403 | 500;
+  constructor(status: 400 | 403 | 500, message: string) {
     super(message);
     this.name = 'SessionKeyResolutionError';
     this.status = status;
@@ -68,6 +69,10 @@ export function resolveSessionKey(
   input: SessionKeyInput,
 ): string {
   const storageNamespace = resolveSessionStorageNamespace(req);
+  const agentRun = getExecutionIdentity(req).agentRun;
+  if (agentRun) {
+    return resolveAgentRunSessionKey(storageNamespace, agentRun, input);
+  }
 
   switch (input.kind) {
     case 'skill': {
@@ -113,7 +118,13 @@ export function resolveSessionKey(
  */
 export function resolveOutputBucketSessionKey(req: AuthenticatedRequest): string {
   const storageNamespace = resolveSessionStorageNamespace(req);
-  const userId = getExecutionIdentity(req).canonicalUserId;
+  const identity = getExecutionIdentity(req);
+  /* agent_run outputs always land in the run's private key, never in a
+   * shared (skill/agent) or user namespace. */
+  if (identity.agentRun) {
+    return agentRunSessionKey(storageNamespace, identity.agentRun);
+  }
+  const userId = identity.canonicalUserId;
   if (!userId) {
     throw new SessionKeyResolutionError(
       500,
@@ -121,6 +132,53 @@ export function resolveOutputBucketSessionKey(req: AuthenticatedRequest): string
     );
   }
   return `${storageNamespace}:user:${userId}`;
+}
+
+/**
+ * The keys an agent_run principal may resolve. `kind: 'agent'` must name the
+ * signed run and maps to the private `<ns>:agent-run:<A>:<R>` key, never the
+ * shared `<ns>:agent:<id>` key user tokens resolve. `kind: 'skill'` keeps the
+ * shared tenant-wide skill key (reads and read-only priming). `kind: 'user'`
+ * has no meaning for an Agent and is refused.
+ */
+function resolveAgentRunSessionKey(
+  storageNamespace: string,
+  agentRun: AgentRunSubject,
+  input: SessionKeyInput,
+): string {
+  switch (input.kind) {
+    case 'agent':
+      if (input.id !== agentRun.runId) {
+        throw new SessionKeyResolutionError(403, "agent_run: kind 'agent' id must be the signed run_id");
+      }
+      return agentRunSessionKey(storageNamespace, agentRun);
+    case 'skill':
+      if (input.version == null) {
+        throw new SessionKeyResolutionError(400, "resolveSessionKey: kind 'skill' requires version");
+      }
+      return `${storageNamespace}:skill:${input.id}:v:${input.version}`;
+    case 'user':
+      throw new SessionKeyResolutionError(403, "agent_run: kind 'user' is not available");
+    default: {
+      const _exhaustive: never = input.kind;
+      throw new SessionKeyResolutionError(400, `unknown kind: ${_exhaustive as string}`);
+    }
+  }
+}
+
+/**
+ * Upload-bucket key (C1). Same as `resolveSessionKey`, plus: an agent_run may
+ * write the shared skill namespace only as read-only input priming.
+ */
+export function resolveUploadSessionKey(
+  req: AuthenticatedRequest,
+  input: SessionKeyInput,
+  readOnly: boolean,
+): string {
+  if (getExecutionIdentity(req).agentRun && input.kind === 'skill' && !readOnly) {
+    throw new SessionKeyResolutionError(403, "agent_run: kind 'skill' uploads require read_only=true");
+  }
+  return resolveSessionKey(req, input);
 }
 
 /**

@@ -366,3 +366,25 @@ describe('execute request manifest validation', () => {
     }), 'malformed');
   });
 });
+
+describe('agent_run manifest subject', () => {
+  const { user_id: _userId, ...withoutUser } = claims({
+    principal_source: 'agent_run',
+    session_key: 'session:opaque',
+  });
+
+  test('accepts an agent_run manifest that carries agent_id and run_id and no user_id', () => {
+    const token = signExecutionManifest({ ...withoutUser, agent_id: 'agent:opaque', run_id: 'run:opaque' }, SECRET);
+    expect(verifyExecutionManifest(token, SECRET, { nowSeconds: 150 })).toMatchObject({
+      principal_source: 'agent_run',
+      agent_id: 'agent:opaque',
+      run_id: 'run:opaque',
+    });
+  });
+
+  test('refuses an ambiguous or incomplete subject', () => {
+    expect(() => signExecutionManifest({ ...withoutUser, agent_id: 'a', run_id: 'r', user_id: 'u' }, SECRET)).toThrow(ExecutionManifestError);
+    expect(() => signExecutionManifest({ ...withoutUser, agent_id: 'a' }, SECRET)).toThrow(ExecutionManifestError);
+    expect(() => signExecutionManifest(claims({ agent_id: 'a', run_id: 'r' }), SECRET)).toThrow(ExecutionManifestError);
+  });
+});

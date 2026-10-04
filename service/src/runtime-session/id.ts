@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import type { AgentRunSubject } from '../agent-run';
 
 export const RUNTIME_SESSION_HINT_MAX_LENGTH = 128;
 const RUNTIME_SESSION_HINT_PATTERN = /^[A-Za-z0-9._:-]+$/;
@@ -32,17 +33,32 @@ export function validateRuntimeSessionHint(hint: unknown): string | undefined {
   return hint;
 }
 
+/** Whose sessions these are: a user, or one Agent run. Server-derived only. */
+export type RuntimeSessionScope =
+  | { storageNamespace: string; canonicalUserId: string; agentRun?: undefined }
+  | { storageNamespace: string; agentRun: AgentRunSubject; canonicalUserId?: undefined };
+
 /**
  * Server-derived runtime session identity. The namespace and user come from
  * `getExecutionIdentity(req)` — never the client — so a hint can never
  * collide across tenants or users. The hint only partitions sessions within
  * one (tenant, user) scope.
+ *
+ * An agent_run scope is (namespace, kind, Agent, run): one run's sessions
+ * never merge with another run's, another Agent's or a user's, whatever hint
+ * the caller sends. Its material is JSON with a kind prefix and no raw NUL,
+ * so it cannot equal personal legacy material (two raw NULs) or `v2:` material.
  */
-export function deriveRuntimeSessionId(args: {
-  storageNamespace: string;
-  canonicalUserId: string;
-  hint?: string;
-}): string {
+export function deriveRuntimeSessionId(args: RuntimeSessionScope & { hint?: string }): string {
+  if (args.agentRun) {
+    const material = `agent_run:${JSON.stringify([
+      args.storageNamespace,
+      args.agentRun.agentId,
+      args.agentRun.runId,
+      args.hint ?? DEFAULT_HINT,
+    ])}`;
+    return `rt_${createHash('sha256').update(material, 'utf8').digest('hex').slice(0, 40)}`;
+  }
   const fields = [
     args.storageNamespace,
     args.canonicalUserId,
@@ -68,10 +84,8 @@ export function deriveRuntimeSessionId(args: {
  * strict mode rejects it, since the caller asked for guaranteed session
  * semantics it failed to identify.
  */
-export function resolveRuntimeSessionIdForRequest(args: {
+export function resolveRuntimeSessionIdForRequest(args: RuntimeSessionScope & {
   mode: 'stateless' | 'affinity' | 'strict';
-  storageNamespace: string;
-  canonicalUserId: string;
   hint?: string;
 }): string | undefined {
   if (args.mode === 'stateless') return undefined;
@@ -90,18 +104,14 @@ export function resolveRuntimeSessionIdForRequest(args: {
  * validation of a hint that will never be consumed. Stateless mode has the
  * same ignore-don't-validate contract.
  */
-export function resolveRuntimeSessionIdForExecRequest(args: {
+export function resolveRuntimeSessionIdForExecRequest(args: RuntimeSessionScope & {
   mode: 'stateless' | 'affinity' | 'strict';
-  storageNamespace: string;
-  canonicalUserId: string;
   runtimeSessionHint: unknown;
   isSynthetic: boolean;
 }): string | undefined {
   if (args.isSynthetic || args.mode === 'stateless') return undefined;
-  return resolveRuntimeSessionIdForRequest({
-    mode: args.mode,
-    storageNamespace: args.storageNamespace,
-    canonicalUserId: args.canonicalUserId,
-    hint: validateRuntimeSessionHint(args.runtimeSessionHint),
-  });
+  const hint = validateRuntimeSessionHint(args.runtimeSessionHint);
+  return resolveRuntimeSessionIdForRequest(args.agentRun
+    ? { mode: args.mode, storageNamespace: args.storageNamespace, agentRun: args.agentRun, hint }
+    : { mode: args.mode, storageNamespace: args.storageNamespace, canonicalUserId: args.canonicalUserId, hint });
 }

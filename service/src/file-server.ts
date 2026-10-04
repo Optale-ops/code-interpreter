@@ -18,6 +18,14 @@ import logger from './fileServerLogger';
 import { env } from './config';
 import { streamObjectToResponse } from './file-server-download';
 import { redisKeepAliveOptions } from './redis-options';
+import {
+  OWNER_EXPECT_HEADER,
+  OWNER_METADATA,
+  OWNER_METADATA_STAT_KEY,
+  OWNER_BINDING_HEADER,
+  ownerBindingFromHeader,
+  sessionKeyForLog,
+} from './agent-run';
 
 const { INSTANCE_ID } = env;
 
@@ -232,6 +240,7 @@ async function uploadFile(
   mimetype: string,
   existingFileId?: string,
   readOnly = false,
+  ownerBinding?: string,
 ): Promise<t.StoredUploadResult> {
   const fileId = existingFileId ?? nanoid();
   const fileExtension = path.extname(filename);
@@ -251,6 +260,12 @@ async function uploadFile(
   };
   if (readOnly) {
     metaData['X-Amz-Meta-Read-Only'] = 'true';
+  }
+  /* Durable agent-run owner binding (C4). Only a binding an internal caller
+   * signed for this exact object reaches here; it is stored with the bytes
+   * so it outlives the session cache and disappears with the object. */
+  if (ownerBinding) {
+    metaData[OWNER_METADATA] = ownerBinding;
   }
 
   const sessionKey = await redisClient.get(`session:${session_id}`);
@@ -279,7 +294,7 @@ async function uploadFile(
     await minioClient.removeObject(bucketName, objectName);
     throw new Error('Stored object is incomplete');
   }
-  logger.info(`[${INSTANCE_ID}] File ID: ${fileId} | Filename: ${filename} | Session key: ${sessionKey} | Bytes: ${size}`);
+  logger.info(`[${INSTANCE_ID}] File ID: ${fileId} | Filename: ${filename} | Session key: ${sessionKeyForLog(sessionKey)} | Bytes: ${size}`);
   await redisClient.set(`upload:${sessionKey}${session_id}${fileId}`, 'true', 'EX', env.SESSION_CACHE_TTL);
   fileUploads.inc();
 
@@ -431,9 +446,18 @@ app.put('/sessions/:session_id/objects/:fileId', async (req: express.Request, re
   if (!decodedFilename || !mimeType) {
     return res.status(400).json({ error: 'Missing required headers' });
   }
+  /* The owner binding is accepted only as an internal caller's signature for
+   * this session/object; a forged or replayed value refuses the write, so it
+   * can neither create nor change a stored binding. */
+  const owner = ownerBindingFromHeader(req.headers[OWNER_BINDING_HEADER.toLowerCase()], session_id, fileId);
+  if (!owner.ok) {
+    logger.warn('Refusing object write with an invalid owner binding', { session_id, fileId });
+    req.resume();
+    return res.status(400).json({ error: owner.error });
+  }
 
   try {
-    const result = await uploadFile(session_id, req, decodedFilename, mimeType, fileId, readOnly);
+    const result = await uploadFile(session_id, req, decodedFilename, mimeType, fileId, readOnly, owner.binding);
     logger.info(`[${INSTANCE_ID}] File uploaded successfully: ${result.filename}`);
     return res.status(200).json(result);
   } catch (err) {
@@ -707,6 +731,19 @@ app.delete('/sessions/:session_id/objects/:fileId', async (req, res) => {
         fileId,
         bucketName
       });
+    }
+
+    /* Deletion against a durable agent-run owner binding: the stored binding
+     * must name the same tenant, Agent and run. An object without a binding
+     * has uncertain ownership and is refused, never reported as deleted. */
+    const expectedOwner = req.headers[OWNER_EXPECT_HEADER.toLowerCase()];
+    if (expectedOwner !== undefined) {
+      const stat = await minioClient.statObject(bucketName, objectName);
+      const storedOwner = stat.metaData?.[OWNER_METADATA_STAT_KEY];
+      if (typeof expectedOwner !== 'string' || !storedOwner || storedOwner !== expectedOwner) {
+        logger.warn('Refusing owner-bound deletion', { session_id, fileId, bound: Boolean(storedOwner) });
+        return res.status(403).json({ error: 'Owner binding does not match' });
+      }
     }
 
     await minioClient.removeObject(bucketName, objectName);

@@ -7,6 +7,7 @@ import type { ExecutionProfile } from '../execution-profile';
 import type { ExternalFetchPolicySnapshot } from '../external-fetch-policy';
 import type { PackageSetupSummary } from '../../../shared/package-transport';
 import { Jobs } from '@/enum/service';
+import type { AgentRunSubject } from '../agent-run';
 
 /**
  * Per-file vs. top-level session distinction
@@ -253,7 +254,8 @@ export type RuntimeSessionExemption = 'programmatic';
 
 export type JobData = {
   code: string;
-  userId: string;
+  /** Personal subject. Absent for agent_run jobs, which carry `agentRun`. */
+  userId?: string;
   apiKeyId: string;
   principalSource?: string;
   isSynthetic?: boolean;
@@ -262,6 +264,8 @@ export type JobData = {
   executionId?: string;
   tenantId?: string;
   canonicalUserId?: string;
+  /** agent_run subject (Agent Mongo id + run id); never mirrored into userId. */
+  agentRun?: AgentRunSubject;
   /** Producer deployment identity. Optional only for pre-profile queued jobs. */
   executionProfile?: ExecutionProfile;
   /**
@@ -295,7 +299,9 @@ export type JobResult = ExecuteResult;
 export type ExecuteJob = Job<JobData, JobResult, Jobs.execute>;
 
 export interface CodeApiAuthContext {
-  userId: string;
+  /** Personal subject. Absent for agent_run, whose subject is `agentRun`. */
+  userId?: string;
+  agentRun?: AgentRunSubject;
   /** Multi-tenant prefix used by `resolveSessionKey`. Optional because
    *  single-tenant deploys may not populate it; `TENANT_ISOLATION_STRICT`
    *  rejects requests missing this field, otherwise `'legacy'` is used. */
@@ -314,6 +320,10 @@ export interface AuthenticatedRequest extends Request {
   planId?: string;
   executionIdentity?: ExecutionIdentity;
   codeApiAuthContext?: CodeApiAuthContext;
+  /** Set by sessionAuth when a deletion-only agent_run token authorizes a
+   *  DELETE against the durable owner binding because the session cache entry
+   *  has expired. The file server deletes only if the stored binding matches. */
+  ownerBindingExpectation?: string;
   codeApiPrincipal?: CodeApiPrincipal;
 }
 

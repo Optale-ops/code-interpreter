@@ -46,7 +46,10 @@ export interface EgressGrantClaims {
   legacy_grant?: true;
   exec_id: string;
   tenant_id: string;
-  user_id: string;
+  /** Personal subject. Absent for agent_run, which carries agent_id/run_id. */
+  user_id?: string;
+  agent_id?: string;
+  run_id?: string;
   session_key: string;
   input_files: ExecutionManifestInputFile[];
   read_sessions: string[];
@@ -288,10 +291,22 @@ function validateGrant(value: unknown, token: string): EgressGrantClaims {
     assertString(claims.grant_id, 'grant_id');
   }
 
+    /* Exactly one subject: a user, or an agent_run (agent_id + run_id). */
+    const isAgentRun = claims.principal_source === 'agent_run';
+    if (
+        isAgentRun
+            ? claims.user_id !== undefined
+            : claims.agent_id !== undefined || claims.run_id !== undefined
+    ) {
+        throw new EgressGrantError(
+            'malformed',
+            'Egress grant subject is ambiguous',
+        );
+    }
     for (const field of [
         'exec_id',
         'tenant_id',
-        'user_id',
+        ...(isAgentRun ? (['agent_id', 'run_id'] as const) : (['user_id'] as const)),
         'session_key',
         'output_session_id',
     ] as const) {
@@ -434,7 +449,9 @@ export function sealEgressGrant(
     grant_id: claims.grant_id,
     exec_id: claims.exec_id,
     tenant_id: claims.tenant_id,
-    user_id: claims.user_id,
+            ...(claims.user_id !== undefined ? { user_id: claims.user_id } : {}),
+            ...(claims.agent_id !== undefined ? { agent_id: claims.agent_id } : {}),
+            ...(claims.run_id !== undefined ? { run_id: claims.run_id } : {}),
     session_key: claims.session_key,
     input_files: claims.input_files,
     read_sessions: claims.read_sessions,
@@ -500,7 +517,9 @@ export function egressGrantFromExecutionClaims(
     grant_id: grantId,
     exec_id: claims.exec_id,
     tenant_id: claims.tenant_id,
-    user_id: claims.user_id,
+        ...(claims.user_id !== undefined ? { user_id: claims.user_id } : {}),
+        ...(claims.agent_id !== undefined ? { agent_id: claims.agent_id } : {}),
+        ...(claims.run_id !== undefined ? { run_id: claims.run_id } : {}),
     session_key: claims.session_key,
     input_files: claims.input_files,
     read_sessions: claims.read_sessions,
@@ -652,7 +671,9 @@ export function prepareSandboxEgress(args: {
   const executionManifestClaims: ExecutionManifestClaims = {
     ...sandboxVisibleClaims,
     tenant_id: opaqueLabel('tenant', claims.tenant_id),
-    user_id: opaqueLabel('user', claims.user_id),
+    ...(claims.user_id !== undefined ? { user_id: opaqueLabel('user', claims.user_id) } : {}),
+    ...(claims.agent_id !== undefined ? { agent_id: opaqueLabel('agent', claims.agent_id) } : {}),
+    ...(claims.run_id !== undefined ? { run_id: opaqueLabel('run', claims.run_id) } : {}),
     session_key: opaqueLabel('session', claims.session_key),
     input_files: maskedInputFiles,
         read_sessions: Array.from(

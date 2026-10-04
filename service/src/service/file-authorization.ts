@@ -24,7 +24,9 @@ type FileRefStore = {
 export type FileRefAuthDenyReason =
   | 'session_key_mismatch'
   | 'upload_missing'
-  | 'invalid_input';
+  | 'invalid_input'
+  /** agent_run: a kind/id the verified Agent subject may not resolve. */
+  | 'subject_refused';
 
 export class FileRefAuthorizationError extends Error {
   readonly status: 400 | 403;
@@ -214,6 +216,9 @@ export async function authorizeRequestedFiles(args: {
          * 500 with the original message. */
         if (err.status === 400) {
           throw new FileRefAuthorizationError(400, err.message, 'invalid_input');
+        }
+        if (err.status === 403) {
+          throw new FileRefAuthorizationError(403, 'Unauthorized file reference', 'subject_refused');
         }
         throw err;
       }

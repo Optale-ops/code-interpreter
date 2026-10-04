@@ -22,6 +22,8 @@ export type CapturedLog = { level: string; message: string; meta?: unknown };
 export type CapturedPut = { url: string; headers: Record<string, string>; bytes: number };
 export type CapturedFileServerCall = { method: string; url: string; headers: Record<string, string> };
 export type DeleteHandler = (req: IncomingMessage, key: string) => { status: number; body: unknown };
+/** Runs before the stub stores a PUT; a returned outcome refuses the write. */
+export type PutHandler = (headers: Record<string, string>, sessionId: string, fileId: string) => { status: number; body: unknown } | undefined;
 
 /** Fixed Ed25519 seed so token bytes are reproducible across runs and trees. */
 const SIGNING_SEED = Buffer.alloc(32, 7);
@@ -137,6 +139,7 @@ export type ExecResultFactory = (jobData: Record<string, unknown>) => Record<str
 
 export interface RouteHarness {
   baseUrl: string;
+  fileServerUrl: string;
   redis: FakeRedis;
   jobs: Array<Record<string, unknown>>;
   logs: CapturedLog[];
@@ -144,6 +147,7 @@ export interface RouteHarness {
   fileServerCalls: CapturedFileServerCall[];
   objects: Map<string, { bytes: Buffer; headers: Record<string, string> }>;
   setDeleteHandler(handler: DeleteHandler | undefined): void;
+  setPutHandler(handler: PutHandler | undefined): void;
   close(): Promise<void>;
 }
 
@@ -201,6 +205,15 @@ export async function installRouteHarness(options: {
     queueNames: { python: 'python', other: 'other' },
   }));
 
+  /* Everything this harness changes in process.env / env is restored on close
+   * so sibling test files in the same bun process see their own settings. */
+  const savedProcessEnv = new Map<string, string | undefined>();
+  for (const key of Object.keys(process.env).filter(name => name.startsWith('CODEAPI_'))) {
+    savedProcessEnv.set(key, process.env[key]);
+  }
+  for (const key of ['CODEAPI_AUTH_PROVIDER', 'CODEAPI_INTERNAL_SERVICE_TOKEN', 'CODEAPI_TENANT_ISOLATION_STRICT', 'CODEAPI_JWT_ISSUER', 'CODEAPI_JWT_AUDIENCE', 'CODEAPI_JWT_ALLOWED_ALGS', 'CODEAPI_JWT_CLOCK_SKEW_SECONDS', 'CODEAPI_JWT_MAX_TTL_SECONDS', 'CODEAPI_JWT_KEY_CACHE_TTL_SECONDS', 'CODEAPI_JWT_JWKS_JSON']) {
+    if (!savedProcessEnv.has(key)) savedProcessEnv.set(key, process.env[key]);
+  }
   configureJwtEnv(options.jwksJson);
   process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = INTERNAL_TOKEN;
 
@@ -210,6 +223,7 @@ export async function installRouteHarness(options: {
   const fileServerCalls: CapturedFileServerCall[] = [];
   const objects = new Map<string, { bytes: Buffer; headers: Record<string, string> }>();
   let deleteHandler: DeleteHandler | undefined;
+  let putHandler: PutHandler | undefined;
   const fileServer = createServer(async (req, res) => {
     const url = req.url ?? '';
     const headers = headerRecord(req);
@@ -227,6 +241,8 @@ export async function installRouteHarness(options: {
       for await (const chunk of req) chunks.push(chunk as Buffer);
       const bytes = Buffer.concat(chunks);
       puts.push({ url, headers, bytes: bytes.length });
+      const refused = putHandler?.(headers, sessionId, fileId);
+      if (refused) return send(refused.status, refused.body);
       objects.set(key, { bytes, headers });
       const sessionKey = await redis.get(`session:${sessionId}`);
       await redis.set(`upload:${sessionKey}${sessionId}${fileId}`, 'true', 'EX', 86400);
@@ -255,6 +271,10 @@ export async function installRouteHarness(options: {
   const fileServerPort = await listen(fileServer);
 
   const { env } = await import(`${options.srcDir}/config`);
+  const savedEnv = Object.fromEntries(
+    ['FILE_SERVER_URL', 'LOCAL_MODE', 'MAX_UPLOAD_CHECKS', 'MAX_UPLOAD_WAIT', 'EGRESS_GRANT_SECRET', 'EGRESS_GATEWAY_URL', 'RUNTIME_SESSION_MODE']
+      .map(key => [key, env[key]]),
+  );
   env.FILE_SERVER_URL = `http://127.0.0.1:${fileServerPort}`;
   env.LOCAL_MODE = false;
   env.MAX_UPLOAD_CHECKS = 1;
@@ -287,6 +307,7 @@ export async function installRouteHarness(options: {
 
   return {
     baseUrl: `http://127.0.0.1:${apiPort}`,
+    fileServerUrl: `http://127.0.0.1:${fileServerPort}`,
     redis,
     jobs,
     logs,
@@ -296,8 +317,16 @@ export async function installRouteHarness(options: {
     setDeleteHandler(handler) {
       deleteHandler = handler;
     },
+    setPutHandler(handler) {
+      putHandler = handler;
+    },
     async close() {
       await Promise.all([closeServer(apiServer), closeServer(fileServer)]);
+      Object.assign(env, savedEnv);
+      for (const [key, value] of savedProcessEnv) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     },
   };
 }

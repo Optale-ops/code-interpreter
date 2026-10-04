@@ -1,4 +1,5 @@
 import type { ErrorRequestHandler, Request, RequestHandler } from 'express';
+import { agentRunLogFields } from '../agent-run';
 import type { AuthenticatedRequest } from '../types';
 import { SessionKeyResolutionError } from '../session-key';
 import { CodeApiJwtAuthError } from '../auth/librechat-jwt';
@@ -45,18 +46,24 @@ function requestPath(req: Request): string {
 
 export function buildRequestErrorLogMeta(error: unknown, req: Request): Record<string, unknown> {
   const authReq = req as AuthenticatedRequest;
+  const agentRun = authReq.codeApiAuthContext?.agentRun;
   return {
     status: statusFromError(error),
     method: req.method,
-    path: requestPath(req),
+    /* agent_run queries carry the run id; log the path alone. */
+    path: agentRun ? requestPath(req).split('?')[0] : requestPath(req),
     requestId: req.header('x-request-id') || req.header('x-correlation-id'),
     userAgent: req.header('user-agent'),
     ip: req.ip,
     authProvider: process.env.CODEAPI_AUTH_PROVIDER || 'librechat-jwt',
     principalSource: authReq.codeApiPrincipal?.principalSource,
-    userId: authReq.codeApiAuthContext?.userId,
-    tenantId: authReq.codeApiAuthContext?.tenantId,
-    authContextHash: authReq.codeApiAuthContext?.authContextHash,
+    ...(agentRun
+      ? agentRunLogFields(authReq.codeApiAuthContext?.tenantId, agentRun)
+      : {
+        userId: authReq.codeApiAuthContext?.userId,
+        tenantId: authReq.codeApiAuthContext?.tenantId,
+        authContextHash: authReq.codeApiAuthContext?.authContextHash,
+      }),
     error: serializeError(error),
   };
 }

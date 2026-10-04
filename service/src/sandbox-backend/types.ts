@@ -1,4 +1,5 @@
 import type * as t from '../types';
+import type { AgentRunSubject } from '../agent-run';
 import { getAxiosErrorDetails } from '../utils';
 
 /**
@@ -37,6 +38,8 @@ export interface SandboxExecuteContext {
   deadlineAtMs?: number;
   tenantId?: string;
   canonicalUserId?: string;
+  /** agent_run subject; set instead of canonicalUserId, never alongside it. */
+  agentRun?: AgentRunSubject;
   /** Absent ⇒ stateless execution (no runtime session affinity). */
   runtimeSessionId?: string;
   runtimeSessionMode: t.RuntimeSessionMode;
