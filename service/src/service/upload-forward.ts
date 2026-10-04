@@ -1,5 +1,4 @@
 import axios from 'axios';
-import { Transform } from 'stream';
 import type { Readable } from 'stream';
 import type * as t from '../types';
 import { internalServiceHeaders } from '../internal-service-auth';
@@ -17,11 +16,18 @@ export class UploadIncompleteError extends Error {
 }
 
 /**
- * Streams one multipart file to the file server and proves the stored object
- * holds every byte the api read from the upload. The file server reports the
- * stored object's size; a different size (or none) means bytes were lost on
- * the way, so the object is deleted and the upload fails instead of handing
- * the caller a reference to a truncated file.
+ * Sends one multipart file to the file server and proves the stored object
+ * holds every byte the api read from the upload.
+ *
+ * The file is staged in memory (busboy already caps it at the plan's file
+ * size) and sent as one Buffer with an explicit Content-Length. Streaming the
+ * busboy file straight into axios.put lost the tail under Bun: the chunked
+ * request was ended cleanly while chunks written under backpressure were
+ * dropped, and the file server stored a well-formed but short body.
+ *
+ * The file server reports the stored object's size. A different size (or
+ * none) means bytes were lost on the way, so the object is deleted and the
+ * upload fails instead of handing the caller a reference to a truncated file.
  */
 export async function forwardUploadToFileServer({
   file,
@@ -36,17 +42,15 @@ export async function forwardUploadToFileServer({
   maxBytes: number;
   signal: AbortSignal;
 }): Promise<t.UploadResult> {
-  let forwardedBytes = 0;
-  const counter = new Transform({
-    transform(chunk: Buffer, _encoding, callback) {
-      forwardedBytes += chunk.length;
-      callback(null, chunk);
-    },
-  });
-  file.once('error', (error) => counter.destroy(error));
-  file.pipe(counter);
-  const response = await axios.put<t.StoredUploadResult>(url, counter, {
-    headers: internalServiceHeaders(headers),
+  const chunks: Buffer[] = [];
+  for await (const chunk of file) chunks.push(chunk as Buffer);
+  /* busboy ends a file early at the plan's size limit; the route aborts the
+   * signal for that case and reports the limit, so nothing partial is sent. */
+  signal.throwIfAborted();
+  const body = Buffer.concat(chunks);
+  const forwardedBytes = body.length;
+  const response = await axios.put<t.StoredUploadResult>(url, body, {
+    headers: internalServiceHeaders({ ...headers, 'Content-Length': String(forwardedBytes) }),
     maxBodyLength: maxBytes,
     maxContentLength: maxBytes,
     signal,

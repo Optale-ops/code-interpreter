@@ -7,12 +7,17 @@ import { UploadIncompleteError, forwardUploadToFileServer } from './upload-forwa
 /** A file server stand-in that reads the PUT body and reports a stored size. */
 function fileServer(storedSize: (received: number) => number) {
   const deletes: string[] = [];
+  const framing: Array<{ contentLength?: string; transferEncoding?: string }> = [];
   const server = http.createServer((req, res) => {
     if (req.method === 'DELETE') {
       deletes.push(req.url ?? '');
       res.end('{}');
       return;
     }
+    framing.push({
+      contentLength: req.headers['content-length'],
+      transferEncoding: req.headers['transfer-encoding'],
+    });
     let received = 0;
     req.on('data', (chunk: Buffer) => (received += chunk.length));
     req.on('end', () => {
@@ -20,10 +25,10 @@ function fileServer(storedSize: (received: number) => number) {
       res.end(JSON.stringify({ filename: 'cli.tgz', fileId: 'f1', size: storedSize(received) }));
     });
   });
-  return new Promise<{ url: string; deletes: string[]; close: () => void }>((resolve) => {
+  return new Promise<{ url: string; deletes: string[]; framing: typeof framing; close: () => void }>((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       const { port } = server.address() as AddressInfo;
-      resolve({ url: `http://127.0.0.1:${port}/sessions/s1/objects/f1`, deletes, close: () => server.close() });
+      resolve({ url: `http://127.0.0.1:${port}/sessions/s1/objects/f1`, deletes, framing, close: () => server.close() });
     });
   });
 }
@@ -51,6 +56,8 @@ describe('forwardUploadToFileServer', () => {
     });
     expect(result).toEqual({ filename: 'cli.tgz', fileId: 'f1' });
     expect(server.deletes).toEqual([]);
+    /* The whole file goes out as one fixed-length body, never chunked. */
+    expect(server.framing).toEqual([{ contentLength: '262600', transferEncoding: undefined }]);
   });
 
   test('refuses and deletes a stored object shorter than what was forwarded', async () => {
