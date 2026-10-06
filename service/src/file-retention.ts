@@ -1,6 +1,6 @@
 import type { Client } from 'minio';
 import { createReadStream } from 'node:fs';
-import { mkdtemp, open, rm, type FileHandle } from 'node:fs/promises';
+import { lstat, mkdtemp, open, opendir, rm, type FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -28,6 +28,32 @@ type Store = Pick<Client, 'listObjectsV2' | 'removeObjects'>;
 type Sessions = { exists(key: string): Promise<number> };
 const DELETE_PAGE_SIZE = 100;
 const IN_MEMORY_OBJECTS = 10_000;
+const SPILL_PREFIX = 'codeapi-file-retention-';
+const ABANDONED_SPILL_AGE_MS = 24 * 3600_000;
+
+/** Startup housekeeping shares the tick budget with object-store listings.
+ * Include directory mtime so a new, still-empty spill cannot look abandoned.
+ * A concurrently removed spill is already clean. Never follow symlinks. */
+async function* removeAbandonedSpills(root: string, now: number): AsyncGenerator<void> {
+  const cutoff = now - ABANDONED_SPILL_AGE_MS;
+  for await (const entry of await opendir(root)) {
+    yield;
+    if (!entry.isDirectory() || !entry.name.startsWith(SPILL_PREFIX)) continue;
+    const directory = join(root, entry.name);
+    try {
+      let newest = (await lstat(directory)).mtimeMs;
+      for await (const file of await opendir(directory)) {
+        yield;
+        const stat = await lstat(join(directory, file.name));
+        newest = Math.max(newest, stat.isFile() ? stat.mtimeMs : Infinity);
+      }
+      newest = Math.max(newest, (await lstat(directory)).mtimeMs);
+      if (newest < cutoff) await rm(directory, { recursive: true, force: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+}
 
 type Candidate = { name: string; size: number };
 
@@ -42,7 +68,7 @@ class CandidateSpool {
 
   async append(candidate: Candidate): Promise<void> {
     if (!this.directory && this.buffered.length === IN_MEMORY_OBJECTS) {
-      this.directory = await mkdtemp(join(this.root, 'codeapi-file-retention-'));
+      this.directory = await mkdtemp(join(this.root, SPILL_PREFIX));
       this.file = await open(join(this.directory, 'candidates.jsonl'), 'wx', 0o600);
       await this.flush();
     }
@@ -145,6 +171,7 @@ export class FileRetentionSweep {
   }
 
   private async *scan(): AsyncGenerator<void> {
+    yield* removeAbandonedSpills(this.options.tempDirectory ?? tmpdir(), this.now());
     // The fixed session authorization window is not an idle timer. Add at
     // least 24h, or the configured longer TTL, to the requested idle retention.
     const cutoff = this.now() - (this.options.retentionHours * 3600 +

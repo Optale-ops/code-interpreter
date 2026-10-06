@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Readable } from 'node:stream';
 import { mkdtempSync, readdirSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
+import { mkdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Client } from 'minio';
@@ -250,5 +250,31 @@ describe('session file retention', () => {
     await f.sweep.close();
     expect(readdirSync(f.tempDirectory)).toEqual([]);
     expect(f.objects.size).toBe(10205);
+  });
+
+  test('startup removes only abandoned spills older than 24 hours', async () => {
+    const f = fixture();
+    const makeSpill = async (name: string, directoryAge: number, fileAge: number): Promise<void> => {
+      const directory = join(f.tempDirectory, name);
+      await mkdir(directory);
+      const file = join(directory, 'candidates.jsonl');
+      await writeFile(file, '{"name":"old/a.txt","size":10}\n');
+      const fileTime = new Date(now - fileAge * hour);
+      const directoryTime = new Date(now - directoryAge * hour);
+      await utimes(file, fileTime, fileTime);
+      await utimes(directory, directoryTime, directoryTime);
+    };
+    await makeSpill('codeapi-file-retention-abandoned', 25, 25);
+    await makeSpill('codeapi-file-retention-recent', 1, 1);
+    await makeSpill('codeapi-file-retention-active-file', 25, 1);
+    await makeSpill('codeapi-file-retention-boundary', 25, 24);
+    await makeSpill('unrelated-directory', 25, 25);
+    await finish(f.sweep);
+    expect(readdirSync(f.tempDirectory).sort()).toEqual([
+      'codeapi-file-retention-active-file',
+      'codeapi-file-retention-boundary',
+      'codeapi-file-retention-recent',
+      'unrelated-directory',
+    ]);
   });
 });
