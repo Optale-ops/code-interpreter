@@ -1,4 +1,8 @@
-import type { BucketItem, Client } from 'minio';
+import type { Client } from 'minio';
+import { createReadStream } from 'node:fs';
+import { mkdtemp, open, rm, type FileHandle } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 export interface RetentionOptions {
   retentionHours: number;
@@ -6,6 +10,7 @@ export interface RetentionOptions {
   enabled: boolean;
   workPerTick: number;
   excludedPrefixes: string[];
+  tempDirectory?: string;
 }
 
 type Count = { prefixes: number; bytes: number };
@@ -17,13 +22,75 @@ export type RetentionSummary = {
   keptAge: Count;
   keptLive: Count;
   keptExclusion: Count;
-  keptTooLarge: Count;
 };
 
 type Store = Pick<Client, 'listObjectsV2' | 'removeObjects'>;
 type Sessions = { exists(key: string): Promise<number> };
 const DELETE_PAGE_SIZE = 100;
-const MAX_PREFIX_OBJECTS = 10_000;
+const IN_MEMORY_OBJECTS = 10_000;
+
+type Candidate = { name: string; size: number };
+
+/** Only exact keys and sizes are spooled, never object bytes. Each sweep owns
+ * a private temporary directory; generator finalization removes it. */
+class CandidateSpool {
+  private buffered: Candidate[] = [];
+  private directory?: string;
+  private file?: FileHandle;
+
+  constructor(private root: string) {}
+
+  async append(candidate: Candidate): Promise<void> {
+    if (!this.directory && this.buffered.length === IN_MEMORY_OBJECTS) {
+      this.directory = await mkdtemp(join(this.root, 'codeapi-file-retention-'));
+      this.file = await open(join(this.directory, 'candidates.jsonl'), 'wx', 0o600);
+      await this.flush();
+    }
+    this.buffered.push(candidate);
+    if (this.file && this.buffered.length === DELETE_PAGE_SIZE) await this.flush();
+  }
+
+  private async flush(): Promise<void> {
+    if (!this.buffered.length) return;
+    await this.file!.appendFile(this.buffered.map(item => JSON.stringify(item) + '\n').join(''));
+    this.buffered = [];
+  }
+
+  async *pages(): AsyncGenerator<Candidate[]> {
+    if (!this.directory) {
+      for (let offset = 0; offset < this.buffered.length; offset += DELETE_PAGE_SIZE) {
+        yield this.buffered.slice(offset, offset + DELETE_PAGE_SIZE);
+      }
+      return;
+    }
+    await this.flush();
+    await this.file!.close();
+    this.file = undefined;
+    let page: Candidate[] = [];
+    let remainder = '';
+    for await (const chunk of createReadStream(join(this.directory, 'candidates.jsonl'), { encoding: 'utf8' })) {
+      const lines = (remainder + chunk).split('\n');
+      remainder = lines.pop()!;
+      for (const line of lines) {
+        page.push(JSON.parse(line) as Candidate);
+        if (page.length === DELETE_PAGE_SIZE) {
+          yield page;
+          page = [];
+        }
+      }
+    }
+    if (remainder) throw new Error('Incomplete file retention candidate spool');
+    if (page.length) yield page;
+  }
+
+  async close(): Promise<void> {
+    try {
+      await this.file?.close();
+    } finally {
+      if (this.directory) await rm(this.directory, { recursive: true, force: true });
+    }
+  }
+}
 
 /** One bounded pass resumes across ticks. Listings and deletes use the existing
  * MinIO client, whose listing stream fetches pages lazily. No bucket-wide key
@@ -52,7 +119,7 @@ export class FileRetentionSweep {
       this.summary = {
         dryRun: !this.options.enabled, complete: false,
         eligible: count(), deleted: count(), keptAge: count(),
-        keptLive: count(), keptExclusion: count(), keptTooLarge: count(),
+        keptLive: count(), keptExclusion: count(),
       };
       this.pass = this.scan();
     }
@@ -112,7 +179,6 @@ export class FileRetentionSweep {
         add(this.summary.keptLive, bytes); continue;
       }
       if (newest >= cutoff) { add(this.summary.keptAge, bytes); continue; }
-      if (objects > MAX_PREFIX_OBJECTS) { add(this.summary.keptTooLarge, bytes); continue; }
 
       // Re-read the entire prefix before deleting any key. A newly written
       // object keeps the whole prefix, not just that object.
@@ -132,50 +198,48 @@ export class FileRetentionSweep {
           checkedBytes !== bytes || checkedObjects !== objects) {
         add(this.summary.keptAge, checkedBytes); continue;
       }
-      // Finish the final listing before removing even the first page. A fresh
-      // key may sort after hundreds of old ones. Retain at most the cap while
-      // still counting the full prefix for the summary.
-      const candidates: BucketItem[] = [];
-      let finalBytes = 0;
-      let finalObjects = 0;
-      let finalNewest = 0;
-      for await (const object of this.store.listObjectsV2(this.bucket, prefix, true)) {
-        finalBytes += object.size;
-        finalObjects++;
-        finalNewest = Math.max(finalNewest, object.lastModified?.getTime() ?? Infinity);
-        if (finalObjects <= MAX_PREFIX_OBJECTS) candidates.push(object);
-        yield;
-      }
-      if (await this.sessions.exists(`session:${sessionId}`)) {
-        add(this.summary.keptLive, finalBytes); continue;
-      }
-      if (finalObjects > MAX_PREFIX_OBJECTS) {
-        add(this.summary.keptTooLarge, finalBytes); continue;
-      }
-      if (finalNewest >= cutoff || finalNewest !== checkedNewest ||
-          finalBytes !== checkedBytes || finalObjects !== checkedObjects) {
-        add(this.summary.keptAge, finalBytes); continue;
-      }
-      if (!finalObjects) continue;
-      add(this.summary.eligible, finalBytes);
-      if (!this.options.enabled) continue;
+      // Complete the final listing before deleting any page. Spill large
+      // prefixes to this process's temp directory instead of exempting them.
+      const candidates = new CandidateSpool(this.options.tempDirectory ?? tmpdir());
+      try {
+        let finalBytes = 0;
+        let finalObjects = 0;
+        let finalNewest = 0;
+        for await (const object of this.store.listObjectsV2(this.bucket, prefix, true)) {
+          finalBytes += object.size;
+          finalObjects++;
+          finalNewest = Math.max(finalNewest, object.lastModified?.getTime() ?? Infinity);
+          await candidates.append({ name: object.name, size: object.size });
+          yield;
+        }
+        if (await this.sessions.exists(`session:${sessionId}`)) {
+          add(this.summary.keptLive, finalBytes); continue;
+        }
+        if (finalNewest >= cutoff || finalNewest !== checkedNewest ||
+            finalBytes !== checkedBytes || finalObjects !== checkedObjects) {
+          add(this.summary.keptAge, finalBytes); continue;
+        }
+        if (!finalObjects) continue;
+        add(this.summary.eligible, finalBytes);
+        if (!this.options.enabled) continue;
 
-      let deletedBytes = 0;
-      let deletedObjects = 0;
-      for (let offset = 0; offset < candidates.length; offset += DELETE_PAGE_SIZE) {
-        if (await this.sessions.exists(`session:${sessionId}`)) break;
-        const page = candidates.slice(offset, offset + DELETE_PAGE_SIZE);
-        // Never issue a prefix deletion. Only exact, old keys from this page.
-        // This client has no conditional delete. An overwrite after this
-        // listing can still race the delete; fixing that requires versioned
-        // deletes or coordination with every writer, not another stat call.
-        const errors = await this.store.removeObjects(this.bucket, page.map(object => object.name));
-        if (errors.length) throw new Error(`File retention delete failed: ${JSON.stringify(errors)}`);
-        deletedBytes += page.reduce((sum, object) => sum + object.size, 0);
-        deletedObjects += page.length;
-        yield;
+        let deletedBytes = 0;
+        let deletedObjects = 0;
+        for await (const page of candidates.pages()) {
+          if (await this.sessions.exists(`session:${sessionId}`)) break;
+          // This client has no conditional delete. An overwrite after listing
+          // can still race deletion; closing that race requires versioned
+          // deletes or coordination with every writer.
+          const errors = await this.store.removeObjects(this.bucket, page.map(object => object.name));
+          if (errors.length) throw new Error(`File retention delete failed: ${JSON.stringify(errors)}`);
+          deletedBytes += page.reduce((sum, object) => sum + object.size, 0);
+          deletedObjects += page.length;
+          yield;
+        }
+        if (deletedObjects) add(this.summary.deleted, deletedBytes);
+      } finally {
+        await candidates.close();
       }
-      if (deletedObjects) add(this.summary.deleted, deletedBytes);
     }
   }
 }

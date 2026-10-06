@@ -1,5 +1,9 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import { Readable } from 'node:stream';
+import { mkdtempSync, readdirSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Client } from 'minio';
 import { FileRetentionSweep, type RetentionSummary } from './file-retention';
 
@@ -7,7 +11,17 @@ const now = Date.parse('2026-10-06T12:00:00Z');
 const hour = 3600_000;
 type ObjectEntry = { name: string; size: number; lastModified: Date };
 
+const fixtures: { sweep: FileRetentionSweep; tempDirectory: string }[] = [];
+afterEach(async () => {
+  for (const fixture of fixtures.splice(0)) {
+    await fixture.sweep.close();
+    await rm(fixture.tempDirectory, { recursive: true, force: true });
+  }
+});
+
 function fixture(enabled = true, workPerTick = 1000) {
+  const tempDirectory = mkdtempSync(join(tmpdir(), 'retention-test-'));
+  let onRemove: (() => void) | undefined;
   const objects = new Map<string, ObjectEntry>();
   const live = new Set<string>();
   const deleted: string[][] = [];
@@ -28,6 +42,7 @@ function fixture(enabled = true, workPerTick = 1000) {
       })());
     },
     async removeObjects(_bucket: string, names: string[]) {
+      onRemove?.();
       deleted.push([...names]);
       for (const name of names) objects.delete(name);
       return [];
@@ -37,10 +52,13 @@ function fixture(enabled = true, workPerTick = 1000) {
     exists: async key => Number(live.has(key.slice('session:'.length))),
   }, 'files', {
     enabled, retentionHours: 48, sessionTtlSeconds: 86400, workPerTick,
+    tempDirectory,
     excludedPrefixes: ['rtsx-checkpoints/', 'runner/', 'custom-build/'],
   }, () => now);
-  return { put, objects, live, deleted, sweep, visits: () => visits,
-    onList: (callback: typeof onList) => { onList = callback; } };
+  fixtures.push({ sweep, tempDirectory });
+  return { put, objects, live, deleted, sweep, tempDirectory, visits: () => visits,
+    onList: (callback: typeof onList) => { onList = callback; },
+    onRemove: (callback: typeof onRemove) => { onRemove = callback; } };
 }
 
 async function finish(sweep: FileRetentionSweep): Promise<RetentionSummary> {
@@ -159,35 +177,41 @@ describe('session file retention', () => {
     expect(f.objects.size).toBe(0);
   });
 
-  test('dry-run reports an oversized prefix as kept rather than eligible', async () => {
+  test('dry-run counts large prefixes and cleans up spilled candidates', async () => {
     const f = fixture(false);
     for (let i = 0; i < 10001; i++) f.put(`large/${i}.txt`);
     const summary = await finish(f.sweep);
-    expect(summary.keptTooLarge).toEqual({ prefixes: 1, bytes: 100010 });
-    expect(summary.eligible).toEqual({ prefixes: 0, bytes: 0 });
-    expect(f.deleted).toEqual([]);
-  });
-
-  test('a prefix exactly at the collection cap can be deleted', async () => {
-    const f = fixture();
-    for (let i = 0; i < 10000; i++) f.put(`large/${i}.txt`);
-    const summary = await finish(f.sweep);
-    expect(summary.deleted).toEqual({ prefixes: 1, bytes: 100000 });
-    expect(summary.keptTooLarge).toEqual({ prefixes: 0, bytes: 0 });
-    expect(f.objects.size).toBe(0);
-  });
-
-  test('exceeding the cap during the final listing keeps the entire prefix', async () => {
-    const f = fixture();
-    for (let i = 0; i < 10000; i++) f.put(`large/${i}.txt`);
-    f.onList((prefix, count) => {
-      if (prefix === 'large/' && count === 4) f.put('large/z-last.txt');
-    });
-    const summary = await finish(f.sweep);
-    expect(summary.keptTooLarge).toEqual({ prefixes: 1, bytes: 100010 });
-    expect(summary.eligible).toEqual({ prefixes: 0, bytes: 0 });
+    expect(summary.eligible).toEqual({ prefixes: 1, bytes: 100010 });
     expect(f.deleted).toEqual([]);
     expect(f.objects.size).toBe(10001);
+    expect(readdirSync(f.tempDirectory)).toEqual([]);
+  });
+
+  test('fully deletes a prefix above the memory threshold from spill pages', async () => {
+    const f = fixture();
+    for (let i = 0; i < 10205; i++) f.put(`large/${i}.txt`);
+    let usedSpill = false;
+    f.onRemove(() => { usedSpill ||= readdirSync(f.tempDirectory).length === 1; });
+    const summary = await finish(f.sweep);
+    expect(summary.deleted).toEqual({ prefixes: 1, bytes: 102050 });
+    expect(f.objects.size).toBe(0);
+    expect(usedSpill).toBe(true);
+    expect(f.deleted.every(page => page.length <= 100)).toBe(true);
+    expect(readdirSync(f.tempDirectory)).toEqual([]);
+  });
+
+  test('a fresh trailing key in a spilled prefix preserves everything and removes the spill', async () => {
+    const f = fixture();
+    for (let i = 0; i < 10205; i++) f.put(`large/${i}.txt`);
+    f.onList((prefix, count) => {
+      if (prefix === 'large/' && count === 4) f.put('large/z-last.txt', 0);
+    });
+    const summary = await finish(f.sweep);
+    expect(summary.keptAge).toEqual({ prefixes: 1, bytes: 102060 });
+    expect(summary.eligible).toEqual({ prefixes: 0, bytes: 0 });
+    expect(f.deleted).toEqual([]);
+    expect(f.objects.size).toBe(10206);
+    expect(readdirSync(f.tempDirectory)).toEqual([]);
   });
 
   test('a mapping appearing during the final listing prevents every delete page', async () => {
@@ -198,5 +222,33 @@ describe('session file retention', () => {
     expect(summary.keptLive).toEqual({ prefixes: 1, bytes: 2050 });
     expect(f.deleted).toEqual([]);
     expect(f.objects.size).toBe(205);
+  });
+
+  test('deletion errors remove the candidate spill', async () => {
+    const f = fixture();
+    for (let i = 0; i < 10001; i++) f.put(`large/${i}.txt`);
+    let usedSpill = false;
+    f.onRemove(() => {
+      usedSpill = readdirSync(f.tempDirectory).length === 1;
+      throw new Error('delete failed');
+    });
+    await expect(finish(f.sweep)).rejects.toThrow('delete failed');
+    expect(usedSpill).toBe(true);
+    expect(readdirSync(f.tempDirectory)).toEqual([]);
+    expect(f.objects.size).toBe(10001);
+  });
+
+  test('shutdown during a resumed final listing removes its spill without deleting', async () => {
+    const f = fixture(true, 100);
+    for (let i = 0; i < 10205; i++) f.put(`large/${i}.txt`);
+    for (let tick = 0; tick < 400; tick++) {
+      await f.sweep.tick();
+      if (readdirSync(f.tempDirectory).length) break;
+    }
+    expect(readdirSync(f.tempDirectory)).toHaveLength(1);
+    expect(f.deleted).toEqual([]);
+    await f.sweep.close();
+    expect(readdirSync(f.tempDirectory)).toEqual([]);
+    expect(f.objects.size).toBe(10205);
   });
 });

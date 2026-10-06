@@ -821,7 +821,7 @@ function startRetention(): void {
     try {
       const summary = await retentionSweep!.tick();
       logger.info('File retention sweep', summary);
-      for (const outcome of ['eligible', 'deleted', 'keptAge', 'keptLive', 'keptExclusion', 'keptTooLarge'] as const) {
+      for (const outcome of ['eligible', 'deleted', 'keptAge', 'keptLive', 'keptExclusion'] as const) {
         const labels = { outcome, dry_run: String(summary.dryRun) };
         fileRetentionPrefixes.set(labels, summary[outcome].prefixes);
         fileRetentionBytes.set(labels, summary[outcome].bytes);
