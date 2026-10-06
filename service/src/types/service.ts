@@ -320,9 +320,8 @@ export interface AuthenticatedRequest extends Request {
   planId?: string;
   executionIdentity?: ExecutionIdentity;
   codeApiAuthContext?: CodeApiAuthContext;
-  /** Set by sessionAuth when a deletion-only agent_run token authorizes a
-   *  DELETE against the durable owner binding because the session cache entry
-   *  has expired. The file server deletes only if the stored binding matches. */
+  /** Set by sessionAuth for a user or deletion-only agent_run DELETE after
+   *  session expiry. The file server deletes only if the durable binding matches. */
   ownerBindingExpectation?: string;
   codeApiPrincipal?: CodeApiPrincipal;
 }

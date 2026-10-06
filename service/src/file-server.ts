@@ -27,6 +27,7 @@ import {
   OWNER_BINDING_HEADER,
   ownerBindingFromHeader,
   sessionKeyForLog,
+  sessionOwnerBindingValue,
 } from './agent-run';
 
 const { INSTANCE_ID } = env;
@@ -263,14 +264,13 @@ async function uploadFile(
   if (readOnly) {
     metaData['X-Amz-Meta-Read-Only'] = 'true';
   }
-  /* Durable agent-run owner binding (C4). Only a binding an internal caller
-   * signed for this exact object reaches here; it is stored with the bytes
-   * so it outlives the session cache and disappears with the object. */
-  if (ownerBinding) {
-    metaData[OWNER_METADATA] = ownerBinding;
-  }
-
+  /* The signed run binding takes precedence. User objects retain the
+   * server-owned session namespace with their bytes, including sandbox outputs. */
   const sessionKey = await redisClient.get(`session:${session_id}`);
+  const durableOwner = ownerBinding ?? (sessionKey?.includes(':user:') ? sessionOwnerBindingValue(sessionKey) : undefined);
+  if (durableOwner) {
+    metaData[OWNER_METADATA] = durableOwner;
+  }
   const peeked = await peekStreamForEmpty(fileStream);
   let receivedBytes = 0;
   if (peeked.empty) {
@@ -752,8 +752,8 @@ app.delete('/sessions/:session_id/objects/:fileId', async (req, res) => {
 });
 
 /**
- * Owner-checked deletion for agent_run objects whose session cache has
- * expired. A separate operation (not the plain DELETE) so a file server that
+ * Owner-checked deletion for user and agent_run objects whose session cache
+ * has expired. A separate operation (not the plain DELETE) so a file server that
  * predates owner bindings answers 404 instead of deleting with the internal
  * credential. It never deletes without an expected owner, and never deletes an
  * object that has no stored binding or a different one. Outcomes:
