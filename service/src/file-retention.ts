@@ -17,11 +17,13 @@ export type RetentionSummary = {
   keptAge: Count;
   keptLive: Count;
   keptExclusion: Count;
+  keptTooLarge: Count;
 };
 
 type Store = Pick<Client, 'listObjectsV2' | 'removeObjects'>;
 type Sessions = { exists(key: string): Promise<number> };
 const DELETE_PAGE_SIZE = 100;
+const MAX_PREFIX_OBJECTS = 10_000;
 
 /** One bounded pass resumes across ticks. Listings and deletes use the existing
  * MinIO client, whose listing stream fetches pages lazily. No bucket-wide key
@@ -50,7 +52,7 @@ export class FileRetentionSweep {
       this.summary = {
         dryRun: !this.options.enabled, complete: false,
         eligible: count(), deleted: count(), keptAge: count(),
-        keptLive: count(), keptExclusion: count(),
+        keptLive: count(), keptExclusion: count(), keptTooLarge: count(),
       };
       this.pass = this.scan();
     }
@@ -110,6 +112,7 @@ export class FileRetentionSweep {
         add(this.summary.keptLive, bytes); continue;
       }
       if (newest >= cutoff) { add(this.summary.keptAge, bytes); continue; }
+      if (objects > MAX_PREFIX_OBJECTS) { add(this.summary.keptTooLarge, bytes); continue; }
 
       // Re-read the entire prefix before deleting any key. A newly written
       // object keeps the whole prefix, not just that object.
@@ -129,13 +132,39 @@ export class FileRetentionSweep {
           checkedBytes !== bytes || checkedObjects !== objects) {
         add(this.summary.keptAge, checkedBytes); continue;
       }
-      add(this.summary.eligible, checkedBytes);
+      // Finish the final listing before removing even the first page. A fresh
+      // key may sort after hundreds of old ones. Retain at most the cap while
+      // still counting the full prefix for the summary.
+      const candidates: BucketItem[] = [];
+      let finalBytes = 0;
+      let finalObjects = 0;
+      let finalNewest = 0;
+      for await (const object of this.store.listObjectsV2(this.bucket, prefix, true)) {
+        finalBytes += object.size;
+        finalObjects++;
+        finalNewest = Math.max(finalNewest, object.lastModified?.getTime() ?? Infinity);
+        if (finalObjects <= MAX_PREFIX_OBJECTS) candidates.push(object);
+        yield;
+      }
+      if (await this.sessions.exists(`session:${sessionId}`)) {
+        add(this.summary.keptLive, finalBytes); continue;
+      }
+      if (finalObjects > MAX_PREFIX_OBJECTS) {
+        add(this.summary.keptTooLarge, finalBytes); continue;
+      }
+      if (finalNewest >= cutoff || finalNewest !== checkedNewest ||
+          finalBytes !== checkedBytes || finalObjects !== checkedObjects) {
+        add(this.summary.keptAge, finalBytes); continue;
+      }
+      if (!finalObjects) continue;
+      add(this.summary.eligible, finalBytes);
       if (!this.options.enabled) continue;
 
-      let page: BucketItem[] = [];
       let deletedBytes = 0;
       let deletedObjects = 0;
-      const remove = async (): Promise<void> => {
+      for (let offset = 0; offset < candidates.length; offset += DELETE_PAGE_SIZE) {
+        if (await this.sessions.exists(`session:${sessionId}`)) break;
+        const page = candidates.slice(offset, offset + DELETE_PAGE_SIZE);
         // Never issue a prefix deletion. Only exact, old keys from this page.
         // This client has no conditional delete. An overwrite after this
         // listing can still race the delete; fixing that requires versioned
@@ -144,21 +173,8 @@ export class FileRetentionSweep {
         if (errors.length) throw new Error(`File retention delete failed: ${JSON.stringify(errors)}`);
         deletedBytes += page.reduce((sum, object) => sum + object.size, 0);
         deletedObjects += page.length;
-        page = [];
-      };
-      for await (const object of this.store.listObjectsV2(this.bucket, prefix, true)) {
-        if ((object.lastModified?.getTime() ?? Infinity) >= cutoff ||
-            await this.sessions.exists(`session:${sessionId}`)) {
-          page = [];
-          break;
-        }
-        page.push(object);
-        if (page.length === DELETE_PAGE_SIZE) {
-          await remove();
-        }
         yield;
       }
-      if (page.length && !await this.sessions.exists(`session:${sessionId}`)) await remove();
       if (deletedObjects) add(this.summary.deleted, deletedBytes);
     }
   }

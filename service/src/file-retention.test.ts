@@ -136,16 +136,17 @@ describe('session file retention', () => {
     expect(f.deleted).toEqual([]);
   });
 
-  test('a fresh object in the deletion listing is never sent for deletion', async () => {
+  test('a fresh key after more than one delete page keeps every old key', async () => {
     const f = fixture();
-    f.put('old/a.txt');
+    for (let i = 0; i < 205; i++) f.put(`old/a-${String(i).padStart(3, '0')}.txt`);
     f.onList((prefix, count) => {
-      if (prefix === 'old/' && count === 4) f.put('old/new.txt', 0);
+      if (prefix === 'old/' && count === 4) f.put('old/z-new.txt', 0);
     });
-    await finish(f.sweep);
+    const summary = await finish(f.sweep);
     expect(f.deleted).toEqual([]);
-    expect(f.objects.has('old/new.txt')).toBe(true);
-    expect(f.objects.has('old/a.txt')).toBe(true);
+    expect(f.objects.size).toBe(206);
+    expect(summary.keptAge).toEqual({ prefixes: 1, bytes: 2060 });
+    expect(summary.eligible).toEqual({ prefixes: 0, bytes: 0 });
   });
 
   test('tolerates another replica removing a prefix after it was listed', async () => {
@@ -156,5 +157,46 @@ describe('session file retention', () => {
     f.objects.delete('old/a.txt');
     await finish(f.sweep);
     expect(f.objects.size).toBe(0);
+  });
+
+  test('dry-run reports an oversized prefix as kept rather than eligible', async () => {
+    const f = fixture(false);
+    for (let i = 0; i < 10001; i++) f.put(`large/${i}.txt`);
+    const summary = await finish(f.sweep);
+    expect(summary.keptTooLarge).toEqual({ prefixes: 1, bytes: 100010 });
+    expect(summary.eligible).toEqual({ prefixes: 0, bytes: 0 });
+    expect(f.deleted).toEqual([]);
+  });
+
+  test('a prefix exactly at the collection cap can be deleted', async () => {
+    const f = fixture();
+    for (let i = 0; i < 10000; i++) f.put(`large/${i}.txt`);
+    const summary = await finish(f.sweep);
+    expect(summary.deleted).toEqual({ prefixes: 1, bytes: 100000 });
+    expect(summary.keptTooLarge).toEqual({ prefixes: 0, bytes: 0 });
+    expect(f.objects.size).toBe(0);
+  });
+
+  test('exceeding the cap during the final listing keeps the entire prefix', async () => {
+    const f = fixture();
+    for (let i = 0; i < 10000; i++) f.put(`large/${i}.txt`);
+    f.onList((prefix, count) => {
+      if (prefix === 'large/' && count === 4) f.put('large/z-last.txt');
+    });
+    const summary = await finish(f.sweep);
+    expect(summary.keptTooLarge).toEqual({ prefixes: 1, bytes: 100010 });
+    expect(summary.eligible).toEqual({ prefixes: 0, bytes: 0 });
+    expect(f.deleted).toEqual([]);
+    expect(f.objects.size).toBe(10001);
+  });
+
+  test('a mapping appearing during the final listing prevents every delete page', async () => {
+    const f = fixture();
+    for (let i = 0; i < 205; i++) f.put(`old/${i}.txt`);
+    f.onList((_prefix, count) => { if (count === 4) f.live.add('old'); });
+    const summary = await finish(f.sweep);
+    expect(summary.keptLive).toEqual({ prefixes: 1, bytes: 2050 });
+    expect(f.deleted).toEqual([]);
+    expect(f.objects.size).toBe(205);
   });
 });
