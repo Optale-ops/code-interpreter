@@ -311,6 +311,12 @@ export const env = {
   FETCH_MAX_REQUESTS: Number(process.env.FETCH_MAX_REQUESTS) || 120, // 120 requests per minute
   // Redis Key Cache Config
   SESSION_CACHE_TTL: Number(process.env.SESSION_CACHE_TTL) || 86400,
+  FILE_RETENTION_HOURS: configuredNumber(process.env.CODEAPI_FILE_RETENTION_HOURS, 48),
+  FILE_RETENTION_ENABLED: process.env.CODEAPI_FILE_RETENTION_ENABLED === 'true',
+  FILE_RETENTION_INTERVAL_MS: configuredNumber(process.env.CODEAPI_FILE_RETENTION_INTERVAL_MS, 60_000),
+  FILE_RETENTION_WORK_PER_TICK: configuredNumber(process.env.CODEAPI_FILE_RETENTION_WORK_PER_TICK, 1000),
+  FILE_RETENTION_EXCLUDED_PREFIXES: (process.env.CODEAPI_FILE_RETENTION_EXCLUDED_PREFIXES ?? '')
+    .split(',').map(value => value.trim()).filter(Boolean),
   /** Strict tenant isolation. When true, sessionKey resolution fails closed
    *  (500) on requests whose auth context lacks `tenantId`, instead of
    *  silently falling back to the `'legacy'` tenant prefix. Default OFF in

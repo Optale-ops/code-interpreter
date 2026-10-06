@@ -10,7 +10,7 @@ import type { BucketItem, BucketItemStat, ClientOptions } from 'minio';
 import type { Readable } from 'stream';
 import type * as tls from 'tls';
 import type * as t from './types';
-import { metricsHandler, fileUploads, fileDownloads } from './metrics';
+import { metricsHandler, fileUploads, fileDownloads, fileRetentionPrefixes, fileRetentionBytes, fileRetentionComplete } from './metrics';
 import { httpMetricsMiddleware } from './middleware/httpMetrics';
 import { internalServiceAuthEnabled, requireInternalServiceAuth } from './internal-service-auth';
 import { shutdownTelemetry, traceHttpRequest } from './telemetry';
@@ -18,6 +18,7 @@ import logger from './fileServerLogger';
 import { env } from './config';
 import { streamObjectToResponse } from './file-server-download';
 import { redisKeepAliveOptions } from './redis-options';
+import { FileRetentionSweep } from './file-retention';
 import {
   OWNER_BINDING_PATTERN,
   OWNER_DELETE_OPERATION,
@@ -801,10 +802,48 @@ const port = Number(process.env.FILE_SERVER_PORT ?? 3000);
 const host = process.env.FILE_SERVER_HOST;
 let server: ReturnType<typeof app.listen> | undefined;
 let shuttingDown = false;
+let retentionSweep: FileRetentionSweep | undefined;
+let retentionTimer: NodeJS.Timeout | undefined;
+let retentionTick: Promise<void> | undefined;
+
+function startRetention(): void {
+  if (!Number.isFinite(env.FILE_RETENTION_INTERVAL_MS) || env.FILE_RETENTION_INTERVAL_MS < 1) {
+    throw new Error('Invalid CODEAPI_FILE_RETENTION_INTERVAL_MS');
+  }
+  retentionSweep = new FileRetentionSweep(minioClient, redisClient, bucketName, {
+    retentionHours: env.FILE_RETENTION_HOURS,
+    sessionTtlSeconds: env.SESSION_CACHE_TTL,
+    enabled: env.FILE_RETENTION_ENABLED,
+    workPerTick: env.FILE_RETENTION_WORK_PER_TICK,
+    excludedPrefixes: [env.CHECKPOINT_PREFIX, 'runner/', ...env.FILE_RETENTION_EXCLUDED_PREFIXES],
+  });
+  const tick = async (): Promise<void> => {
+    try {
+      const summary = await retentionSweep!.tick();
+      logger.info('File retention sweep', summary);
+      for (const outcome of ['eligible', 'deleted', 'keptAge', 'keptLive', 'keptExclusion'] as const) {
+        const labels = { outcome, dry_run: String(summary.dryRun) };
+        fileRetentionPrefixes.set(labels, summary[outcome].prefixes);
+        fileRetentionBytes.set(labels, summary[outcome].bytes);
+      }
+      fileRetentionComplete.set(Number(summary.complete));
+    } catch (error) {
+      fileRetentionComplete.set(0);
+      logger.error('File retention sweep failed', { error });
+    } finally {
+      if (!shuttingDown) {
+        retentionTimer = setTimeout(() => { retentionTick = tick(); }, env.FILE_RETENTION_INTERVAL_MS);
+        retentionTimer.unref();
+      }
+    }
+  };
+  retentionTick = tick();
+}
 
 async function startServer(): Promise<void> {
   try {
     await initializeStorage();
+    startRetention();
     const onListen = () => {
       logger.info(`[${INSTANCE_ID}] Server running on ${host ?? '*'}:${port}`);
     };
@@ -829,8 +868,11 @@ async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   logger.info(`[${INSTANCE_ID}] Shutting down file server...`);
+  clearTimeout(retentionTimer);
   try {
     await closeHttpServer();
+    await retentionTick;
+    await retentionSweep?.close();
     await redisClient.quit();
     try {
       await shutdownTelemetry();

@@ -155,6 +155,21 @@ export const fileDownloads = new Counter({
   help: 'Total number of files downloaded',
 });
 
+export const fileRetentionPrefixes = new Gauge({
+  name: 'codeapi_file_retention_prefixes',
+  help: 'Prefix counts in the current or last retention pass; do not sum replicas',
+  labelNames: ['outcome', 'dry_run'],
+});
+export const fileRetentionBytes = new Gauge({
+  name: 'codeapi_file_retention_bytes',
+  help: 'Byte counts in the current or last retention pass; do not sum replicas',
+  labelNames: ['outcome', 'dry_run'],
+});
+export const fileRetentionComplete = new Gauge({
+  name: 'codeapi_file_retention_complete',
+  help: 'Whether the most recent retention tick completed a whole bucket pass',
+});
+
 // -- Tool call server metrics --
 export const toolCalls = new Counter({
   name: 'codeapi_tool_calls_total',
