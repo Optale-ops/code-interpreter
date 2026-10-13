@@ -2210,4 +2210,66 @@ describe('egress gateway routes', () => {
         },
     );
 
+    test('accepts more passthroughs than the grant fetch budget for a host with its own budget', async () => {
+        // service/config/external-fetch-policy.json grants console-staging.optale.com its own budget
+        // (httpsPassthroughLimits) while the grant-wide fetch budget stays 8.
+        const policyPath = path.resolve(__dirname, '../config/external-fetch-policy.json');
+        env.EXTERNAL_FETCH_POLICY_FILE = policyPath;
+        const policy = parseExternalFetchPolicy(JSON.parse(fs.readFileSync(policyPath, 'utf8')));
+        expect(policy.limits.maxFetchesPerGrant).toBe(8);
+        const host = 'console-staging.optale.com';
+        const grant = claims({
+            network_policy: serializeExternalFetchPolicy(policy),
+            network_policy_digest: externalFetchPolicyDigest(policy),
+            grant_id: 'grant_console_budget',
+        });
+        const redis = new RedisMock();
+        env.EGRESS_LEDGER_REQUIRED = true;
+        setEgressLedgerRedisForTest(redis);
+        await createEgressLedger(grant);
+        setHttpsPassthroughOpenForTest(async args => {
+            const target = validateHttpsPassthroughUrl(args.url, args.policy, args.method);
+            await args.beforeRequest?.(target);
+            const response = Object.assign(Readable.from([Buffer.from('{"ok":true}')]), {
+                statusCode: 200,
+                headers: { 'content-type': 'application/json' },
+                rawHeaders: ['Content-Type', 'application/json'],
+                complete: false,
+            }) as unknown as IncomingMessage;
+            return {
+                response,
+                target,
+                responseBytes: 0,
+                redirects: 0,
+                timedOut: () => false,
+                close: () => response.destroy(),
+            };
+        });
+        try {
+            const envelope = JSON.stringify({
+                url: `https://${host}/api/optale/mcp`,
+                method: 'POST',
+                headers: {},
+                bodyBase64: '',
+            });
+            for (let i = 0; i < 12; i += 1) {
+                const result = await gatewayPostWithTrailers(
+                    '/https-passthrough',
+                    { ...grantHeader(grant), 'Content-Type': 'application/json' },
+                    envelope,
+                );
+                expect(result.status).toBe(200);
+                expect(result.trailers['x-codeapi-egress-outcome']).toBe('OK');
+            }
+            const ledger = await assertEgressGrantActive(grant);
+            expect(ledger.fetch_count).toBe(0);
+            expect(ledger.passthrough_budgets[host]?.fetch_count).toBe(12);
+            expect(ledger.request_count).toBe(12);
+        } finally {
+            env.EGRESS_LEDGER_REQUIRED = false;
+            setEgressLedgerRedisForTest(null);
+            await redis.quit();
+        }
+    });
+
 });
