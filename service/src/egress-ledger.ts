@@ -10,7 +10,19 @@ import { redisKeepAliveOptions } from './redis-options';
 
 type LedgerStatus = 'active' | 'revoked';
 
-export interface EgressLedgerRecord {
+/** Requests and response bytes metered against one fetch budget. */
+export interface EgressFetchBudget {
+  fetch_count: number;
+  fetched_bytes: number;
+  fetch_reservations: Record<string, number>;
+}
+
+/**
+ * The record's own fetch fields are the grant-wide external-fetch budget. A passthrough host with
+ * its own limits is metered in `passthrough_budgets[host]` instead, so Console API calls from the
+ * workspace CLI neither use up nor are capped by the internet-fetch budget.
+ */
+export interface EgressLedgerRecord extends EgressFetchBudget {
   grant_id: string;
   exec_id: string;
   status: LedgerStatus;
@@ -28,9 +40,7 @@ export interface EgressLedgerRecord {
   upload_count: number;
   tool_call_count: number;
   uploaded_bytes: number;
-  fetch_count: number;
-  fetched_bytes: number;
-  fetch_reservations: Record<string, number>;
+  passthrough_budgets: Record<string, EgressFetchBudget>;
   output_file_ids: string[];
 }
 
@@ -175,6 +185,7 @@ function recordFromGrant(grant: EgressGrantClaims): EgressLedgerRecord {
     fetch_count: 0,
     fetched_bytes: 0,
     fetch_reservations: {},
+    passthrough_budgets: {},
     uploaded_bytes: 0,
     output_file_ids: [],
   };
@@ -207,17 +218,36 @@ export async function ensureEgressLedger(grant: EgressGrantClaims): Promise<void
   );
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeBudget<T extends EgressFetchBudget>(budget: T): T {
+  if (!Number.isSafeInteger(budget.fetch_count) || budget.fetch_count < 0) budget.fetch_count = 0;
+  if (!Number.isSafeInteger(budget.fetched_bytes) || budget.fetched_bytes < 0) budget.fetched_bytes = 0;
+  if (!isPlainObject(budget.fetch_reservations)) budget.fetch_reservations = {};
+  return budget;
+}
+
 function normalizeRecord(record: EgressLedgerRecord): EgressLedgerRecord {
-  if (!Number.isSafeInteger(record.fetch_count) || record.fetch_count < 0) record.fetch_count = 0;
-  if (!Number.isSafeInteger(record.fetched_bytes) || record.fetched_bytes < 0) record.fetched_bytes = 0;
-  if (
-    !record.fetch_reservations
-    || typeof record.fetch_reservations !== 'object'
-    || Array.isArray(record.fetch_reservations)
-  ) {
-    record.fetch_reservations = {};
+  normalizeBudget(record);
+  if (!isPlainObject(record.passthrough_budgets)) record.passthrough_budgets = {};
+  for (const [host, budget] of Object.entries(record.passthrough_budgets)) {
+    record.passthrough_budgets[host] = normalizeBudget(
+      (isPlainObject(budget) ? budget : {}) as unknown as EgressFetchBudget,
+    );
   }
   return record;
+}
+
+/** The grant-wide budget, or the named passthrough host's own budget. */
+function fetchBudget(record: EgressLedgerRecord, passthroughHost: string | undefined): EgressFetchBudget {
+  if (passthroughHost === undefined) return record;
+  const existing = record.passthrough_budgets[passthroughHost];
+  if (existing) return existing;
+  const created: EgressFetchBudget = { fetch_count: 0, fetched_bytes: 0, fetch_reservations: {} };
+  record.passthrough_budgets[passthroughHost] = created;
+  return created;
 }
 
 async function loadRecord(grantId: string): Promise<EgressLedgerRecord> {
@@ -350,16 +380,22 @@ export async function recordEgressToolCall(grantId: string | undefined, executio
   });
 }
 
+/**
+ * `passthroughHost` names a passthrough host whose policy carries its own limits; its requests and
+ * bytes are then metered in that host's budget. Omitted, the grant-wide budget is used.
+ */
 export async function consumeEgressFetchAttempt(args: {
   grant: EgressGrantClaims;
   maxFetches: number;
+  passthroughHost?: string;
 }): Promise<EgressLedgerRecord> {
   return mutateRecord(args.grant, record => {
-    if (!Number.isSafeInteger(args.maxFetches) || args.maxFetches < 1 || record.fetch_count >= args.maxFetches) {
+    const budget = fetchBudget(record, args.passthroughHost);
+    if (!Number.isSafeInteger(args.maxFetches) || args.maxFetches < 1 || budget.fetch_count >= args.maxFetches) {
       throw new ExternalFetchError('FETCH_BUDGET_EXCEEDED');
     }
     record.request_count += 1;
-    record.fetch_count += 1;
+    budget.fetch_count += 1;
   });
 }
 
@@ -368,13 +404,15 @@ export async function reserveEgressFetchBytes(args: {
   reservationId: string;
   maxBytes: number;
   maxAggregateBytes: number;
+  passthroughHost?: string;
 }): Promise<number> {
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(args.reservationId)) {
     throw new ExternalFetchError('FETCH_FAILED');
   }
   let reservedBytes = 0;
   await mutateRecord(args.grant, record => {
-    const existing = record.fetch_reservations[args.reservationId];
+    const budget = fetchBudget(record, args.passthroughHost);
+    const existing = budget.fetch_reservations[args.reservationId];
     if (existing !== undefined) {
       reservedBytes = existing;
       return;
@@ -387,11 +425,11 @@ export async function reserveEgressFetchBytes(args: {
     ) {
       throw new ExternalFetchError('FETCH_BUDGET_EXCEEDED');
     }
-    const remaining = args.maxAggregateBytes - record.fetched_bytes;
+    const remaining = args.maxAggregateBytes - budget.fetched_bytes;
     if (remaining < 1) throw new ExternalFetchError('FETCH_BUDGET_EXCEEDED');
     reservedBytes = Math.min(args.maxBytes, remaining);
-    record.fetched_bytes += reservedBytes;
-    record.fetch_reservations[args.reservationId] = reservedBytes;
+    budget.fetched_bytes += reservedBytes;
+    budget.fetch_reservations[args.reservationId] = reservedBytes;
   });
   return reservedBytes;
 }
@@ -401,6 +439,7 @@ export async function commitEgressFetchBytes(args: {
   reservationId: string;
   reservedBytes: number;
   responseBytes: number;
+  passthroughHost?: string;
 }): Promise<void> {
   if (
     !/^[A-Za-z0-9_-]{1,128}$/.test(args.reservationId)
@@ -413,13 +452,14 @@ export async function commitEgressFetchBytes(args: {
     throw new ExternalFetchError('FETCH_FAILED');
   }
   await mutateRecord(args.grant, record => {
-    const reservedBytes = record.fetch_reservations[args.reservationId];
+    const budget = fetchBudget(record, args.passthroughHost);
+    const reservedBytes = budget.fetch_reservations[args.reservationId];
     if (reservedBytes === undefined) return;
     if (reservedBytes !== args.reservedBytes) {
       throw new ExternalFetchError('FETCH_FAILED');
     }
-    record.fetched_bytes = Math.max(0, record.fetched_bytes - (reservedBytes - args.responseBytes));
-    delete record.fetch_reservations[args.reservationId];
+    budget.fetched_bytes = Math.max(0, budget.fetched_bytes - (reservedBytes - args.responseBytes));
+    delete budget.fetch_reservations[args.reservationId];
   });
 }
 
@@ -427,6 +467,7 @@ export async function releaseEgressFetchBytes(args: {
   grant: EgressGrantClaims;
   reservationId: string;
   reservedBytes: number;
+  passthroughHost?: string;
 }): Promise<void> {
   await commitEgressFetchBytes({ ...args, responseBytes: 0 });
 }

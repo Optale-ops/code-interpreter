@@ -241,6 +241,50 @@ describe('egress Redis ledger', () => {
     expect(record.fetch_count).toBe(1);
   });
 
+  test('meters a passthrough host with its own limits apart from the grant-wide fetch budget', async () => {
+    const claims = grant({ max_requests: 100 });
+    await createEgressLedger(claims);
+
+    for (let i = 0; i < 20; i += 1) {
+      await consumeEgressFetchAttempt({ grant: claims, maxFetches: 50, passthroughHost: 'console.test' });
+    }
+    // Twenty Console calls leave the internet-fetch budget of 8 untouched.
+    for (let i = 0; i < 8; i += 1) {
+      await consumeEgressFetchAttempt({ grant: claims, maxFetches: 8 });
+    }
+    await expectFetchError(
+      () => consumeEgressFetchAttempt({ grant: claims, maxFetches: 8 }),
+      'FETCH_BUDGET_EXCEEDED',
+    );
+    // An exhausted internet budget does not stop the Console host.
+    await consumeEgressFetchAttempt({ grant: claims, maxFetches: 50, passthroughHost: 'console.test' });
+
+    const reserved = await reserveEgressFetchBytes({
+      grant: claims,
+      reservationId: 'console-reservation',
+      maxBytes: 60,
+      maxAggregateBytes: 100,
+      passthroughHost: 'console.test',
+    });
+    await commitEgressFetchBytes({
+      grant: claims,
+      reservationId: 'console-reservation',
+      reservedBytes: reserved,
+      responseBytes: 25,
+      passthroughHost: 'console.test',
+    });
+
+    const record = await assertEgressGrantActive(claims);
+    expect(record.fetch_count).toBe(8);
+    expect(record.fetched_bytes).toBe(0);
+    expect(record.passthrough_budgets['console.test']).toEqual({
+      fetch_count: 21,
+      fetched_bytes: 25,
+      fetch_reservations: {},
+    });
+    expect(record.request_count).toBe(29);
+  });
+
   test('reserves aggregate bytes, commits actual bytes, and releases failed reservations', async () => {
     const claims = grant({ max_requests: 20 });
     await createEgressLedger(claims);

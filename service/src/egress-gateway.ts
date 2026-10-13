@@ -1853,6 +1853,7 @@ app.post('/https-passthrough', async (req, res) => {
   let reservedBytes = 0;
   let reservationId: string | undefined;
   let opened: OpenHttpsPassthroughResponse | undefined;
+  let passthroughHost: string | undefined;
   try {
     let envelope: HttpsPassthroughEnvelope;
     try {
@@ -1875,10 +1876,17 @@ app.post('/https-passthrough', async (req, res) => {
       beforeRequest: async target => {
         await consumeEgressFetchAttempt({
           grant: activeGrant,
-          maxFetches: target.policy.limits.maxFetchesPerGrant,
+          ...(target.policy.httpsPassthroughLimits
+            ? {
+                maxFetches: target.policy.httpsPassthroughLimits.maxFetchesPerGrant,
+                passthroughHost: target.host,
+              }
+            : { maxFetches: target.policy.limits.maxFetchesPerGrant }),
         });
       },
     });
+    const ownBudget = opened.target.policy.httpsPassthroughLimits;
+    passthroughHost = ownBudget ? opened.target.host : undefined;
     const fields = auditFields(res);
     fields.destinationHost = opened.target.host;
     fields.pathHash = opened.target.pathHash;
@@ -1914,7 +1922,9 @@ app.post('/https-passthrough', async (req, res) => {
         ? declaredBytes
         : opened.target.policy.limits.maxResponseBytes,
             maxAggregateBytes:
+                ownBudget?.maxAggregateBytesPerGrant ??
                 opened.target.policy.limits.maxAggregateBytesPerGrant,
+      passthroughHost,
     });
     if (declaredBytes !== undefined && declaredBytes > reservedBytes) {
       opened.close();
@@ -1935,6 +1945,7 @@ app.post('/https-passthrough', async (req, res) => {
       reservationId,
       reservedBytes,
       responseBytes,
+      passthroughHost,
     });
     reservedBytes = 0;
     fields.responseBytes = responseBytes;
@@ -1954,6 +1965,7 @@ app.post('/https-passthrough', async (req, res) => {
                     reservationId,
                     reservedBytes,
                     responseBytes,
+                    passthroughHost,
                 });
         reservedBytes = 0;
       } catch {
@@ -1986,7 +1998,7 @@ app.post('/https-passthrough', async (req, res) => {
   } finally {
     if (grant && reservationId && reservedBytes > 0) {
       try {
-        await egressFetchRelease({ grant, reservationId, reservedBytes });
+        await egressFetchRelease({ grant, reservationId, reservedBytes, passthroughHost });
       } catch {
                 logger.error(
                     'Failed to release HTTPS passthrough byte reservation',

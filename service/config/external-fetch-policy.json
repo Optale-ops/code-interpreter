@@ -17,7 +17,12 @@
     },
     "console-staging.optale.com": {
       "httpsPassthrough": true,
-      "httpsPassthroughTotalTimeoutMs": 300000
+      "httpsPassthroughTotalTimeoutMs": 300000,
+      "httpsPassthroughLimits": {
+        "headersTimeoutMs": 55000,
+        "maxFetchesPerGrant": 500,
+        "maxAggregateBytesPerGrant": 268435456
+      }
     }
   }
 }
