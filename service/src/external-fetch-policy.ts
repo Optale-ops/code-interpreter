@@ -33,11 +33,26 @@ export interface HttpsPassthroughRoute {
   path: string;
 }
 
+/**
+ * A passthrough host's own budget. When a host carries it, its HTTPS passthrough requests wait
+ * for response headers up to `headersTimeoutMs` and are metered in a per-host ledger budget of
+ * `maxFetchesPerGrant` requests and `maxAggregateBytesPerGrant` response bytes, apart from the
+ * grant's external-fetch budget. Without it, passthrough shares the host's `limits` and the
+ * grant-wide budget. Meant for the Console API the workspace CLI calls: a connector call there
+ * can take tens of seconds and a batch program makes hundreds of them.
+ */
+export interface HttpsPassthroughLimits {
+  headersTimeoutMs: number;
+  maxFetchesPerGrant: number;
+  maxAggregateBytesPerGrant: number;
+}
+
 export interface ExternalFetchHostPolicy {
   contentTypes: Set<string>;
   httpsPassthrough: boolean;
   httpsPassthroughTotalTimeoutMs?: number;
   httpsPassthroughRoutes?: HttpsPassthroughRoute[];
+  httpsPassthroughLimits?: HttpsPassthroughLimits;
     packageTransport: boolean;
   limits: ExternalFetchLimits;
 }
@@ -47,6 +62,7 @@ export interface ExternalFetchPolicySnapshotHost {
     httpsPassthrough?: true;
     httpsPassthroughTotalTimeoutMs?: number;
     httpsPassthroughRoutes?: HttpsPassthroughRoute[];
+    httpsPassthroughLimits?: HttpsPassthroughLimits;
     packageTransport?: true;
     limits: ExternalFetchLimits;
 }
@@ -77,6 +93,17 @@ export interface ResolvedExternalAddress {
 }
 
 export const HARD_HTTPS_PASSTHROUGH_TOTAL_TIMEOUT_MS = 300_000;
+export const HARD_HTTPS_PASSTHROUGH_LIMITS: Readonly<HttpsPassthroughLimits> =
+  Object.freeze({
+    headersTimeoutMs: HARD_HTTPS_PASSTHROUGH_TOTAL_TIMEOUT_MS,
+    maxFetchesPerGrant: 1_000,
+    maxAggregateBytesPerGrant: 536_870_912,
+  });
+const HTTPS_PASSTHROUGH_LIMIT_KEYS: readonly (keyof HttpsPassthroughLimits)[] = [
+  'headersTimeoutMs',
+  'maxFetchesPerGrant',
+  'maxAggregateBytesPerGrant',
+];
 export const HARD_MAX_EXTERNAL_FETCH_HOSTS = 256;
 
 export const HARD_EXTERNAL_FETCH_LIMITS: Readonly<ExternalFetchLimits> =
@@ -260,6 +287,29 @@ function parseLimits(
   return parsed;
 }
 
+/** Every key is required, so a signed snapshot has one spelling and the digest is unambiguous. */
+function parseHttpsPassthroughLimits(
+  value: unknown,
+  host: string,
+  totalTimeoutMs: number,
+): HttpsPassthroughLimits {
+  const label = `External fetch host ${host} httpsPassthroughLimits`;
+  const raw = objectValue(value, label);
+  assertOnlyKeys(raw, HTTPS_PASSTHROUGH_LIMIT_KEYS, label);
+  const parsed = {} as HttpsPassthroughLimits;
+  for (const key of HTTPS_PASSTHROUGH_LIMIT_KEYS) {
+    if (!(key in raw)) throw new Error(`${label}.${key} is required`);
+    parsed[key] = positiveInteger(
+      raw[key],
+      `${label}.${key}`,
+      key === 'headersTimeoutMs'
+        ? Math.min(totalTimeoutMs, HARD_HTTPS_PASSTHROUGH_LIMITS.headersTimeoutMs)
+        : HARD_HTTPS_PASSTHROUGH_LIMITS[key],
+    );
+  }
+  return parsed;
+}
+
 function validatePolicyHostname(host: string): void {
   if (
     host.length < 1 ||
@@ -377,6 +427,7 @@ export function parseExternalFetchPolicy(value: unknown): ExternalFetchPolicy {
         'httpsPassthrough',
         'httpsPassthroughTotalTimeoutMs',
         'httpsPassthroughRoutes',
+        'httpsPassthroughLimits',
                 'packageTransport',
         'limits',
       ],
@@ -426,6 +477,20 @@ export function parseExternalFetchPolicy(value: unknown): ExternalFetchPolicy {
       rawHost.httpsPassthroughRoutes === undefined
         ? undefined
         : parseHttpsPassthroughRoutes(rawHost.httpsPassthroughRoutes, host);
+    if (rawHost.httpsPassthroughLimits !== undefined && !httpsPassthrough) {
+      throw new Error(
+        `External fetch host ${host} cannot set httpsPassthroughLimits without HTTPS passthrough`,
+      );
+    }
+    const httpsPassthroughLimits =
+      rawHost.httpsPassthroughLimits === undefined ||
+      httpsPassthroughTotalTimeoutMs === undefined
+        ? undefined
+        : parseHttpsPassthroughLimits(
+            rawHost.httpsPassthroughLimits,
+            host,
+            httpsPassthroughTotalTimeoutMs,
+          );
         if (
             rawHost.contentTypes !== undefined &&
             !Array.isArray(rawHost.contentTypes)
@@ -465,6 +530,7 @@ export function parseExternalFetchPolicy(value: unknown): ExternalFetchPolicy {
         ? {}
         : { httpsPassthroughTotalTimeoutMs }),
       ...(httpsPassthroughRoutes === undefined ? {} : { httpsPassthroughRoutes }),
+      ...(httpsPassthroughLimits === undefined ? {} : { httpsPassthroughLimits }),
       limits:
         rawHost.limits === undefined
           ? { ...limits }
@@ -661,6 +727,9 @@ export function serializeExternalFetchPolicy(
                           route => ({ ...route }),
                       ),
                   }),
+            ...(entry.httpsPassthroughLimits === undefined
+                ? {}
+                : { httpsPassthroughLimits: { ...entry.httpsPassthroughLimits } }),
             ...(entry.packageTransport
                 ? { packageTransport: true as const }
                 : {}),
@@ -693,6 +762,34 @@ function intersectHttpsPassthroughRoutes(
             throw new ExternalFetchError('HOST_NOT_ALLOWED');
     }
     return requested.map(route => ({ ...route }));
+}
+
+/**
+ * A host's own passthrough budget applies only when the signed policy asks for it AND the
+ * deployment grants it, at the smaller value of each; otherwise passthrough to the host stays on
+ * the host's ordinary limits and the grant-wide budget.
+ */
+function intersectHttpsPassthroughLimits(
+    requested: HttpsPassthroughLimits | undefined,
+    upper: HttpsPassthroughLimits | undefined,
+    totalTimeoutMs: number,
+): HttpsPassthroughLimits | undefined {
+    if (!requested || !upper) return undefined;
+    return {
+        headersTimeoutMs: Math.min(
+            requested.headersTimeoutMs,
+            upper.headersTimeoutMs,
+            totalTimeoutMs,
+        ),
+        maxFetchesPerGrant: Math.min(
+            requested.maxFetchesPerGrant,
+            upper.maxFetchesPerGrant,
+        ),
+        maxAggregateBytesPerGrant: Math.min(
+            requested.maxAggregateBytesPerGrant,
+            upper.maxAggregateBytesPerGrant,
+        ),
+    };
 }
 
 export function intersectExternalFetchPolicies(
@@ -731,20 +828,30 @@ export function intersectExternalFetchPolicies(
                   upper.httpsPassthroughRoutes,
               )
             : undefined;
+        const httpsPassthroughTotalTimeoutMs = requested.httpsPassthrough
+            ? Math.min(
+                  requested.httpsPassthroughTotalTimeoutMs ??
+                      HARD_HTTPS_PASSTHROUGH_TOTAL_TIMEOUT_MS,
+                  upper.httpsPassthroughTotalTimeoutMs ??
+                      HARD_HTTPS_PASSTHROUGH_TOTAL_TIMEOUT_MS,
+              )
+            : undefined;
+        const httpsPassthroughLimits =
+            httpsPassthroughTotalTimeoutMs === undefined
+                ? undefined
+                : intersectHttpsPassthroughLimits(
+                      requested.httpsPassthroughLimits,
+                      upper.httpsPassthroughLimits,
+                      httpsPassthroughTotalTimeoutMs,
+                  );
         hosts.set(host, {
             contentTypes: new Set(requested.contentTypes),
             httpsPassthrough: requested.httpsPassthrough,
-            ...(requested.httpsPassthrough
-                ? {
-                      httpsPassthroughTotalTimeoutMs: Math.min(
-                          requested.httpsPassthroughTotalTimeoutMs ??
-                              HARD_HTTPS_PASSTHROUGH_TOTAL_TIMEOUT_MS,
-                          upper.httpsPassthroughTotalTimeoutMs ??
-                              HARD_HTTPS_PASSTHROUGH_TOTAL_TIMEOUT_MS,
-                      ),
-                  }
-                : {}),
+            ...(httpsPassthroughTotalTimeoutMs === undefined
+                ? {}
+                : { httpsPassthroughTotalTimeoutMs }),
             ...(httpsPassthroughRoutes ? { httpsPassthroughRoutes } : {}),
+            ...(httpsPassthroughLimits ? { httpsPassthroughLimits } : {}),
             packageTransport: requested.packageTransport,
             limits: hostLimits,
         });

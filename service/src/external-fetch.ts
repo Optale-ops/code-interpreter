@@ -396,7 +396,8 @@ async function requestPinnedPassthrough(
       headersTimer = setTimeout(() => {
         timedOut = true;
         request.destroy(new Error('HTTPS passthrough headers timeout'));
-      }, target.policy.limits.headersTimeoutMs);
+      }, target.policy.httpsPassthroughLimits?.headersTimeoutMs ??
+        target.policy.limits.headersTimeoutMs);
     });
   });
   request.once('response', response => {

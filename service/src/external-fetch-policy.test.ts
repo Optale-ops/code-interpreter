@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { describe, expect, test } from 'bun:test';
 import {
   HARD_EXTERNAL_FETCH_LIMITS,
+  HARD_HTTPS_PASSTHROUGH_LIMITS,
   HARD_MAX_EXTERNAL_FETCH_HOSTS,
   effectiveExternalFetchPolicy,
   externalFetchPolicyDigest,
@@ -650,5 +651,80 @@ describe('compatibility with the policies the Console signs today', () => {
     expect(externalFetchPolicyDigest(parseExternalFetchPolicy(snapshot))).toBe(consoleDigest(snapshot));
     const effective = effectiveExternalFetchPolicy(snapshot as never, consoleDigest(snapshot), PRODUCTION_SHAPED_DEPLOYMENT);
     expect([...effective.hosts.keys()].sort()).toEqual([CONSOLE_HOST, 'files.pythonhosted.org', 'pypi.org']);
+  });
+});
+
+const CONSOLE_BUDGET = {
+  headersTimeoutMs: 120_000,
+  maxFetchesPerGrant: 500,
+  maxAggregateBytesPerGrant: 268_435_456,
+};
+
+describe('Console API passthrough budget (httpsPassthroughLimits)', () => {
+  const deployment = parseExternalFetchPolicy({
+    version: 1,
+    limits: { ...PRODUCTION_SHAPED_DEPLOYMENT.limits },
+    hosts: {
+      [CONSOLE_HOST]: {
+        httpsPassthrough: true,
+        httpsPassthroughTotalTimeoutMs: 300_000,
+        httpsPassthroughLimits: CONSOLE_BUDGET,
+        limits: { maxFetchesPerGrant: 8, maxResponseBytes: 2_097_152 },
+      },
+      [FROZEN_HOST]: { contentTypes: ['application/pdf'] },
+    },
+  });
+
+  test('applies only where the signature asks for it and the deployment grants it, at the smaller values', () => {
+    const signed = {
+      version: 1,
+      limits: { ...PRODUCTION_SHAPED_DEPLOYMENT.limits },
+      hosts: {
+        [CONSOLE_HOST]: {
+          httpsPassthrough: true,
+          httpsPassthroughTotalTimeoutMs: 60_000,
+          httpsPassthroughLimits: { ...CONSOLE_BUDGET, headersTimeoutMs: 60_000, maxFetchesPerGrant: 1_000 },
+          limits: PASSTHROUGH_LIMITS,
+        },
+        [FROZEN_HOST]: { contentTypes: ['application/pdf'], limits: { ...PRODUCTION_SHAPED_DEPLOYMENT.limits } },
+      },
+    };
+    const effective = effectiveExternalFetchPolicy(signed as never, consoleDigest(signed), deployment);
+    expect(effective.hosts.get(CONSOLE_HOST)?.httpsPassthroughLimits).toEqual({
+      ...CONSOLE_BUDGET,
+      headersTimeoutMs: 60_000,
+    });
+    // The internet host keeps the frozen limits.
+    expect(effective.hosts.get(FROZEN_HOST)?.httpsPassthroughLimits).toBeUndefined();
+    expect(effective.hosts.get(FROZEN_HOST)?.limits.maxFetchesPerGrant).toBe(8);
+    expect(effective.hosts.get(FROZEN_HOST)?.limits.headersTimeoutMs).toBe(5_000);
+
+    // A snapshot from a Console that does not sign the budget still verifies and keeps the old limits.
+    const legacy = {
+      version: 1,
+      limits: { ...PRODUCTION_SHAPED_DEPLOYMENT.limits },
+      hosts: { [CONSOLE_HOST]: { httpsPassthrough: true, httpsPassthroughTotalTimeoutMs: 300_000, limits: PASSTHROUGH_LIMITS } },
+    };
+    const legacyEffective = effectiveExternalFetchPolicy(legacy as never, consoleDigest(legacy), deployment);
+    expect(legacyEffective.hosts.get(CONSOLE_HOST)?.httpsPassthroughLimits).toBeUndefined();
+
+    // A deployment that does not grant the budget caps a signature that asks for it.
+    const signedBudget = { ...signed, hosts: { [CONSOLE_HOST]: signed.hosts[CONSOLE_HOST] } };
+    expect(
+      effectiveExternalFetchPolicy(signedBudget as never, consoleDigest(signedBudget), PRODUCTION_SHAPED_DEPLOYMENT)
+        .hosts.get(CONSOLE_HOST)?.httpsPassthroughLimits,
+    ).toBeUndefined();
+  });
+
+  test.each([
+    ['without HTTPS passthrough', { contentTypes: ['application/json'], httpsPassthroughLimits: CONSOLE_BUDGET }],
+    ['a missing key', { httpsPassthrough: true, httpsPassthroughLimits: { headersTimeoutMs: 1_000, maxFetchesPerGrant: 10 } }],
+    ['an unknown key', { httpsPassthrough: true, httpsPassthroughLimits: { ...CONSOLE_BUDGET, maxRedirects: 1 } }],
+    ['a headers timeout beyond the passthrough total', { httpsPassthrough: true, httpsPassthroughTotalTimeoutMs: 30_000, httpsPassthroughLimits: { ...CONSOLE_BUDGET, headersTimeoutMs: 30_001 } }],
+    ['a fetch count above the ceiling', { httpsPassthrough: true, httpsPassthroughLimits: { ...CONSOLE_BUDGET, maxFetchesPerGrant: HARD_HTTPS_PASSTHROUGH_LIMITS.maxFetchesPerGrant + 1 } }],
+  ])('rejects a budget %s', (_label, host) => {
+    expect(() =>
+      parseExternalFetchPolicy({ version: 1, limits: { ...HARD_EXTERNAL_FETCH_LIMITS }, hosts: { [CONSOLE_HOST]: host } }),
+    ).toThrow();
   });
 });

@@ -429,6 +429,13 @@ egressGateway:
         console-staging.optale.com:
           httpsPassthrough: true
           httpsPassthroughTotalTimeoutMs: 300000
+          # The Console API the workspace CLI calls (OPT-1586): its own header wait and
+          # per-run budget, metered apart from internet fetches. Stays under the sandbox
+          # proxy's 60 s idle cap so a slow call ends in a named FETCH_TIMEOUT.
+          httpsPassthroughLimits:
+            headersTimeoutMs: 55000
+            maxFetchesPerGrant: 500
+            maxAggregateBytesPerGrant: 268435456
       # W730 §3 PENDING rows — do NOT widen this policy by inference. Each row
       # needs PRIMARY's rev-B journey evidence before it becomes a config entry:
       #   1. image attachment MIME on this host      — PENDING
