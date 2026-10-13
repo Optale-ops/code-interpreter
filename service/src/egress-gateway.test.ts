@@ -2259,11 +2259,17 @@ describe('egress gateway routes', () => {
                     envelope,
                 );
                 expect(result.status).toBe(200);
-                expect(result.trailers['x-codeapi-egress-outcome']).toBe('OK');
+                expect(result.body).toBe('{"ok":true}');
             }
             const ledger = await assertEgressGrantActive(grant);
             expect(ledger.fetch_count).toBe(0);
-            expect(ledger.passthrough_budgets[host]?.fetch_count).toBe(12);
+            // Every call settled its byte reservation (the success path commits it) in the host budget.
+            expect(ledger.passthrough_budgets[host]).toEqual({
+                fetch_count: 12,
+                fetched_bytes: 12 * '{"ok":true}'.length,
+                fetch_reservations: {},
+            });
+            expect(ledger.fetched_bytes).toBe(0);
             expect(ledger.request_count).toBe(12);
         } finally {
             env.EGRESS_LEDGER_REQUIRED = false;
