@@ -120,6 +120,12 @@ export class FakeRedis {
   /** replay-state registers Lua helpers at import; the harness never runs them. */
   defineCommand(): void {}
 
+  /** Fair-share admit/release: route tests run on an idle engine, so every run
+   *  is admitted under its share (release returns the removed count). */
+  async eval(): Promise<number[]> {
+    return [1, 1, 8, 1, 0];
+  }
+
   /** Enough of the rate-limit-redis protocol for an always-allowing limiter. */
   async call(command: string, ...args: (string | number | Buffer)[]): Promise<unknown> {
     switch (command.toUpperCase()) {

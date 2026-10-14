@@ -67,7 +67,9 @@ const otherQueue = new Queue<t.JobData, t.JobResult, Jobs.execute>(queueNames.ot
 const pyQueueEvents = new QueueEvents(queueNames.python, { connection });
 const otherQueueEvents = new QueueEvents(queueNames.other, { connection });
 
-const queueMetricStates = ['waiting', 'active', 'delayed'] as const;
+/* Fair-share jobs carry a BullMQ priority, so queued runs sit in `prioritized`
+ * rather than `waiting`. */
+const queueMetricStates = ['waiting', 'prioritized', 'active', 'delayed'] as const;
 const queueMetricSources = [
   { name: queueNames.python, queue: pyQueue },
   { name: queueNames.other, queue: otherQueue },

@@ -8,7 +8,7 @@ import { pipeline } from 'stream/promises';
 import type * as t from '../types';
 import { checkServiceStartUp, checkServiceShutDown } from '../lifecycle';
 import { sessionAuth } from '../middleware/auth';
-import { executionLimiter, uploadLimiter, downloadLimiter, fetchLimiter } from '../middleware/limits';
+import { uploadLimiter, downloadLimiter, fetchLimiter } from '../middleware/limits';
 import { internalServiceHeaders } from '../internal-service-auth';
 import { resolveSessionKey, resolveUploadSessionKey, resolveOutputBucketSessionKey, SessionKeyResolutionError, parseUploadSessionKeyInput, type SessionKeyInput } from '../session-key';
 import { pyQueue, otherQueue, pyQueueEvents, otherQueueEvents, queueNames, connection } from '../queue';
@@ -36,6 +36,7 @@ import { FileRefAuthorizationError, authorizeRequestedFiles } from './file-autho
 import { createUploadSessionRegistrar } from './upload-session';
 import { createForwardQueue, forwardUploadToFileServer } from './upload-forward';
 import { prepareSandboxJobSecurity } from '../sandbox-egress';
+import { admitRequestRun } from '../fair-share';
 import logger from '../logger';
 
 const { INSTANCE_ID } = env;
@@ -169,7 +170,7 @@ function sendSessionKeyResolutionError(
 
 const router = Router();
 
-router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) => {
+router.post('/exec', async (req: t.AuthenticatedRequest, res) => {
   const principal = getPrincipalOrReject(req, res);
   if (!principal) return;
   const apiKeyId = getCredentialId(req);
@@ -255,6 +256,8 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
    * sandbox invocation." */
   const session_id = nanoid();
   const execution_id = nanoid();
+  const admission = await admitRequestRun(req, res, { slotId: session_id });
+  if (!admission) return;
   await connection.set(`session:${session_id}`, sessionKey, 'EX', env.SESSION_CACHE_TTL);
 
   try {
@@ -333,6 +336,7 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
           count: 1,
         },
         attempts: 1,
+        priority: admission.priority,
         jobId: session_id,
       });
     }, 'PRODUCER');
@@ -365,6 +369,10 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
       return res.status(publicFailure.status).json(publicFailure.body);
     }
     return res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    /* The run is over (or never started): free its slot even if the client
+     * already left and no response event fires. */
+    void admission.release();
   }
 });
 

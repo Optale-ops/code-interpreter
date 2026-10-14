@@ -5,7 +5,7 @@ import type { Response } from 'express';
 import type { Queue, QueueEvents } from 'bullmq';
 import type * as t from '../types';
 import { checkServiceStartUp, checkServiceShutDown } from '../lifecycle';
-import { executionLimiter } from '../middleware/limits';
+import { admitRequestRun, type FairShareAdmission } from '../fair-share';
 import { pyQueue, pyQueueEvents, otherQueue, otherQueueEvents, connection } from '../queue';
 import { createProgrammaticPayload, extractPendingFromStdout } from '../preamble';
 import { findBashToolNameCollision } from '../preamble-bash';
@@ -398,6 +398,7 @@ async function runReplayIteration(
   state: ExecutionState,
   apiKeyId: string,
   userId: string | undefined,
+  priority: number,
 ): Promise<t.ExecuteResult> {
   const history = await loadToolHistory(state.execution_id);
   const rawPayload = buildReplayPayload(req, state, history);
@@ -450,6 +451,7 @@ async function runReplayIteration(
     removeOnComplete: { age: 60, count: 1 },
     removeOnFail: { age: 180, count: 1 },
     attempts: 1,
+    priority,
   });
   jobsSubmitted.inc({ language });
 
@@ -571,6 +573,8 @@ async function handleReplayInitial(
 
   const session_id = nanoid();
   const execution_id = nanoid();
+  const admission = await admitRequestRun(req, res, { slotId: session_id });
+  if (!admission) return;
   const authContext = req.codeApiAuthContext;
   const identity = getExecutionIdentity(req, userId);
   const isPyPlot = language === 'python' && (
@@ -648,7 +652,7 @@ async function handleReplayInitial(
       timeout,
     });
 
-  await runAndRespond(req, res, state, apiKeyId, userId);
+  await runAndRespond(req, res, state, apiKeyId, userId, admission);
 }
 
 async function handleReplayContinuation(
@@ -850,7 +854,11 @@ async function handleReplayContinuation(
       });
     }
 
-    await runAndRespond(req, res, state, apiKeyId, userId);
+    /* A continuation belongs to a run already admitted: it is counted while
+     * its sandbox job runs but never refused mid-flow. */
+    const admission = await admitRequestRun(req, res, { slotId: nanoid(), force: true });
+    if (!admission) return;
+    await runAndRespond(req, res, state, apiKeyId, userId, admission);
   } finally {
     await releaseExecutionLock(decoded.execution_id, lockToken);
   }
@@ -862,6 +870,7 @@ async function runAndRespond(
   state: ExecutionState,
   apiKeyId: string,
   userId: string | undefined,
+  admission: FairShareAdmission,
 ): Promise<void> {
   /** Read disconnect state through `isDisconnected()` rather than a
    * direct boolean. The `req.on('close', ...)` handler flips the flag
@@ -877,7 +886,7 @@ async function runAndRespond(
 
   let result: t.ExecuteResult;
   try {
-    result = await runReplayIteration(req, state, apiKeyId, userId);
+    result = await runReplayIteration(req, state, apiKeyId, userId, admission.priority);
   } catch (err) {
     logger.error('Replay iteration failed', { execution_id: state.execution_id, err });
     await cleanupExecution(state.execution_id, 'replay');
@@ -890,6 +899,9 @@ async function runAndRespond(
       });
     }
     return;
+  } finally {
+    /* The sandbox job is over: free its slot whatever the client did. */
+    void admission.release();
   }
 
   if (isDisconnected()) {
@@ -1054,7 +1066,7 @@ async function runAndRespond(
 // Request entrypoint
 // ---------------------------------------------------------------------------
 
-router.post('/exec/programmatic', executionLimiter, async (req: t.AuthenticatedRequest, res) => {
+router.post('/exec/programmatic', async (req: t.AuthenticatedRequest, res) => {
   const principal = getPrincipalOrReject(req, res);
   if (!principal) return;
   const apiKeyId = getCredentialId(req);
@@ -1453,6 +1465,17 @@ async function handleBlocking(
       payload: rawPayload,
     });
 
+    /* The blocking job outlives this response (it waits on tool calls across
+     * continuations), so its slot is released when the job settles or the
+     * client goes away, not when this response closes. */
+    const admission = await admitRequestRun(req, res, { slotId: session_id, releaseOnClose: false });
+    if (!admission) {
+      await cleanupExecution(execution_id, 'blocking');
+      return;
+    }
+    res.once('close', () => {
+      if (!res.writableFinished) void admission.release();
+    });
     const job = await pyQueue.add(Jobs.execute, {
       code,
       ...(identity.agentRun ? {} : { userId }),
@@ -1474,6 +1497,10 @@ async function handleBlocking(
       removeOnFail: { age: 180, count: 1 },
       attempts: 1,
       jobId: session_id,
+      priority: admission.priority,
+    }).catch(async (error: unknown) => {
+      await admission.release();
+      throw error;
     });
     jobsSubmitted.inc({ language: 'python' });
 
@@ -1500,7 +1527,8 @@ async function handleBlocking(
       .catch(async (error) => {
         if (clientDisconnected) return;
         await setExecutionError(execution_id, error);
-      });
+      })
+      .finally(() => admission.release());
 
     const state = await waitForExecutionState(execution_id, Math.min(timeout, MAX_POLL_TIME));
 
