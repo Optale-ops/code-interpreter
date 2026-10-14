@@ -7,6 +7,7 @@ import RedisMock from 'ioredis-mock';
 import { applyPrincipal } from './auth/principal';
 import type { AuthenticatedRequest } from './types';
 import { env } from './config';
+import { queueNamesForExecutionProfile } from './execution-profile';
 import {
   DEMAND_DECAY_MS,
   FAIR_SHARE_KEY_PREFIX,
@@ -15,35 +16,49 @@ import {
   UNDER_SHARE_PRIORITY,
   admitRequestRun,
   admitRun,
+  assertWorkerConcurrencyAgrees,
+  dropInstanceLeftovers,
+  publishWorkerConcurrency,
   releaseRun,
   setFairShareRedisForTests,
   type FairShareDecision,
+  type FairShareQueue,
 } from './fair-share';
 
 const CAPACITY = 4;
 const T0 = 1_800_000_000_000;
 
-let redis: InstanceType<typeof RedisMock>;
+/* One client for the file; every test starts from an empty keyspace. */
+const redis = new RedisMock();
 let slotCounter = 0;
 
-const savedCapacity = env.CODE_RUN_CAPACITY;
+const saved = {
+  python: env.PYTHON_CONCURRENCY,
+  other: env.OTHER_CONCURRENCY,
+  replicas: env.CODE_WORKER_REPLICAS,
+  instance: env.INSTANCE_ID,
+};
 
 beforeEach(async () => {
-  /* ioredis-mock shares one keyspace across instances — flush per test. */
-  redis = new RedisMock();
   await redis.flushall();
   setFairShareRedisForTests(redis);
-  env.CODE_RUN_CAPACITY = CAPACITY;
+  env.PYTHON_CONCURRENCY = CAPACITY;
+  env.OTHER_CONCURRENCY = 8;
+  env.CODE_WORKER_REPLICAS = 1;
+  env.INSTANCE_ID = 'api-1';
   slotCounter = 0;
 });
 
 afterEach(() => {
   setFairShareRedisForTests();
-  env.CODE_RUN_CAPACITY = savedCapacity;
+  env.PYTHON_CONCURRENCY = saved.python;
+  env.OTHER_CONCURRENCY = saved.other;
+  env.CODE_WORKER_REPLICAS = saved.replicas;
+  env.INSTANCE_ID = saved.instance;
 });
 
 function admit(tenantId: string, weight: number, now: number, slotId = `slot-${++slotCounter}`): Promise<FairShareDecision> {
-  return admitRun({ tenantId, weight, now, slotId, capacity: CAPACITY });
+  return admitRun({ queue: 'python', tenantId, weight, now, slotId });
 }
 
 async function admitMany(tenantId: string, weight: number, now: number, count: number): Promise<FairShareDecision[]> {
@@ -52,8 +67,13 @@ async function admitMany(tenantId: string, weight: number, now: number, count: n
   return decisions;
 }
 
-function inFlight(tenantId: string): Promise<number> {
-  return redis.zcard(`${FAIR_SHARE_KEY_PREFIX}inflight:${tenantId}`);
+function inflightKey(tenantId: string, queue: FairShareQueue = 'python'): string {
+  const queueName = queueNamesForExecutionProfile(env.EXECUTION_PROFILE, env.EXECUTION_PROFILE_SOURCE)[queue];
+  return `${FAIR_SHARE_KEY_PREFIX}${queueName}:inflight:${tenantId}`;
+}
+
+function inFlight(tenantId: string, queue: FairShareQueue = 'python'): Promise<number> {
+  return redis.zcard(inflightKey(tenantId, queue));
 }
 
 describe('fair-share admission', () => {
@@ -75,12 +95,14 @@ describe('fair-share admission', () => {
 
     const a = await admitMany('labA', 3, T0 + 1_000, 4);
     expect(a.slice(0, 3).every(d => d.admitted)).toBe(true);
-    const refusedA = a[3];
-    expect(refusedA).toEqual({
+    /* No run has finished yet, so no duration is known: retry_at is the
+     * ceiling, when labA's oldest run must end. */
+    expect(a[3]).toEqual({
       admitted: false,
       share: 3,
       inFlight: 3,
       retryAtMs: T0 + 1_000 + RUN_WALL_CAP_MS,
+      estimated: false,
     });
 
     const b2 = await admit('labB', 1, T0 + 2_000);
@@ -88,9 +110,47 @@ describe('fair-share admission', () => {
       admitted: false,
       share: 1,
       inFlight: 1,
-      /* Upper bound: when labB's oldest run must end. */
       retryAtMs: T0 + RUN_WALL_CAP_MS,
+      estimated: false,
     });
+  });
+
+  test('retry_at is the oldest run\'s admission plus the p90 of recent run durations, within [now + 1 s, deadline]', async () => {
+    /* Ten earlier runs on the queue took 1..10 s (p90 = 9 s). */
+    for (let i = 1; i <= 10; i++) {
+      await admit('labC', 1, T0, `c-${i}`);
+      await releaseRun('python', 'labC', `c-${i}`, T0 + i * 1_000);
+    }
+    /* Long after labC went quiet, labB and labA fill the capacity of 4 (share 2 each). */
+    const start = T0 + 10_000 + 10 * DEMAND_DECAY_MS;
+    await admit('labB', 1, start);
+    expect((await admitMany('labA', 1, start, 3)).every(d => d.admitted)).toBe(true);
+
+    const refused = await admit('labA', 1, start + 2_000);
+    expect(refused).toMatchObject({ admitted: false, estimated: true, retryAtMs: start + 9_000 });
+
+    /* The oldest run has outlived the estimate: come back in a second. */
+    const late = start + 30_000;
+    expect(await admit('labA', 1, late)).toMatchObject({ admitted: false, estimated: true, retryAtMs: late + 1_000 });
+
+    /* Durations longer than what is left of the run never pass its deadline. */
+    for (let i = 0; i < 100; i++) {
+      await admit('labC', 1, start, `long-${i}`);
+      await releaseRun('python', 'labC', `long-${i}`, start + RUN_WALL_CAP_MS + 5_000 - 1);
+    }
+    expect(await admit('labA', 1, start + 3_000)).toMatchObject({ admitted: false, retryAtMs: start + RUN_WALL_CAP_MS });
+  });
+
+  test('each queue is shared on its own capacity', async () => {
+    await admit('labB', 1, T0);
+    await admitMany('labA', 1, T0, 3);
+    expect((await admit('labA', 1, T0)).admitted).toBe(false);
+
+    /* The other queue drains on its own workers: labA's python backlog does not count there. */
+    const other = await admitRun({ queue: 'other', tenantId: 'labA', weight: 1, now: T0, slotId: 'o-1' });
+    expect(other.admitted && other.priority).toBe(UNDER_SHARE_PRIORITY);
+    expect(await inFlight('labA', 'other')).toBe(1);
+    expect(await inFlight('labA')).toBe(3);
   });
 
   test('a tenant arriving at a full engine is admitted at better priority while the busy tenant is refused', async () => {
@@ -114,8 +174,8 @@ describe('fair-share admission', () => {
     await admit('labB', 1, T0, 'b-1');
     await admit('labB', 1, T0, 'b-2');
     const finishedAt = T0 + 60_000;
-    await releaseRun('labB', 'b-1', finishedAt);
-    await releaseRun('labB', 'b-2', finishedAt);
+    await releaseRun('python', 'labB', 'b-1', finishedAt);
+    await releaseRun('python', 'labB', 'b-2', finishedAt);
     expect(await inFlight('labB')).toBe(0);
 
     /* labA (same weight) floods right after: it gets its half, labB's half stays free. */
@@ -126,8 +186,8 @@ describe('fair-share admission', () => {
     /* labB returns within the window and finds its slice. */
     const b = await admitMany('labB', 1, soon + 5_000, 2);
     expect(b.every(d => d.admitted && d.priority === UNDER_SHARE_PRIORITY)).toBe(true);
-    await releaseRun('labB', 'slot-4', soon + 6_000);
-    await releaseRun('labB', 'slot-5', soon + 6_000);
+    await releaseRun('python', 'labB', 'slot-4', soon + 6_000);
+    await releaseRun('python', 'labB', 'slot-5', soon + 6_000);
 
     /* Long after labB went quiet its prediction has decayed: labA is alone again. */
     const later = soon + 6_000 + 5 * DEMAND_DECAY_MS;
@@ -155,9 +215,35 @@ describe('fair-share admission', () => {
     await admitMany('labA', 1, T0, 3);
     expect((await admit('labA', 1, T0)).admitted).toBe(false);
 
-    const continuation = await admitRun({ tenantId: 'labA', weight: 1, now: T0, slotId: 'cont', capacity: CAPACITY, force: true });
+    const continuation = await admitRun({ queue: 'python', tenantId: 'labA', weight: 1, now: T0, slotId: 'cont', force: true });
     expect(continuation.admitted).toBe(true);
     expect(await inFlight('labA')).toBe(4);
+  });
+});
+
+describe('fair-share startup', () => {
+  test('an API instance drops only its own leftover slots', async () => {
+    const now = Date.now();
+    await admitRun({ queue: 'python', tenantId: 'labA', weight: 1, now, slotId: 'mine-py' });
+    await admitRun({ queue: 'other', tenantId: 'labA', weight: 1, now, slotId: 'mine-other' });
+    env.INSTANCE_ID = 'api-2';
+    await admitRun({ queue: 'python', tenantId: 'labA', weight: 1, now, slotId: 'theirs' });
+
+    env.INSTANCE_ID = 'api-1';
+    expect(await dropInstanceLeftovers()).toBe(2);
+    expect(await redis.zrange(inflightKey('labA'), 0, -1)).toEqual(['api-2:theirs']);
+    expect(await inFlight('labA', 'other')).toBe(0);
+  });
+
+  test('the API refuses to start when the workers drain at another concurrency', async () => {
+    /* First boot: no worker has published yet. */
+    await expect(assertWorkerConcurrencyAgrees()).resolves.toBeUndefined();
+
+    await publishWorkerConcurrency();
+    await expect(assertWorkerConcurrencyAgrees()).resolves.toBeUndefined();
+
+    env.PYTHON_CONCURRENCY = CAPACITY + 1;
+    await expect(assertWorkerConcurrencyAgrees()).rejects.toThrow(/PYTHON_CONCURRENCY and OTHER_CONCURRENCY/);
   });
 });
 
@@ -192,7 +278,7 @@ describe('fair-share over HTTP', () => {
       next();
     });
     app.post('/v1/exec', async (req, res) => {
-      const admission = await admitRequestRun(req as AuthenticatedRequest, res, { slotId: String(req.header('x-slot')) });
+      const admission = await admitRequestRun(req as AuthenticatedRequest, res, { queue: 'python', slotId: String(req.header('x-slot')) });
       if (!admission) return;
       /* Holds the run until the test ends it. The release is memoized, so this
        * awaits the one admitRequestRun started. */
@@ -226,8 +312,8 @@ describe('fair-share over HTTP', () => {
   test('a refused run gets 429 rate_limited / tenant_share_exceeded with Retry-After and retry_at', async () => {
     const url = await startApp();
     /* labB (weight 3) is busy; labA (weight 1) already holds its 1 of the 4 slots. */
-    for (let i = 0; i < 3; i++) await admitRun({ tenantId: 'labB', weight: 3, slotId: `b-${i}`, capacity: CAPACITY });
-    expect((await admitRun({ tenantId: 'labA', weight: 1, slotId: 'a-0', capacity: CAPACITY })).admitted).toBe(true);
+    for (let i = 0; i < 3; i++) await admitRun({ queue: 'python', tenantId: 'labB', weight: 3, slotId: `b-${i}` });
+    expect((await admitRun({ queue: 'python', tenantId: 'labA', weight: 1, slotId: 'a-0' })).admitted).toBe(true);
 
     const refused = await fetch(`${url}/v1/exec`, { method: 'POST', headers: { 'x-slot': 'a-1' } });
     const body = await refused.json() as Record<string, unknown>;
@@ -237,7 +323,7 @@ describe('fair-share over HTTP', () => {
     expect(body).toMatchObject({ error: 'rate_limited', reason: 'tenant_share_exceeded', share: 1, in_flight: 1 });
     expect(Date.parse(String(body.retry_at))).toBeGreaterThan(Date.now());
     expect(body.retry_after_seconds).toBe(Number(refused.headers.get('retry-after')));
-    expect(String(body.message)).toMatch(/^The code engine is full and your company is using its share \(1 slot; 1 of its runs are running or queued\)\. A slot frees by \d\d:\d\d:\d\d UTC \(in about \d+ s\)\.$/);
+    expect(String(body.message)).toMatch(/^The code engine is full and your company is using its share \(1 slot; 1 of its runs are running or queued\)\. A slot frees by \d\d:\d\d:\d\d UTC at the latest \(in about \d+ s\)\.$/);
     expect(await inFlight('labA')).toBe(1);
   });
 

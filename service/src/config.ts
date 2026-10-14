@@ -297,9 +297,9 @@ export const env = {
   MAX_UPLOAD_WAIT: Number(process.env.MAX_UPLOAD_WAIT) || 500,
   MAX_FILE_SIZE: defaultMaxFileSize,
   JOB_TIMEOUT: defaultJobTimeoutMs, // 5 minutes (increased for complex matplotlib rendering)
-  /** Code runs the shared sandbox runs at once: the capacity fair share divides
-   * between companies under contention. Same variable the sandbox runner reads. */
-  CODE_RUN_CAPACITY: Math.max(1, Math.floor(Number(process.env.SANDBOX_MAX_CONCURRENT_JOBS) || 8)),
+  /** Service workers draining the queues. Fair share divides each queue's
+   * capacity, its worker concurrency times this count, between companies. */
+  CODE_WORKER_REPLICAS: Math.max(1, Math.floor(Number(process.env.CODE_WORKER_REPLICAS) || 1)),
   // Upload Rate Limits
   UPLOAD_LIMIT_WINDOW: Number(process.env.UPLOAD_LIMIT_WINDOW) || 5 * 60 * 1000, // 5 minutes
   UPLOAD_MAX_REQUESTS: Number(process.env.UPLOAD_MAX_REQUESTS) || 30, // 30 uploads per 5 minutes

@@ -41,6 +41,11 @@ services:
             - REDIS_HOST=redis
             - REDIS_PORT=6379
             - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+            # Fair share divides what service-worker drains: keep these equal to its values.
+            - PYTHON_CONCURRENCY=${PYTHON_CONCURRENCY:-1}
+            - OTHER_CONCURRENCY=${OTHER_CONCURRENCY:-8}
+            # Stable across restarts so a restarted API drops the slots it left behind.
+            - INSTANCE_ID=api
         depends_on:
             - redis
             - tool_call_server

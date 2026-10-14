@@ -36,7 +36,7 @@ import { FileRefAuthorizationError, authorizeRequestedFiles } from './file-autho
 import { createUploadSessionRegistrar } from './upload-session';
 import { createForwardQueue, forwardUploadToFileServer } from './upload-forward';
 import { prepareSandboxJobSecurity } from '../sandbox-egress';
-import { admitRequestRun } from '../fair-share';
+import { admitRequestRun, type FairShareAdmission } from '../fair-share';
 import logger from '../logger';
 
 const { INSTANCE_ID } = env;
@@ -256,11 +256,15 @@ router.post('/exec', async (req: t.AuthenticatedRequest, res) => {
    * sandbox invocation." */
   const session_id = nanoid();
   const execution_id = nanoid();
-  const admission = await admitRequestRun(req, res, { slotId: session_id });
-  if (!admission) return;
-  await connection.set(`session:${session_id}`, sessionKey, 'EX', env.SESSION_CACHE_TTL);
+  const pool = language === Languages.py ? 'python' : 'other';
+  let admission: FairShareAdmission | null = null;
 
   try {
+    admission = await admitRequestRun(req, res, { queue: pool, slotId: session_id });
+    if (!admission) return;
+    const { priority } = admission;
+    await connection.set(`session:${session_id}`, sessionKey, 'EX', env.SESSION_CACHE_TTL);
+
     if (!isSyntheticRequest) {
       logger.info('Request received', agentRun
         ? {
@@ -297,9 +301,9 @@ router.post('/exec', async (req: t.AuthenticatedRequest, res) => {
       payload: rawPayload,
     });
 
-    const queue = language === Languages.py ? pyQueue : otherQueue;
-    const queueEvents = language === Languages.py ? pyQueueEvents : otherQueueEvents;
-    const queueName = language === Languages.py ? queueNames.python : queueNames.other;
+    const queue = pool === 'python' ? pyQueue : otherQueue;
+    const queueEvents = pool === 'python' ? pyQueueEvents : otherQueueEvents;
+    const queueName = queueNames[pool];
 
     const job = await withSpan('codeapi.job.enqueue', {
       'messaging.system': 'bullmq',
@@ -336,7 +340,7 @@ router.post('/exec', async (req: t.AuthenticatedRequest, res) => {
           count: 1,
         },
         attempts: 1,
-        priority: admission.priority,
+        priority,
         jobId: session_id,
       });
     }, 'PRODUCER');
@@ -372,7 +376,7 @@ router.post('/exec', async (req: t.AuthenticatedRequest, res) => {
   } finally {
     /* The run is over (or never started): free its slot even if the client
      * already left and no response event fires. */
-    void admission.release();
+    void admission?.release();
   }
 });
 

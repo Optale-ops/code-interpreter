@@ -12,6 +12,7 @@ import {
 import logger from './logger';
 import { shutdownTelemetry } from './telemetry';
 import { configureExecutionProfileMetrics } from './metrics';
+import { assertWorkerConcurrencyAgrees, dropInstanceLeftovers, publishWorkerConcurrency } from './fair-share';
 
 const { INSTANCE_ID } = env;
 let isShuttingDown = false;
@@ -96,6 +97,8 @@ export async function startupApiOnly(): Promise<void> {
    * the MINIO_* checkpoint creds) into API pods just to boot. The worker and
    * combined startups own that validation. */
   await validateLifecycleAuthConfig();
+  await assertWorkerConcurrencyAgrees();
+  await dropInstanceLeftovers();
   configureProfileMetrics();
 
   // Set up queue listeners for monitoring (optional, for observability)
@@ -121,6 +124,7 @@ export async function startupWorkerOnly(): Promise<void> {
   const { pyWorker, otherWorker } = await import('./workers');
 
   registerWorkers();
+  await publishWorkerConcurrency();
 
   // Verify workers are running
   const checkWorkers = (): void => {
@@ -161,6 +165,8 @@ async function gracefulStartup(): Promise<void> {
     const { pyWorker, otherWorker } = await import('./workers');
 
     registerWorkers();
+    await publishWorkerConcurrency();
+    await dropInstanceLeftovers();
 
     // Set up queue event listeners
     setupQueueListeners(pyQueue, 'Python');

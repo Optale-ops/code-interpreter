@@ -69,6 +69,18 @@ spec:
                   key: codeapi-internal-service-token
             - name: EGRESS_GRANT_TTL_SECONDS
               value: {{ .Values.egressGrant.ttlSeconds | quote }}
+            # Fair share divides what the service workers drain; the API refuses
+            # to start when these differ from what the workers run.
+            {{- $serviceWorkerReplicas := .Values.workerSandbox.replicaCount }}
+            {{- if ne .Values.workerSandbox.serviceWorker.replicaCount nil }}
+            {{- $serviceWorkerReplicas = .Values.workerSandbox.serviceWorker.replicaCount }}
+            {{- end }}
+            - name: PYTHON_CONCURRENCY
+              value: {{ .Values.workerSandbox.config.pythonConcurrency | quote }}
+            - name: OTHER_CONCURRENCY
+              value: {{ .Values.workerSandbox.config.otherConcurrency | quote }}
+            - name: CODE_WORKER_REPLICAS
+              value: {{ $serviceWorkerReplicas | quote }}
             # Server config
             - name: SERVICE_PORT
               value: {{ .Values.api.service.port | quote }}
