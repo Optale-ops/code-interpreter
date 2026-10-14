@@ -57,6 +57,7 @@ type JwtClaims = {
   plan_id?: string;
     network_policy?: ExternalFetchPolicySnapshot;
     network_policy_digest?: string;
+  code_agents?: unknown;
 };
 
 function networkBinding(): {
@@ -463,6 +464,17 @@ describe('LibreChat JWT auth provider', () => {
       signJwt(baseClaims({ plan_id: 123 as unknown as string })),
       'malformed_claims',
     );
+  });
+
+  test('carries code_agents as the fair-share weight and leaves it unset when absent', () => {
+    expect(verifyLibreChatJwt(signJwt(baseClaims({ code_agents: 3 }))).codeAgents).toBe(3);
+    expect(verifyLibreChatJwt(signJwt(baseClaims())).codeAgents).toBeUndefined();
+  });
+
+  test('rejects a malformed code_agents claim', () => {
+    for (const value of [0, -1, 1.5, '3', null, 10_001]) {
+      expectJwtReason(signJwt(baseClaims({ code_agents: value })), 'malformed_claims');
+    }
   });
 
     test('carries one verified network policy binding into the principal', () => {

@@ -20,6 +20,8 @@ export type UserPrincipal = {
   planId?: string;
     networkPolicy?: ExternalFetchPolicySnapshot;
     networkPolicyDigest?: string;
+  /** Fair-share weight: the tenant's code-capable Agents, from `code_agents`. */
+  codeAgents?: number;
   agentRun?: undefined;
 };
 
@@ -35,6 +37,8 @@ export type AgentRunPrincipal = {
   credentialId?: string;
     networkPolicy?: ExternalFetchPolicySnapshot;
     networkPolicyDigest?: string;
+  /** Fair-share weight: the tenant's code-capable Agents, from `code_agents`. */
+  codeAgents?: number;
   agentRun: AgentRunSubject & {
     /** Present only on deletion-only tokens (C3). */
     fileDelete?: FileDeleteTarget;
