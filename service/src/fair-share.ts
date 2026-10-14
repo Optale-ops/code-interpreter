@@ -18,7 +18,8 @@
  *   Spare capacity is what is left after every other tenant's predicted,
  *   not-yet-used slice. A run is admitted while there is spare capacity or its
  *   tenant is under its share; otherwise it is refused with the time a slot is
- *   likely to free: the tenant's oldest run's admission plus the 90th
+ *   likely to free: the admission of the run whose end brings the tenant back
+ *   under its share (its (count - share + 1)-th oldest) plus the 90th
  *   percentile of recent run durations on that queue, never later than that
  *   run's deadline.
  * - Under-share runs get a better queue priority than over-share runs.
@@ -38,6 +39,7 @@ import { queueNamesForExecutionProfile } from './execution-profile';
 import { getPrincipal } from './auth/principal';
 import { getExecutionIdentity } from './execution-identity';
 import logger from './logger';
+import { sleep } from './utils';
 
 /** One hash tag keeps every fair-share key in one Redis Cluster slot. */
 export const FAIR_SHARE_KEY_PREFIX = '{codeapi-fair-share}:';
@@ -54,6 +56,9 @@ export const OVER_SHARE_PRIORITY = 2;
 export const DURATION_SAMPLES = 100;
 /** The soonest a refused run is told to come back. */
 const MIN_RETRY_MS = 1_000;
+/** How long a starting API waits for restarted workers to publish a changed
+ * concurrency before it refuses to start. */
+const WORKER_CONCURRENCY_WAIT_MS = 120_000;
 
 /** Every run's ceiling: the longest the API waits for a job before failing it. */
 export const RUN_WALL_CAP_MS = jobCompletionWaitTimeoutMs(
@@ -188,8 +193,12 @@ if force or #others == 0 or spare or underShare then
 end
 
 store(tenant, mine.avg, mine.count, weight)
-local oldest = redis.call('ZRANGE', inflightKey(tenant), 0, 0, 'WITHSCORES')
-local deadline = tonumber(oldest[2])
+-- The tenant is back under its share once count - share + 1 of its runs end;
+-- runs end roughly in admission order, so the estimate follows that run.
+local nth = mine.count - share
+if nth < 0 then nth = 0 end
+local entry = redis.call('ZRANGE', inflightKey(tenant), nth, nth, 'WITHSCORES')
+local deadline = tonumber(entry[2])
 if not deadline then
   return { 0, 0, share, mine.count, now + minRetry, 1 }
 end
@@ -208,18 +217,20 @@ return { 0, 0, share, mine.count, retryAt, 1 }
 `;
 
 /* ARGV: prefix, now, tau, stateTtl, wallCap, tenant, slot, samples. Records the
- * run's duration (admission to release) and returns the removed count. */
+ * run's duration (admission to release) unless samples is 0, and returns the
+ * removed count. */
 const RELEASE_SCRIPT = `${LUA_PRELUDE}
 local tenant = ARGV[6]
 local slot = ARGV[7]
+local samples = tonumber(ARGV[8])
 local ikey = inflightKey(tenant)
 local deadline = tonumber(redis.call('ZSCORE', ikey, slot))
 local removed = redis.call('ZREM', ikey, slot)
-if removed == 1 and deadline then
+if removed == 1 and deadline and samples > 0 then
   local duration = now - (deadline - wallCap)
   if duration >= 0 then
     redis.call('LPUSH', durationsKey, duration)
-    redis.call('LTRIM', durationsKey, 0, tonumber(ARGV[8]) - 1)
+    redis.call('LTRIM', durationsKey, 0, samples - 1)
   end
 end
 local count, avg, w = observe(tenant)
@@ -279,8 +290,8 @@ export type FairShareRefusal = {
   share: number;
   inFlight: number;
   retryAtMs: number;
-  /** False when no run durations are known yet and `retryAtMs` is the oldest
-   * run's deadline, the latest a slot can free. */
+  /** False when no run durations are known yet and `retryAtMs` is the
+   * deadline of the run that frees the slot, the latest it can free. */
   estimated: boolean;
 };
 
@@ -295,6 +306,10 @@ export type AdmitRunInput = {
   weight: number;
   /** Continuations of an already admitted run: counted, never refused. */
   force?: boolean;
+  /** False when the run's admission-to-release time is not a run duration
+   * (a blocking programmatic job also waits on tool calls): kept off the
+   * samples the retry estimate uses. */
+  sampleDuration?: boolean;
   /** Test seams; production uses the wall clock and the queue's capacity. */
   now?: number;
   capacity?: number;
@@ -309,9 +324,17 @@ export async function releaseRun(
   tenantId: string,
   slotId: string,
   now = Date.now(),
+  sampleDuration = true,
 ): Promise<void> {
   const redis = await getRedis();
-  await redis.eval(RELEASE_SCRIPT, 0, ...scriptArgs(queue, now), tenantId, slotMember(slotId), DURATION_SAMPLES);
+  await redis.eval(
+    RELEASE_SCRIPT,
+    0,
+    ...scriptArgs(queue, now),
+    tenantId,
+    slotMember(slotId),
+    sampleDuration ? DURATION_SAMPLES : 0,
+  );
 }
 
 export async function admitRun(input: AdmitRunInput): Promise<FairShareDecision> {
@@ -343,7 +366,7 @@ export async function admitRun(input: AdmitRunInput): Promise<FairShareDecision>
     share,
     inFlight,
     release() {
-      releasing ??= releaseRun(input.queue, input.tenantId, input.slotId).catch((error: unknown) => {
+      releasing ??= releaseRun(input.queue, input.tenantId, input.slotId, Date.now(), input.sampleDuration !== false).catch((error: unknown) => {
         /* The entry still expires at its deadline. */
         logger.warn('Fair-share release failed; the slot expires at its deadline', { error });
       });
@@ -387,16 +410,29 @@ export async function publishWorkerConcurrency(): Promise<void> {
 
 /**
  * API startup: refuses to start when the workers drain the queues at a
- * different concurrency than this API divides between companies. No worker
- * has published yet on a first boot; that is logged, not refused.
+ * different concurrency than this API divides between companies. A config
+ * change recreates the API and the workers together and the API may come up
+ * first, still seeing what the old workers published, so a mismatch is
+ * re-read until `waitMs` passes before it is refused. No worker has published
+ * yet on a first boot; that is logged, not refused.
  */
-export async function assertWorkerConcurrencyAgrees(): Promise<void> {
+export async function assertWorkerConcurrencyAgrees(
+  { waitMs = WORKER_CONCURRENCY_WAIT_MS, pollMs = 2_000 }: { waitMs?: number; pollMs?: number } = {},
+): Promise<void> {
   const redis = await getRedis();
-  const published = await redis.get(workerConcurrencyKey());
   const mine = workerConcurrency();
+  const giveUpAt = Date.now() + waitMs;
+  let published = await redis.get(workerConcurrencyKey());
   if (published == null) {
     logger.warn(`[${env.INSTANCE_ID}] No worker has published its concurrency yet; fair share assumes ${mine}`);
     return;
+  }
+  if (published !== mine) {
+    logger.warn(`[${env.INSTANCE_ID}] The workers run ${published}, this API ${mine}; waiting up to ${waitMs / 1000} s for restarted workers`);
+  }
+  while (published !== mine && Date.now() < giveUpAt) {
+    await sleep(pollMs);
+    published = await redis.get(workerConcurrencyKey());
   }
   if (published !== mine) {
     throw new Error(
@@ -448,7 +484,13 @@ export function fairShareRefusalBody(refusal: FairShareRefusal, now = Date.now()
 export async function admitRequestRun(
   req: t.AuthenticatedRequest,
   res: Response,
-  options: { queue: FairShareQueue; slotId: string; force?: boolean; releaseOnClose?: boolean },
+  options: {
+    queue: FairShareQueue;
+    slotId: string;
+    force?: boolean;
+    releaseOnClose?: boolean;
+    sampleDuration?: boolean;
+  },
 ): Promise<FairShareAdmission | null> {
   const tenantId = getExecutionIdentity(req).storageNamespace;
   let decision: FairShareDecision;
@@ -459,6 +501,7 @@ export async function admitRequestRun(
       slotId: options.slotId,
       weight: getPrincipal(req)?.codeAgents ?? 1,
       force: options.force,
+      sampleDuration: options.sampleDuration,
     });
   } catch (error) {
     logger.error('Fair-share admission failed', { error });

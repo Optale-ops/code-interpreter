@@ -115,7 +115,7 @@ describe('fair-share admission', () => {
     });
   });
 
-  test('retry_at is the oldest run\'s admission plus the p90 of recent run durations, within [now + 1 s, deadline]', async () => {
+  test('retry_at is the freeing run\'s admission plus the p90 of recent run durations, within [now + 1 s, deadline]', async () => {
     /* Ten earlier runs on the queue took 1..10 s (p90 = 9 s). */
     for (let i = 1; i <= 10; i++) {
       await admit('labC', 1, T0, `c-${i}`);
@@ -139,6 +139,27 @@ describe('fair-share admission', () => {
       await releaseRun('python', 'labC', `long-${i}`, start + RUN_WALL_CAP_MS + 5_000 - 1);
     }
     expect(await admit('labA', 1, start + 3_000)).toMatchObject({ admitted: false, retryAtMs: start + RUN_WALL_CAP_MS });
+  });
+
+  test('a tenant far over its share is told when enough of its runs end to bring it back under', async () => {
+    /* Ten earlier runs on the queue took 1..10 s (p90 = 9 s); labC is long quiet by `start`. */
+    for (let i = 1; i <= 10; i++) {
+      await admit('labC', 1, T0, `c-${i}`);
+      await releaseRun('python', 'labC', `c-${i}`, T0 + i * 1_000);
+    }
+    const start = T0 + 10_000 + 10 * DEMAND_DECAY_MS;
+    /* labA alone starts 4 runs a second apart; then labB arrives and labA's share drops to 2. */
+    for (let i = 0; i < 4; i++) expect((await admit('labA', 1, start + i * 1_000)).admitted).toBe(true);
+    expect((await admit('labB', 1, start + 4_000)).admitted).toBe(true);
+
+    /* labA is back under its share once 3 of its 4 runs end: the third oldest started at start + 2 s. */
+    expect(await admit('labA', 1, start + 5_000)).toMatchObject({
+      admitted: false,
+      share: 2,
+      inFlight: 4,
+      estimated: true,
+      retryAtMs: start + 2_000 + 9_000,
+    });
   });
 
   test('each queue is shared on its own capacity', async () => {
@@ -243,7 +264,31 @@ describe('fair-share startup', () => {
     await expect(assertWorkerConcurrencyAgrees()).resolves.toBeUndefined();
 
     env.PYTHON_CONCURRENCY = CAPACITY + 1;
-    await expect(assertWorkerConcurrencyAgrees()).rejects.toThrow(/PYTHON_CONCURRENCY and OTHER_CONCURRENCY/);
+    await expect(assertWorkerConcurrencyAgrees({ waitMs: 100, pollMs: 10 })).rejects.toThrow(/PYTHON_CONCURRENCY and OTHER_CONCURRENCY/);
+  });
+
+  test('an API restarted with new concurrency before the workers waits for them to publish it', async () => {
+    await publishWorkerConcurrency();
+    /* The API has read the old workers' value once: the workers come up now. */
+    const firstRead = Promise.withResolvers<void>();
+    let reads = 0;
+    setFairShareRedisForTests({
+      eval: (script, numKeys, ...args) => redis.eval(script, numKeys, ...args),
+      set: (key, value) => redis.set(key, value),
+      async get(key) {
+        const value = await redis.get(key);
+        if (++reads === 1) firstRead.resolve();
+        return value;
+      },
+    });
+    /* Both get PYTHON_CONCURRENCY + 1; the API boots first. */
+    env.PYTHON_CONCURRENCY = CAPACITY + 1;
+    const starting = assertWorkerConcurrencyAgrees({ waitMs: 5_000, pollMs: 10 });
+    await firstRead.promise;
+    await publishWorkerConcurrency();
+
+    await expect(starting).resolves.toBeUndefined();
+    expect(reads).toBeGreaterThan(1);
   });
 });
 

@@ -1481,7 +1481,13 @@ async function handleBlocking(
     /* The blocking job outlives this response (it waits on tool calls across
      * continuations), so its slot is released when the job settles or the
      * client goes away, not when this response closes. */
-    const admission = await admitRequestRun(req, res, { queue: 'python', slotId: session_id, releaseOnClose: false });
+    const admission = await admitRequestRun(req, res, {
+      queue: 'python',
+      slotId: session_id,
+      releaseOnClose: false,
+      /* Its admission-to-release time includes the tool-call round trips. */
+      sampleDuration: false,
+    });
     if (!admission) {
       await cleanupExecution(execution_id, 'blocking');
       return;
