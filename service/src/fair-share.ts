@@ -4,8 +4,9 @@
  * The engine is the only component that sees every tenant, so it decides who
  * runs. Nothing here is a fixed cap:
  *
- * - Each queue (python, other) is shared on its own. Its capacity is what
- *   drains it: the worker concurrency for that queue times the worker count.
+ * - Every code run, of any language, comes from one pool: the run queue that
+ *   all workers drain. Its capacity is CODE_RUN_CAPACITY (runs one worker and
+ *   its sandbox take at once) times the worker count (CODE_WORKER_REPLICAS).
  * - With spare capacity every run is admitted, even past the capacity (the
  *   job waits in the queue). Shares bind only when other tenants have current
  *   or predicted demand.
@@ -20,8 +21,7 @@
  *   tenant is under its share; otherwise it is refused with the time a slot is
  *   likely to free: the admission of the run whose end brings the tenant back
  *   under its share (its (count - share + 1)-th oldest) plus the 90th
- *   percentile of recent run durations on that queue, never later than that
- *   run's deadline.
+ *   percentile of recent run durations, never later than that run's deadline.
  * - Under-share runs get a better queue priority than over-share runs.
  *
  * State lives in Redis and changes only inside one Lua script per decision, so
@@ -35,7 +35,7 @@ import { createHash } from 'crypto';
 import type { Response } from 'express';
 import type * as t from './types';
 import { env, jobCompletionWaitTimeoutMs } from './config';
-import { queueNamesForExecutionProfile } from './execution-profile';
+import { queueNameForExecutionProfile } from './execution-profile';
 import { getPrincipal } from './auth/principal';
 import { getExecutionIdentity } from './execution-identity';
 import logger from './logger';
@@ -52,13 +52,13 @@ export const ACTIVE_DEMAND_FLOOR = 0.05;
  * no job bypasses the ordering through the unprioritized wait list. */
 export const UNDER_SHARE_PRIORITY = 1;
 export const OVER_SHARE_PRIORITY = 2;
-/** Recent run durations kept per queue for the retry estimate. */
+/** Recent run durations kept for the retry estimate. */
 export const DURATION_SAMPLES = 100;
 /** The soonest a refused run is told to come back. */
 const MIN_RETRY_MS = 1_000;
 /** How long a starting API waits for restarted workers to publish a changed
- * concurrency before it refuses to start. */
-const WORKER_CONCURRENCY_WAIT_MS = 120_000;
+ * capacity before it refuses to start. */
+const WORKER_CAPACITY_WAIT_MS = 120_000;
 
 /** Every run's ceiling: the longest the API waits for a job before failing it. */
 export const RUN_WALL_CAP_MS = jobCompletionWaitTimeoutMs(
@@ -69,21 +69,17 @@ export const RUN_WALL_CAP_MS = jobCompletionWaitTimeoutMs(
 
 const STATE_TTL_MS = RUN_WALL_CAP_MS + 10 * DEMAND_DECAY_MS;
 
-/** The two worker pools; each drains its own BullMQ queue. */
-export type FairShareQueue = keyof ReturnType<typeof queueNamesForExecutionProfile>;
-
-/** Runs the queue's workers process at once. The BullMQ limiter allows the
- * same count per JOB_WINDOW, so for runs longer than the window concurrency is
- * what binds. */
-export function queueCapacity(queue: FairShareQueue): number {
-  const concurrency = queue === 'python' ? env.PYTHON_CONCURRENCY : env.OTHER_CONCURRENCY;
-  return concurrency * env.CODE_WORKER_REPLICAS;
+/** Runs the pool takes at once: what every worker runs at once together. The
+ * BullMQ limiter allows the same count per JOB_WINDOW, so for runs longer than
+ * the window concurrency is what binds. */
+export function poolCapacity(): number {
+  return env.CODE_RUN_CAPACITY * env.CODE_WORKER_REPLICAS;
 }
 
-/** Keys of one queue, under the queue's own BullMQ name so execution profiles
+/** Keys of the pool, under the run queue's BullMQ name so execution profiles
  * sharing a Redis never mix. */
-function queuePrefix(queue: FairShareQueue): string {
-  return `${FAIR_SHARE_KEY_PREFIX}${queueNamesForExecutionProfile(env.EXECUTION_PROFILE, env.EXECUTION_PROFILE_SOURCE)[queue]}:`;
+function poolPrefix(): string {
+  return `${FAIR_SHARE_KEY_PREFIX}${queueNameForExecutionProfile(env.EXECUTION_PROFILE, env.EXECUTION_PROFILE_SOURCE)}:`;
 }
 
 /** The slot's entry, tagged with this API instance so a restart can drop it. */
@@ -298,11 +294,10 @@ export type FairShareRefusal = {
 export type FairShareDecision = FairShareAdmission | FairShareRefusal;
 
 export type AdmitRunInput = {
-  queue: FairShareQueue;
   tenantId: string;
   /** Unique per admitted run. */
   slotId: string;
-  /** The tenant's code-capable Agents; at least 1. */
+  /** The tenant's Agents that ran code recently; at least 1. */
   weight: number;
   /** Continuations of an already admitted run: counted, never refused. */
   force?: boolean;
@@ -310,17 +305,16 @@ export type AdmitRunInput = {
    * (a blocking programmatic job also waits on tool calls): kept off the
    * samples the retry estimate uses. */
   sampleDuration?: boolean;
-  /** Test seams; production uses the wall clock and the queue's capacity. */
+  /** Test seams; production uses the wall clock and the pool's capacity. */
   now?: number;
   capacity?: number;
 };
 
-function scriptArgs(queue: FairShareQueue, now: number): (string | number)[] {
-  return [queuePrefix(queue), now, DEMAND_DECAY_MS, STATE_TTL_MS, RUN_WALL_CAP_MS];
+function scriptArgs(now: number): (string | number)[] {
+  return [poolPrefix(), now, DEMAND_DECAY_MS, STATE_TTL_MS, RUN_WALL_CAP_MS];
 }
 
 export async function releaseRun(
-  queue: FairShareQueue,
   tenantId: string,
   slotId: string,
   now = Date.now(),
@@ -330,7 +324,7 @@ export async function releaseRun(
   await redis.eval(
     RELEASE_SCRIPT,
     0,
-    ...scriptArgs(queue, now),
+    ...scriptArgs(now),
     tenantId,
     slotMember(slotId),
     sampleDuration ? DURATION_SAMPLES : 0,
@@ -339,13 +333,13 @@ export async function releaseRun(
 
 export async function admitRun(input: AdmitRunInput): Promise<FairShareDecision> {
   const now = input.now ?? Date.now();
-  const capacity = input.capacity ?? queueCapacity(input.queue);
+  const capacity = input.capacity ?? poolCapacity();
   const weight = Math.max(1, Math.floor(input.weight));
   const redis = await getRedis();
   const reply = await redis.eval(
     ADMIT_SCRIPT,
     0,
-    ...scriptArgs(input.queue, now),
+    ...scriptArgs(now),
     input.tenantId,
     slotMember(input.slotId),
     weight,
@@ -366,7 +360,7 @@ export async function admitRun(input: AdmitRunInput): Promise<FairShareDecision>
     share,
     inFlight,
     release() {
-      releasing ??= releaseRun(input.queue, input.tenantId, input.slotId, Date.now(), input.sampleDuration !== false).catch((error: unknown) => {
+      releasing ??= releaseRun(input.tenantId, input.slotId, Date.now(), input.sampleDuration !== false).catch((error: unknown) => {
         /* The entry still expires at its deadline. */
         logger.warn('Fair-share release failed; the slot expires at its deadline', { error });
       });
@@ -379,64 +373,59 @@ export async function admitRun(input: AdmitRunInput): Promise<FairShareDecision>
  * API startup: drops the entries an earlier run of this instance left behind
  * (a crash or restart mid-run), so they stop counting against their tenants
  * before their deadline. Only effective when INSTANCE_ID is stable across
- * restarts and unique per API instance.
+ * restarts and unique per API instance. A dropped entry whose job is still
+ * running lets fair share admit past the pool for a moment; the extra runs
+ * wait in the queue, since no worker runs more than CODE_RUN_CAPACITY at once.
  */
 export async function dropInstanceLeftovers(): Promise<number> {
   const redis = await getRedis();
-  let dropped = 0;
-  for (const queue of ['python', 'other'] as const) {
-    dropped += Number(await redis.eval(DROP_INSTANCE_SCRIPT, 0, queuePrefix(queue), slotMember('')));
-  }
+  const dropped = Number(await redis.eval(DROP_INSTANCE_SCRIPT, 0, poolPrefix(), slotMember('')));
   if (dropped > 0) {
     logger.info(`[${env.INSTANCE_ID}] Dropped ${dropped} fair-share slot(s) left by this instance's previous run`);
   }
   return dropped;
 }
 
-/* What the workers drain per queue, published by each worker at boot and
- * checked by the API, which divides that capacity. */
-function workerConcurrencyKey(): string {
-  return `${queuePrefix('python')}worker-concurrency`;
+/* What one worker runs at once, published by each worker at boot and checked
+ * by the API, which divides the pool it makes up. */
+function workerCapacityKey(): string {
+  return `${poolPrefix()}worker-capacity`;
 }
 
-function workerConcurrency(): string {
-  return JSON.stringify({ python: env.PYTHON_CONCURRENCY, other: env.OTHER_CONCURRENCY });
-}
-
-export async function publishWorkerConcurrency(): Promise<void> {
+export async function publishWorkerCapacity(): Promise<void> {
   const redis = await getRedis();
-  await redis.set(workerConcurrencyKey(), workerConcurrency());
+  await redis.set(workerCapacityKey(), String(env.CODE_RUN_CAPACITY));
 }
 
 /**
- * API startup: refuses to start when the workers drain the queues at a
- * different concurrency than this API divides between companies. A config
- * change recreates the API and the workers together and the API may come up
- * first, still seeing what the old workers published, so a mismatch is
- * re-read until `waitMs` passes before it is refused. No worker has published
- * yet on a first boot; that is logged, not refused.
+ * API startup: refuses to start when the workers run a different
+ * CODE_RUN_CAPACITY than this API divides between companies. A config change
+ * recreates the API and the workers together and the API may come up first,
+ * still seeing what the old workers published, so a mismatch is re-read until
+ * `waitMs` passes before it is refused. No worker has published yet on a first
+ * boot; that is logged, not refused.
  */
-export async function assertWorkerConcurrencyAgrees(
-  { waitMs = WORKER_CONCURRENCY_WAIT_MS, pollMs = 2_000 }: { waitMs?: number; pollMs?: number } = {},
+export async function assertWorkerCapacityAgrees(
+  { waitMs = WORKER_CAPACITY_WAIT_MS, pollMs = 2_000 }: { waitMs?: number; pollMs?: number } = {},
 ): Promise<void> {
   const redis = await getRedis();
-  const mine = workerConcurrency();
+  const mine = String(env.CODE_RUN_CAPACITY);
   const giveUpAt = Date.now() + waitMs;
-  let published = await redis.get(workerConcurrencyKey());
+  let published = await redis.get(workerCapacityKey());
   if (published == null) {
-    logger.warn(`[${env.INSTANCE_ID}] No worker has published its concurrency yet; fair share assumes ${mine}`);
+    logger.warn(`[${env.INSTANCE_ID}] No worker has published its CODE_RUN_CAPACITY yet; fair share assumes ${mine}`);
     return;
   }
   if (published !== mine) {
-    logger.warn(`[${env.INSTANCE_ID}] The workers run ${published}, this API ${mine}; waiting up to ${waitMs / 1000} s for restarted workers`);
+    logger.warn(`[${env.INSTANCE_ID}] The workers run CODE_RUN_CAPACITY=${published}, this API ${mine}; waiting up to ${waitMs / 1000} s for restarted workers`);
   }
   while (published !== mine && Date.now() < giveUpAt) {
     await sleep(pollMs);
-    published = await redis.get(workerConcurrencyKey());
+    published = await redis.get(workerCapacityKey());
   }
   if (published !== mine) {
     throw new Error(
-      `Fair share: the workers run ${published} but this API is configured with ${mine}. Set PYTHON_CONCURRENCY and OTHER_CONCURRENCY to the same values on the API and the workers.`,
+      `Fair share: the workers run CODE_RUN_CAPACITY=${published} but this API is configured with ${mine}. Set CODE_RUN_CAPACITY to the same value on the API and the workers.`,
     );
   }
 }
@@ -475,7 +464,7 @@ export function fairShareRefusalBody(refusal: FairShareRefusal, now = Date.now()
 }
 
 /**
- * Admits one code run on `queue` for the request's tenant, or answers (429
+ * Admits one code run from the pool for the request's tenant, or answers (429
  * rate_limited with reason `tenant_share_exceeded`, or 503 when Redis cannot
  * decide) and returns null. The slot is released when the response is sent
  * unless `releaseOnClose` is false, in which case the caller releases it when
@@ -485,7 +474,6 @@ export async function admitRequestRun(
   req: t.AuthenticatedRequest,
   res: Response,
   options: {
-    queue: FairShareQueue;
     slotId: string;
     force?: boolean;
     releaseOnClose?: boolean;
@@ -496,7 +484,6 @@ export async function admitRequestRun(
   let decision: FairShareDecision;
   try {
     decision = await admitRun({
-      queue: options.queue,
       tenantId,
       slotId: options.slotId,
       weight: getPrincipal(req)?.codeAgents ?? 1,
@@ -511,7 +498,6 @@ export async function admitRequestRun(
   if (!decision.admitted) {
     const body = fairShareRefusalBody(decision);
     logger.warn('Code run refused: tenant at its fair share', {
-      queue: options.queue,
       tenantHash: createHash('sha256').update(tenantId).digest('hex').slice(0, 12),
       share: decision.share,
       inFlight: decision.inFlight,

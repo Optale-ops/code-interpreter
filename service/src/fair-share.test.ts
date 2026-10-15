@@ -7,7 +7,7 @@ import RedisMock from 'ioredis-mock';
 import { applyPrincipal } from './auth/principal';
 import type { AuthenticatedRequest } from './types';
 import { env } from './config';
-import { queueNamesForExecutionProfile } from './execution-profile';
+import { queueNameForExecutionProfile } from './execution-profile';
 import {
   DEMAND_DECAY_MS,
   FAIR_SHARE_KEY_PREFIX,
@@ -16,13 +16,13 @@ import {
   UNDER_SHARE_PRIORITY,
   admitRequestRun,
   admitRun,
-  assertWorkerConcurrencyAgrees,
+  assertWorkerCapacityAgrees,
   dropInstanceLeftovers,
-  publishWorkerConcurrency,
+  poolCapacity,
+  publishWorkerCapacity,
   releaseRun,
   setFairShareRedisForTests,
   type FairShareDecision,
-  type FairShareQueue,
 } from './fair-share';
 
 const CAPACITY = 4;
@@ -33,8 +33,7 @@ const redis = new RedisMock();
 let slotCounter = 0;
 
 const saved = {
-  python: env.PYTHON_CONCURRENCY,
-  other: env.OTHER_CONCURRENCY,
+  capacity: env.CODE_RUN_CAPACITY,
   replicas: env.CODE_WORKER_REPLICAS,
   instance: env.INSTANCE_ID,
 };
@@ -42,8 +41,7 @@ const saved = {
 beforeEach(async () => {
   await redis.flushall();
   setFairShareRedisForTests(redis);
-  env.PYTHON_CONCURRENCY = CAPACITY;
-  env.OTHER_CONCURRENCY = 8;
+  env.CODE_RUN_CAPACITY = CAPACITY;
   env.CODE_WORKER_REPLICAS = 1;
   env.INSTANCE_ID = 'api-1';
   slotCounter = 0;
@@ -51,14 +49,13 @@ beforeEach(async () => {
 
 afterEach(() => {
   setFairShareRedisForTests();
-  env.PYTHON_CONCURRENCY = saved.python;
-  env.OTHER_CONCURRENCY = saved.other;
+  env.CODE_RUN_CAPACITY = saved.capacity;
   env.CODE_WORKER_REPLICAS = saved.replicas;
   env.INSTANCE_ID = saved.instance;
 });
 
 function admit(tenantId: string, weight: number, now: number, slotId = `slot-${++slotCounter}`): Promise<FairShareDecision> {
-  return admitRun({ queue: 'python', tenantId, weight, now, slotId });
+  return admitRun({ tenantId, weight, now, slotId });
 }
 
 async function admitMany(tenantId: string, weight: number, now: number, count: number): Promise<FairShareDecision[]> {
@@ -67,13 +64,13 @@ async function admitMany(tenantId: string, weight: number, now: number, count: n
   return decisions;
 }
 
-function inflightKey(tenantId: string, queue: FairShareQueue = 'python'): string {
-  const queueName = queueNamesForExecutionProfile(env.EXECUTION_PROFILE, env.EXECUTION_PROFILE_SOURCE)[queue];
+function inflightKey(tenantId: string): string {
+  const queueName = queueNameForExecutionProfile(env.EXECUTION_PROFILE, env.EXECUTION_PROFILE_SOURCE);
   return `${FAIR_SHARE_KEY_PREFIX}${queueName}:inflight:${tenantId}`;
 }
 
-function inFlight(tenantId: string, queue: FairShareQueue = 'python'): Promise<number> {
-  return redis.zcard(inflightKey(tenantId, queue));
+function inFlight(tenantId: string): Promise<number> {
+  return redis.zcard(inflightKey(tenantId));
 }
 
 describe('fair-share admission', () => {
@@ -116,10 +113,10 @@ describe('fair-share admission', () => {
   });
 
   test('retry_at is the freeing run\'s admission plus the p90 of recent run durations, within [now + 1 s, deadline]', async () => {
-    /* Ten earlier runs on the queue took 1..10 s (p90 = 9 s). */
+    /* Ten earlier runs took 1..10 s (p90 = 9 s). */
     for (let i = 1; i <= 10; i++) {
       await admit('labC', 1, T0, `c-${i}`);
-      await releaseRun('python', 'labC', `c-${i}`, T0 + i * 1_000);
+      await releaseRun('labC', `c-${i}`, T0 + i * 1_000);
     }
     /* Long after labC went quiet, labB and labA fill the capacity of 4 (share 2 each). */
     const start = T0 + 10_000 + 10 * DEMAND_DECAY_MS;
@@ -136,16 +133,16 @@ describe('fair-share admission', () => {
     /* Durations longer than what is left of the run never pass its deadline. */
     for (let i = 0; i < 100; i++) {
       await admit('labC', 1, start, `long-${i}`);
-      await releaseRun('python', 'labC', `long-${i}`, start + RUN_WALL_CAP_MS + 5_000 - 1);
+      await releaseRun('labC', `long-${i}`, start + RUN_WALL_CAP_MS + 5_000 - 1);
     }
     expect(await admit('labA', 1, start + 3_000)).toMatchObject({ admitted: false, retryAtMs: start + RUN_WALL_CAP_MS });
   });
 
   test('a tenant far over its share is told when enough of its runs end to bring it back under', async () => {
-    /* Ten earlier runs on the queue took 1..10 s (p90 = 9 s); labC is long quiet by `start`. */
+    /* Ten earlier runs took 1..10 s (p90 = 9 s); labC is long quiet by `start`. */
     for (let i = 1; i <= 10; i++) {
       await admit('labC', 1, T0, `c-${i}`);
-      await releaseRun('python', 'labC', `c-${i}`, T0 + i * 1_000);
+      await releaseRun('labC', `c-${i}`, T0 + i * 1_000);
     }
     const start = T0 + 10_000 + 10 * DEMAND_DECAY_MS;
     /* labA alone starts 4 runs a second apart; then labB arrives and labA's share drops to 2. */
@@ -162,16 +159,19 @@ describe('fair-share admission', () => {
     });
   });
 
-  test('each queue is shared on its own capacity', async () => {
+  test('the pool is CODE_RUN_CAPACITY times the workers', async () => {
+    env.CODE_RUN_CAPACITY = 2;
+    env.CODE_WORKER_REPLICAS = 2;
+    expect(poolCapacity()).toBe(4);
     await admit('labB', 1, T0);
     await admitMany('labA', 1, T0, 3);
     expect((await admit('labA', 1, T0)).admitted).toBe(false);
 
-    /* The other queue drains on its own workers: labA's python backlog does not count there. */
-    const other = await admitRun({ queue: 'other', tenantId: 'labA', weight: 1, now: T0, slotId: 'o-1' });
-    expect(other.admitted && other.priority).toBe(UNDER_SHARE_PRIORITY);
-    expect(await inFlight('labA', 'other')).toBe(1);
-    expect(await inFlight('labA')).toBe(3);
+    /* A third worker grows the pool to 6: labA's share becomes 3 and its next run is spare capacity. */
+    env.CODE_WORKER_REPLICAS = 3;
+    expect(poolCapacity()).toBe(6);
+    expect((await admit('labA', 1, T0)).admitted).toBe(true);
+    expect(await inFlight('labA')).toBe(4);
   });
 
   test('a tenant arriving at a full engine is admitted at better priority while the busy tenant is refused', async () => {
@@ -195,8 +195,8 @@ describe('fair-share admission', () => {
     await admit('labB', 1, T0, 'b-1');
     await admit('labB', 1, T0, 'b-2');
     const finishedAt = T0 + 60_000;
-    await releaseRun('python', 'labB', 'b-1', finishedAt);
-    await releaseRun('python', 'labB', 'b-2', finishedAt);
+    await releaseRun('labB', 'b-1', finishedAt);
+    await releaseRun('labB', 'b-2', finishedAt);
     expect(await inFlight('labB')).toBe(0);
 
     /* labA (same weight) floods right after: it gets its half, labB's half stays free. */
@@ -207,8 +207,8 @@ describe('fair-share admission', () => {
     /* labB returns within the window and finds its slice. */
     const b = await admitMany('labB', 1, soon + 5_000, 2);
     expect(b.every(d => d.admitted && d.priority === UNDER_SHARE_PRIORITY)).toBe(true);
-    await releaseRun('python', 'labB', 'slot-4', soon + 6_000);
-    await releaseRun('python', 'labB', 'slot-5', soon + 6_000);
+    await releaseRun('labB', 'slot-4', soon + 6_000);
+    await releaseRun('labB', 'slot-5', soon + 6_000);
 
     /* Long after labB went quiet its prediction has decayed: labA is alone again. */
     const later = soon + 6_000 + 5 * DEMAND_DECAY_MS;
@@ -236,7 +236,7 @@ describe('fair-share admission', () => {
     await admitMany('labA', 1, T0, 3);
     expect((await admit('labA', 1, T0)).admitted).toBe(false);
 
-    const continuation = await admitRun({ queue: 'python', tenantId: 'labA', weight: 1, now: T0, slotId: 'cont', force: true });
+    const continuation = await admitRun({ tenantId: 'labA', weight: 1, now: T0, slotId: 'cont', force: true });
     expect(continuation.admitted).toBe(true);
     expect(await inFlight('labA')).toBe(4);
   });
@@ -245,30 +245,29 @@ describe('fair-share admission', () => {
 describe('fair-share startup', () => {
   test('an API instance drops only its own leftover slots', async () => {
     const now = Date.now();
-    await admitRun({ queue: 'python', tenantId: 'labA', weight: 1, now, slotId: 'mine-py' });
-    await admitRun({ queue: 'other', tenantId: 'labA', weight: 1, now, slotId: 'mine-other' });
+    await admitRun({ tenantId: 'labA', weight: 1, now, slotId: 'mine-1' });
+    await admitRun({ tenantId: 'labA', weight: 1, now, slotId: 'mine-2' });
     env.INSTANCE_ID = 'api-2';
-    await admitRun({ queue: 'python', tenantId: 'labA', weight: 1, now, slotId: 'theirs' });
+    await admitRun({ tenantId: 'labA', weight: 1, now, slotId: 'theirs' });
 
     env.INSTANCE_ID = 'api-1';
     expect(await dropInstanceLeftovers()).toBe(2);
     expect(await redis.zrange(inflightKey('labA'), 0, -1)).toEqual(['api-2:theirs']);
-    expect(await inFlight('labA', 'other')).toBe(0);
   });
 
-  test('the API refuses to start when the workers drain at another concurrency', async () => {
+  test('the API refuses to start when the workers run another CODE_RUN_CAPACITY', async () => {
     /* First boot: no worker has published yet. */
-    await expect(assertWorkerConcurrencyAgrees()).resolves.toBeUndefined();
+    await expect(assertWorkerCapacityAgrees()).resolves.toBeUndefined();
 
-    await publishWorkerConcurrency();
-    await expect(assertWorkerConcurrencyAgrees()).resolves.toBeUndefined();
+    await publishWorkerCapacity();
+    await expect(assertWorkerCapacityAgrees()).resolves.toBeUndefined();
 
-    env.PYTHON_CONCURRENCY = CAPACITY + 1;
-    await expect(assertWorkerConcurrencyAgrees({ waitMs: 100, pollMs: 10 })).rejects.toThrow(/PYTHON_CONCURRENCY and OTHER_CONCURRENCY/);
+    env.CODE_RUN_CAPACITY = CAPACITY + 1;
+    await expect(assertWorkerCapacityAgrees({ waitMs: 100, pollMs: 10 })).rejects.toThrow(/Set CODE_RUN_CAPACITY to the same value/);
   });
 
-  test('an API restarted with new concurrency before the workers waits for them to publish it', async () => {
-    await publishWorkerConcurrency();
+  test('an API restarted with a new CODE_RUN_CAPACITY before the workers waits for them to publish it', async () => {
+    await publishWorkerCapacity();
     /* The API has read the old workers' value once: the workers come up now. */
     const firstRead = Promise.withResolvers<void>();
     let reads = 0;
@@ -281,11 +280,11 @@ describe('fair-share startup', () => {
         return value;
       },
     });
-    /* Both get PYTHON_CONCURRENCY + 1; the API boots first. */
-    env.PYTHON_CONCURRENCY = CAPACITY + 1;
-    const starting = assertWorkerConcurrencyAgrees({ waitMs: 5_000, pollMs: 10 });
+    /* Both get CODE_RUN_CAPACITY + 1; the API boots first. */
+    env.CODE_RUN_CAPACITY = CAPACITY + 1;
+    const starting = assertWorkerCapacityAgrees({ waitMs: 5_000, pollMs: 10 });
     await firstRead.promise;
-    await publishWorkerConcurrency();
+    await publishWorkerCapacity();
 
     await expect(starting).resolves.toBeUndefined();
     expect(reads).toBeGreaterThan(1);
@@ -323,7 +322,7 @@ describe('fair-share over HTTP', () => {
       next();
     });
     app.post('/v1/exec', async (req, res) => {
-      const admission = await admitRequestRun(req as AuthenticatedRequest, res, { queue: 'python', slotId: String(req.header('x-slot')) });
+      const admission = await admitRequestRun(req as AuthenticatedRequest, res, { slotId: String(req.header('x-slot')) });
       if (!admission) return;
       /* Holds the run until the test ends it. The release is memoized, so this
        * awaits the one admitRequestRun started. */
@@ -357,8 +356,8 @@ describe('fair-share over HTTP', () => {
   test('a refused run gets 429 rate_limited / tenant_share_exceeded with Retry-After and retry_at', async () => {
     const url = await startApp();
     /* labB (weight 3) is busy; labA (weight 1) already holds its 1 of the 4 slots. */
-    for (let i = 0; i < 3; i++) await admitRun({ queue: 'python', tenantId: 'labB', weight: 3, slotId: `b-${i}` });
-    expect((await admitRun({ queue: 'python', tenantId: 'labA', weight: 1, slotId: 'a-0' })).admitted).toBe(true);
+    for (let i = 0; i < 3; i++) await admitRun({ tenantId: 'labB', weight: 3, slotId: `b-${i}` });
+    expect((await admitRun({ tenantId: 'labA', weight: 1, slotId: 'a-0' })).admitted).toBe(true);
 
     const refused = await fetch(`${url}/v1/exec`, { method: 'POST', headers: { 'x-slot': 'a-1' } });
     const body = await refused.json() as Record<string, unknown>;

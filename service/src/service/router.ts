@@ -11,7 +11,7 @@ import { sessionAuth } from '../middleware/auth';
 import { uploadLimiter, downloadLimiter, fetchLimiter } from '../middleware/limits';
 import { internalServiceHeaders } from '../internal-service-auth';
 import { resolveSessionKey, resolveUploadSessionKey, resolveOutputBucketSessionKey, SessionKeyResolutionError, parseUploadSessionKeyInput, type SessionKeyInput } from '../session-key';
-import { pyQueue, otherQueue, pyQueueEvents, otherQueueEvents, queueNames, connection } from '../queue';
+import { runQueue, runQueueEvents, queueName, connection } from '../queue';
 import { sleep, getAxiosErrorDetails, publicExecutionFailure } from '../utils';
 import { env, jobCompletionWaitTimeoutMs, planLimits, resolveLanguage } from '../config';
 import { createPayload } from '../payload';
@@ -256,11 +256,10 @@ router.post('/exec', async (req: t.AuthenticatedRequest, res) => {
    * sandbox invocation." */
   const session_id = nanoid();
   const execution_id = nanoid();
-  const pool = language === Languages.py ? 'python' : 'other';
   let admission: FairShareAdmission | null = null;
 
   try {
-    admission = await admitRequestRun(req, res, { queue: pool, slotId: session_id });
+    admission = await admitRequestRun(req, res, { slotId: session_id });
     if (!admission) return;
     const { priority } = admission;
     await connection.set(`session:${session_id}`, sessionKey, 'EX', env.SESSION_CACHE_TTL);
@@ -301,10 +300,6 @@ router.post('/exec', async (req: t.AuthenticatedRequest, res) => {
       payload: rawPayload,
     });
 
-    const queue = pool === 'python' ? pyQueue : otherQueue;
-    const queueEvents = pool === 'python' ? pyQueueEvents : otherQueueEvents;
-    const queueName = queueNames[pool];
-
     const job = await withSpan('codeapi.job.enqueue', {
       'messaging.system': 'bullmq',
       'messaging.destination.name': queueName,
@@ -312,7 +307,7 @@ router.post('/exec', async (req: t.AuthenticatedRequest, res) => {
       'codeapi.execution_profile': env.EXECUTION_PROFILE,
     }, () => {
       const traceCarrier = captureTraceCarrier();
-      return queue.add(Jobs.execute, {
+      return runQueue.add(Jobs.execute, {
         code,
         ...(agentRun ? {} : { userId }),
         payload: sandboxSecurity.payload,
@@ -360,7 +355,7 @@ router.post('/exec', async (req: t.AuthenticatedRequest, res) => {
       'messaging.destination.name': queueName,
       'codeapi.language': language,
       'codeapi.execution_profile': env.EXECUTION_PROFILE,
-    }, () => job.waitUntilFinished(queueEvents, JOB_COMPLETION_WAIT_TIMEOUT_MS), 'CONSUMER');
+    }, () => job.waitUntilFinished(runQueueEvents, JOB_COMPLETION_WAIT_TIMEOUT_MS), 'CONSUMER');
 
     if (!isSyntheticRequest) {
       logger.info('Execution completed', { session_id, user_id });

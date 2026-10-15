@@ -227,11 +227,10 @@ workerSandbox:
 
   # Worker configuration
   config:
-    # Throughput-mode defaults for launcher.vcpus=2. Bash/Node/Bun and
-    # bash-launched Python run through the "other" queue; direct Python is kept
-    # as a small compatibility lane.
-    pythonConcurrency: 1
-    otherConcurrency: 8
+    # Runs one worker takes at once, any language (CODE_RUN_CAPACITY). Sizing
+    # rule: min(sandbox.maxConcurrentJobs, launcher.ramMib / 512 MiB per run) / 2;
+    # 2 for launcher.ramMib=2048. The API gets the same value.
+    codeRunCapacity: 2
     jobWindow: 1000
     jobTimeout: 25000       # 25 seconds
 

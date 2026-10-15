@@ -7,7 +7,7 @@ import type * as tls from 'tls';
 import type * as t from './types';
 import { Jobs } from './enum';
 import { env } from './config';
-import { queueNamesForExecutionProfile } from './execution-profile';
+import { queueNameForExecutionProfile } from './execution-profile';
 import logger from './logger';
 import { redisKeepAliveOptions } from './redis-options';
 import { bullmqQueueJobs, registerBullmqQueueMetricsCollector } from './metrics';
@@ -53,27 +53,21 @@ const connection = new IORedis({
     : {})
 });
 
-// Global queues - no INSTANCE_ID prefix
-// This enables horizontal scaling where any worker can process any job
-// while the execution-profile prefix prevents HTTP and Lambda workers from
-// consuming each other's jobs when they share Redis.
-const queueNames = queueNamesForExecutionProfile(
+// One global run queue - no INSTANCE_ID prefix
+// Every code run, whatever its language, goes through it, so the workers and
+// fair share see one shared pool. Any worker can process any job, while the
+// execution-profile name prevents HTTP and Lambda workers from consuming each
+// other's jobs when they share Redis.
+const queueName = queueNameForExecutionProfile(
   env.EXECUTION_PROFILE,
   env.EXECUTION_PROFILE_SOURCE,
 );
-const pyQueue = new Queue<t.JobData, t.JobResult, Jobs.execute>(queueNames.python, { connection });
-const otherQueue = new Queue<t.JobData, t.JobResult, Jobs.execute>(queueNames.other, { connection });
-
-const pyQueueEvents = new QueueEvents(queueNames.python, { connection });
-const otherQueueEvents = new QueueEvents(queueNames.other, { connection });
+const runQueue = new Queue<t.JobData, t.JobResult, Jobs.execute>(queueName, { connection });
+const runQueueEvents = new QueueEvents(queueName, { connection });
 
 /* Fair-share jobs carry a BullMQ priority, so queued runs sit in `prioritized`
  * rather than `waiting`. */
 const queueMetricStates = ['waiting', 'prioritized', 'active', 'delayed'] as const;
-const queueMetricSources = [
-  { name: queueNames.python, queue: pyQueue },
-  { name: queueNames.other, queue: otherQueue },
-] as const;
 const QUEUE_METRICS_TIMEOUT_MS = 1000;
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -92,23 +86,21 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: s
 }
 
 registerBullmqQueueMetricsCollector(async () => {
-  await Promise.all(queueMetricSources.map(async ({ name, queue }) => {
-    try {
-      const counts = await withTimeout(
-        queue.getJobCounts(...queueMetricStates),
-        QUEUE_METRICS_TIMEOUT_MS,
-        `Timed out collecting BullMQ queue metrics for ${name}`,
-      );
-      for (const state of queueMetricStates) {
-        bullmqQueueJobs.set({ queue: name, state }, counts[state] ?? 0);
-      }
-    } catch (error) {
-      logger.warn('Failed to collect BullMQ queue metrics', { queue: name, error });
-      for (const state of queueMetricStates) {
-        bullmqQueueJobs.remove({ queue: name, state });
-      }
+  try {
+    const counts = await withTimeout(
+      runQueue.getJobCounts(...queueMetricStates),
+      QUEUE_METRICS_TIMEOUT_MS,
+      `Timed out collecting BullMQ queue metrics for ${queueName}`,
+    );
+    for (const state of queueMetricStates) {
+      bullmqQueueJobs.set({ queue: queueName, state }, counts[state] ?? 0);
     }
-  }));
+  } catch (error) {
+    logger.warn('Failed to collect BullMQ queue metrics', { queue: queueName, error });
+    for (const state of queueMetricStates) {
+      bullmqQueueJobs.remove({ queue: queueName, state });
+    }
+  }
 });
 
 /* job.waitUntilFinished() attaches a short-lived `closing` listener to the
@@ -116,6 +108,6 @@ registerBullmqQueueMetricsCollector(async () => {
  * above Node's default listener limit are normal for CodeAPI throughput, so
  * keep the leak warning enabled elsewhere while disabling it for these shared
  * BullMQ coordination objects. */
-setMaxListeners(0, pyQueue, otherQueue, pyQueueEvents, otherQueueEvents);
+setMaxListeners(0, runQueue, runQueueEvents);
 
-export { pyQueue, otherQueue, pyQueueEvents, otherQueueEvents, queueNames, connection };
+export { runQueue, runQueueEvents, queueName, connection };

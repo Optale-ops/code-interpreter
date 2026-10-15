@@ -32,23 +32,33 @@ Code API can run two isolated deployments at the same time:
 - `stateful`: the AWS Lambda MicroVM path, with runtime-session affinity.
 
 Set `CODEAPI_EXECUTION_PROFILE` consistently on an API deployment and its
-workers. The default profile keeps the existing `python-queue` and
-`other-queue`; the stateful profile uses `stateful-python-queue` and
-`stateful-other-queue`. This allows both deployments to share Redis without
-cross-consuming jobs.
+workers. Every code run of a profile, whatever its language, goes through one
+BullMQ queue: `code-run-queue` for the default profile and
+`stateful-code-run-queue` for the stateful profile. This allows both
+deployments to share Redis without cross-consuming jobs. The single queue
+replaced the former `python-queue` / `other-queue` pair; upgrade the APIs and
+the workers together across that change, since neither drains the other's
+queues.
+
+Each worker runs `CODE_RUN_CAPACITY` jobs of any language at once (default
+12). Size it to the worker's sandbox: half of the smaller of the runner's slots
+(`SANDBOX_MAX_CONCURRENT_JOBS`) and the runs the VM's memory holds
+(`LAUNCHER_RAM_MIB` / per-run memory limit). The 24-slot, 12 GiB microVM at
+512 MiB per run gives 12. Set the same value on the API, which divides the
+pool (`CODE_RUN_CAPACITY` × `CODE_WORKER_REPLICAS`) between companies and
+refuses to start when the workers run a different value.
 
 An existing Lambda MicroVM deployment upgraded from a pre-profile release may
 leave `CODEAPI_EXECUTION_PROFILE` unset for its first binary rollout. An
 affinity/strict deployment still identifies itself as `stateful`; a stateless
-Lambda deployment identifies itself as `default`. Both temporarily keep the
-legacy queue names so separately deployed APIs and workers remain compatible
-with old binaries.
-Move that deployment to the isolated stateful queues with a blue/green cutover:
+Lambda deployment identifies itself as `default`. Both keep the default
+queue name so separately deployed APIs and workers remain compatible.
+Move that deployment to the isolated stateful queue with a blue/green cutover:
 start replacement API and worker pools with the profile explicitly set to
 `stateful`, verify them together, switch the stateful endpoint, and drain the
-legacy pool. For rollback, switch the endpoint back before stopping the
+default-queue pool. For rollback, switch the endpoint back before stopping the
 replacement pool. Do not run the inferred stateful compatibility mode beside a
-default deployment on the same Redis because both use the legacy queues.
+default deployment on the same Redis because both use the default queue.
 
 Trusted callers should send `X-CodeAPI-Expected-Profile: default|stateful` on
 every Code API request. A request that reaches the wrong deployment fails

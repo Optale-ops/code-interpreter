@@ -9,7 +9,7 @@
  *
  * For horizontal scaling:
  * - Deploy this as a pod WITH a sandbox sidecar
- * - PYTHON_CONCURRENCY controls how many jobs this worker handles
+ * - CODE_RUN_CAPACITY controls how many jobs of any language this worker runs at once
  * - Each worker talks to its own sandbox (localhost or sidecar)
  * - Scale based on queue depth / job wait time
  *
@@ -34,19 +34,19 @@ import { connection } from './queue';
 /**
  * NOTE: This import and the dynamic import in startupWorkerOnly() return the SAME instances.
  *
- * Node.js caches modules - when workers.ts is first imported, pyWorker and otherWorker
- * are instantiated as module-level singletons. All subsequent imports (static or dynamic
+ * Node.js caches modules - when workers.ts is first imported, runWorker is
+ * instantiated as a module-level singleton. All subsequent imports (static or dynamic
  * via `await import()`) return the same cached module with the same worker instances.
  *
  * There is NO race condition because:
  * 1. This file loads → workers.ts is imported → workers instantiate immediately
  * 2. Health server is defined (references same worker instances)
  * 3. startWorkerServer() calls startupWorkerOnly() → dynamic import returns SAME cached module
- * 4. isRunning() check verifies workers are ready → health server starts listening
+ * 4. isRunning() check verifies the worker is ready → health server starts listening
  *
- * The workers are singletons, not created fresh on each import.
+ * The worker is a singleton, not created fresh on each import.
  */
-import { pyWorker, otherWorker } from './workers';
+import { runWorker } from './workers';
 
 const HEALTH_PORT = Number(process.env.WORKER_HEALTH_PORT) || 3113;
 
@@ -98,21 +98,16 @@ const healthServer = http.createServer(async (req, res) => {
       // Check Redis connection
       await connection.ping();
 
-      // Check workers are running
-      const pyRunning = pyWorker.isRunning();
-      const otherRunning = otherWorker.isRunning();
+      // Check the worker is running
+      const running = runWorker.isRunning();
 
-      if (pyRunning && otherRunning) {
+      if (running) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           status: 'healthy',
-          workers: {
-            python: pyRunning,
-            other: otherRunning
-          },
+          worker: running,
           config: {
-            pythonConcurrency: env.PYTHON_CONCURRENCY,
-            otherConcurrency: env.OTHER_CONCURRENCY,
+            codeRunCapacity: env.CODE_RUN_CAPACITY,
             sandboxEndpoint: env.SANDBOX_ENDPOINT
           }
         }));
@@ -120,7 +115,7 @@ const healthServer = http.createServer(async (req, res) => {
         res.writeHead(503, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           status: 'unhealthy',
-          workers: { python: pyRunning, other: otherRunning }
+          worker: running
         }));
       }
     } catch (error) {
@@ -134,10 +129,7 @@ const healthServer = http.createServer(async (req, res) => {
     // Readiness probe - are we ready to accept jobs?
     try {
       await connection.ping();
-      const pyRunning = pyWorker.isRunning();
-      const otherRunning = otherWorker.isRunning();
-
-      if (pyRunning && otherRunning) {
+      if (runWorker.isRunning()) {
         res.writeHead(200);
         res.end('ready');
       } else {

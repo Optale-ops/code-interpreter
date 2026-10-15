@@ -2,11 +2,10 @@ import axios from 'axios';
 import { nanoid } from 'nanoid';
 import { Router } from 'express';
 import type { Response } from 'express';
-import type { Queue, QueueEvents } from 'bullmq';
+import { admitRequestRun, type FairShareAdmission } from '../fair-share';
+import { runQueue, runQueueEvents, connection } from '../queue';
 import type * as t from '../types';
 import { checkServiceStartUp, checkServiceShutDown } from '../lifecycle';
-import { admitRequestRun, type FairShareAdmission, type FairShareQueue } from '../fair-share';
-import { pyQueue, pyQueueEvents, otherQueue, otherQueueEvents, connection } from '../queue';
 import { createProgrammaticPayload, extractPendingFromStdout } from '../preamble';
 import { findBashToolNameCollision } from '../preamble-bash';
 import type { LCTool } from '../preamble';
@@ -348,20 +347,6 @@ async function waitForExecutionState(
 // Replay mode helpers
 // ---------------------------------------------------------------------------
 
-interface QueueBinding {
-  queue: Queue<t.JobData, t.JobResult, Jobs.execute>;
-  events: QueueEvents;
-  language: 'python' | 'bash';
-  pool: FairShareQueue;
-}
-
-function pickQueue(language: 'python' | 'bash'): QueueBinding {
-  if (language === 'bash') {
-    return { queue: otherQueue, events: otherQueueEvents, language: 'bash', pool: 'other' };
-  }
-  return { queue: pyQueue, events: pyQueueEvents, language: 'python', pool: 'python' };
-}
-
 function buildReplayPayload(
   req: t.AuthenticatedRequest,
   state: ExecutionState,
@@ -431,8 +416,8 @@ async function runReplayIteration(
     });
   }
 
-  const { queue, events, language } = pickQueue(state.language ?? 'python');
-  const job = await queue.add(Jobs.execute, {
+  const language = state.language ?? 'python';
+  const job = await runQueue.add(Jobs.execute, {
     code: state.userCode ?? '',
     ...(state.agentRun ? {} : { userId }),
     payload: sandboxSecurity.payload,
@@ -456,7 +441,7 @@ async function runReplayIteration(
   });
   jobsSubmitted.inc({ language });
 
-  return job.waitUntilFinished(events, JOB_COMPLETION_WAIT_TIMEOUT_MS);
+  return job.waitUntilFinished(runQueueEvents, JOB_COMPLETION_WAIT_TIMEOUT_MS);
 }
 
 function isSandboxRunSuccess(result: t.ExecuteResult): boolean {
@@ -574,7 +559,7 @@ async function handleReplayInitial(
 
   const session_id = nanoid();
   const execution_id = nanoid();
-  const admission = await admitRequestRun(req, res, { queue: pickQueue(language).pool, slotId: session_id });
+  const admission = await admitRequestRun(req, res, { slotId: session_id });
   if (!admission) return;
   /* From here on every exit frees the slot, a throw included; runAndRespond
    * frees it as soon as the sandbox job settles (release is idempotent). */
@@ -864,7 +849,6 @@ async function handleReplayContinuation(
     /* A continuation belongs to a run already admitted: it is counted while
      * its sandbox job runs but never refused mid-flow. */
     const admission = await admitRequestRun(req, res, {
-      queue: pickQueue(state.language ?? 'python').pool,
       slotId: nanoid(),
       force: true,
     });
@@ -1482,7 +1466,6 @@ async function handleBlocking(
      * continuations), so its slot is released when the job settles or the
      * client goes away, not when this response closes. */
     const admission = await admitRequestRun(req, res, {
-      queue: 'python',
       slotId: session_id,
       releaseOnClose: false,
       /* Its admission-to-release time includes the tool-call round trips. */
@@ -1496,7 +1479,7 @@ async function handleBlocking(
     res.once('close', () => {
       if (!res.writableFinished) void admission.release();
     });
-    const job = await pyQueue.add(Jobs.execute, {
+    const job = await runQueue.add(Jobs.execute, {
       code,
       ...(identity.agentRun ? {} : { userId }),
       payload: sandboxSecurity.payload,
@@ -1536,7 +1519,7 @@ async function handleBlocking(
       }
     });
 
-    job.waitUntilFinished(pyQueueEvents, JOB_COMPLETION_WAIT_TIMEOUT_MS)
+    job.waitUntilFinished(runQueueEvents, JOB_COMPLETION_WAIT_TIMEOUT_MS)
       .then(async (result) => {
         if (clientDisconnected) return;
         await setExecutionResult(execution_id, result);

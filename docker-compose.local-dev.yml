@@ -114,8 +114,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=localdev
-      - PYTHON_CONCURRENCY=1
-      - OTHER_CONCURRENCY=8
+      - CODE_RUN_CAPACITY=2
       - JOB_WINDOW=1000
       # Must match or exceed programmatic request timeout for tool calls to work
       - JOB_TIMEOUT=300000

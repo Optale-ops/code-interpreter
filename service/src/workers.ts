@@ -14,7 +14,7 @@ import {
     activeJobs,
     workerRunning,
 } from './metrics';
-import { connection, queueNames } from './queue';
+import { connection, queueName } from './queue';
 import { env, jobDeadlineAtMs } from './config';
 import { summarizeSandboxResponse, summarizeText } from './execution-log';
 import {
@@ -301,68 +301,37 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
   }
 }
 
-// Global workers - no INSTANCE_ID prefix
-// This enables horizontal scaling where any worker can process any job from the shared queue
-// Each worker respects its own concurrency limit based on its co-located sandbox capacity
-export const pyWorker = new Worker(queueNames.python, processJob, {
+// One global worker - no INSTANCE_ID prefix
+// This enables horizontal scaling where any worker can process any job from the shared run queue.
+// Each worker runs CODE_RUN_CAPACITY jobs of any language at once, sized to its co-located sandbox.
+export const runWorker = new Worker(queueName, processJob, {
   connection,
-  concurrency: env.PYTHON_CONCURRENCY,
+  concurrency: env.CODE_RUN_CAPACITY,
   limiter: {
-    max: env.PYTHON_CONCURRENCY,
+    max: env.CODE_RUN_CAPACITY,
     duration: env.JOB_WINDOW,
   },
 });
 
-export const otherWorker = new Worker(queueNames.other, processJob, {
-  connection,
-  concurrency: env.OTHER_CONCURRENCY,
-  limiter: {
-    max: env.OTHER_CONCURRENCY,
-    duration: env.JOB_WINDOW,
-  },
-});
+workerRunning.set({ worker_type: 'code' }, 1);
 
-workerRunning.set({ worker_type: 'python' }, 1);
-workerRunning.set({ worker_type: 'other' }, 1);
-
-pyWorker.on('completed', job => {
+runWorker.on('completed', job => {
   if (job.data.isSynthetic !== true) {
-    logger.info(`[${WORKER_ID}] Python job completed ${job.id}`);
+    logger.info(`[${WORKER_ID}] Job completed ${job.id}`);
   }
-  jobsCompleted.inc({ language: 'python' });
+  jobsCompleted.inc({ language: job.data.payload?.language ?? 'unknown' });
 });
 
-otherWorker.on('completed', job => {
-  if (job.data.isSynthetic !== true) {
-    logger.info(`[${WORKER_ID}] Other job completed ${job.id}`);
-  }
-  jobsCompleted.inc({ language: 'other' });
+runWorker.on('failed', (job, err) => {
+  logger.error(`[${WORKER_ID}] Job ${job?.id} failed`, err);
+  jobsFailed.inc({ language: job?.data.payload?.language ?? 'unknown' });
 });
 
-pyWorker.on('failed', (job, err) => {
-  logger.error(`[${WORKER_ID}] Python job ${job?.id} failed`, err);
-  jobsFailed.inc({ language: 'python' });
+runWorker.on('error', err => {
+  logger.error(`[${WORKER_ID}] Worker error`, err);
+  workerRunning.set({ worker_type: 'code' }, 0);
 });
 
-otherWorker.on('failed', (job, err) => {
-  logger.error(`[${WORKER_ID}] Other job ${job?.id} failed`, err);
-  jobsFailed.inc({ language: 'other' });
-});
-
-pyWorker.on('error', err => {
-  logger.error(`[${WORKER_ID}] Python worker error`, err);
-  workerRunning.set({ worker_type: 'python' }, 0);
-});
-
-otherWorker.on('error', err => {
-  logger.error(`[${WORKER_ID}] Other worker error`, err);
-  workerRunning.set({ worker_type: 'other' }, 0);
-});
-
-pyWorker.on('closed', () => {
-  workerRunning.set({ worker_type: 'python' }, 0);
-});
-
-otherWorker.on('closed', () => {
-  workerRunning.set({ worker_type: 'other' }, 0);
+runWorker.on('closed', () => {
+  workerRunning.set({ worker_type: 'code' }, 0);
 });

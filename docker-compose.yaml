@@ -41,9 +41,8 @@ services:
             - REDIS_HOST=redis
             - REDIS_PORT=6379
             - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD is required}
-            # Fair share divides what service-worker drains: keep these equal to its values.
-            - PYTHON_CONCURRENCY=${PYTHON_CONCURRENCY:-1}
-            - OTHER_CONCURRENCY=${OTHER_CONCURRENCY:-8}
+            # Fair share divides the pool service-worker runs: keep this equal to its value.
+            - CODE_RUN_CAPACITY=${CODE_RUN_CAPACITY:-2}
             # Stable across restarts so a restarted API drops the slots it left behind.
             - INSTANCE_ID=api
         depends_on:
@@ -73,8 +72,9 @@ services:
             - REDIS_HOST=redis
             - REDIS_PORT=6379
             - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD is required}
-            - PYTHON_CONCURRENCY=${PYTHON_CONCURRENCY:-1}
-            - OTHER_CONCURRENCY=${OTHER_CONCURRENCY:-8}
+            # Runs at once, any language. Sizing rule: min(SANDBOX_MAX_CONCURRENT_JOBS,
+            # LAUNCHER_RAM_MIB / 512 MiB per run) / 2; 2 for this 2 GiB, 8-slot sandbox.
+            - CODE_RUN_CAPACITY=${CODE_RUN_CAPACITY:-2}
             - WORKER_HEALTH_PORT=3113
         depends_on:
             redis:
