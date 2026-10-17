@@ -23,8 +23,8 @@ API Service:
 Service Worker + Sandbox Runner:
   Service Worker Replicas: {{ $serviceWorkerReplicas }}
   Sandbox Runner Replicas: {{ $sandboxRunnerReplicas }}
-  Python Concurrency: {{ .Values.workerSandbox.config.pythonConcurrency }} per pod
-  Total Direct Python Queue Capacity: {{ mul ($serviceWorkerReplicas | int) .Values.workerSandbox.config.pythonConcurrency }} worker slots
+  Code Run Capacity: {{ .Values.workerSandbox.config.codeRunCapacity }} per worker (any language)
+  Total Run Pool: {{ mul ($serviceWorkerReplicas | int) .Values.workerSandbox.config.codeRunCapacity }} runs
   Total Sandbox Capacity: {{ mul ($sandboxRunnerReplicas | int) (.Values.workerSandbox.sandbox.maxConcurrentJobs | default (mul (.Values.workerSandbox.launcher.vcpus | default 2) 4) | int) }} sandbox jobs
 {{- end }}
 

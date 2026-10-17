@@ -6,11 +6,6 @@ export type ExecutionProfileSource = 'explicit' | 'inferred';
 export const EXPECTED_EXECUTION_PROFILE_HEADER = 'X-CodeAPI-Expected-Profile';
 export const EXECUTION_PROFILE_HEADER = 'X-CodeAPI-Execution-Profile';
 
-export interface ExecutionProfileQueueNames {
-  python: string;
-  other: string;
-}
-
 export function resolveExecutionProfile(
   raw: string | undefined,
   runtimeSessionMode: 'stateless' | 'affinity' | 'strict',
@@ -41,32 +36,28 @@ export function resolveExecutionProfileSource(
   return raw?.trim() ? 'explicit' : 'inferred';
 }
 
-const LEGACY_QUEUE_NAMES: ExecutionProfileQueueNames = {
-  python: 'python-queue',
-  other: 'other-queue',
+const DEFAULT_QUEUE_NAME = 'code-run-queue';
+
+const EXPLICIT_PROFILE_QUEUE_NAMES: Record<ExecutionProfile, string> = {
+  default: DEFAULT_QUEUE_NAME,
+  stateful: 'stateful-code-run-queue',
 };
 
-const EXPLICIT_PROFILE_QUEUE_NAMES: Record<ExecutionProfile, ExecutionProfileQueueNames> = {
-  default: LEGACY_QUEUE_NAMES,
-  stateful: {
-    python: 'stateful-python-queue',
-    other: 'stateful-other-queue',
-  },
-};
-
-export function queueNamesForExecutionProfile(
+/** The one BullMQ queue every code run of the profile goes through, whatever
+ * its language. */
+export function queueNameForExecutionProfile(
   profile: ExecutionProfile,
   source: ExecutionProfileSource,
-): ExecutionProfileQueueNames {
-  /* A pre-profile affinity/strict deployment used the legacy queues. Keep
-   * inferred profiles on those names so API and worker Deployments can roll
+): string {
+  /* A pre-profile affinity/strict deployment used the default queue. Keep
+   * inferred profiles on that name so API and worker Deployments can roll
    * or roll back independently without temporarily losing their consumers.
    * Queue isolation is an explicit cutover: operators bring up the stateful
    * stack with CODEAPI_EXECUTION_PROFILE=stateful on both sides, then switch
    * callers to its endpoint. */
   return source === 'explicit'
     ? EXPLICIT_PROFILE_QUEUE_NAMES[profile]
-    : LEGACY_QUEUE_NAMES;
+    : DEFAULT_QUEUE_NAME;
 }
 
 export type ExecutionProfileExpectation =

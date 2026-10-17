@@ -1,5 +1,7 @@
 // src/middleware/limits.ts
-import { createHash } from 'crypto';
+/* Per-person request limits for the file endpoints (upload, download, list).
+ * Code runs have no request limit: they are admitted by fair share alone
+ * (see ../fair-share.ts). */
 import rateLimitFactory from 'express-rate-limit';
 import RateLimitRedisStore from 'rate-limit-redis';
 import type { RateLimitRequestHandler } from 'express-rate-limit';
@@ -8,8 +10,6 @@ import type { NextFunction, Request, Response } from 'express';
 import type { AuthenticatedRequest } from '../types';
 import { env } from '../config';
 import { getExecutionIdentity } from '../execution-identity';
-import { agentRunLogFields } from '../agent-run';
-import logger from '../logger';
 
 type RedisCommandTarget = {
   call?: (command: string, ...args: (string | number | Buffer)[]) => Promise<unknown>;
@@ -48,8 +48,6 @@ type RequestWithRateLimit = Request & {
 
 type RateLimitResponseOptions = {
   message: string;
-  structuredBody?: boolean;
-  logRejections?: boolean;
 };
 
 const unknownPrincipal = 'unknown';
@@ -57,12 +55,6 @@ const unknownPrincipal = 'unknown';
 const keySegment = (value: string | undefined, fallback = unknownPrincipal): string => {
   const trimmed = value?.trim();
   return trimmed ? trimmed.replace(/:/g, '_') : fallback;
-};
-
-const hashLabel = (value: string | undefined): string | undefined => {
-  const trimmed = value?.trim();
-  if (!trimmed) return undefined;
-  return createHash('sha256').update(trimmed).digest('hex').slice(0, 12);
 };
 
 export function setRateLimitRedisForTests(client?: RedisCommandTarget): void {
@@ -75,19 +67,6 @@ export function retryAfterSeconds(req: Request, windowMs: number): number {
     return Math.max(1, Math.ceil((resetTime.getTime() - Date.now()) / 1000));
   }
   return Math.max(1, Math.ceil(windowMs / 1000));
-}
-
-export function rateLimitResponseBody(message: string, retryAfter: number): {
-  error: 'rate_limited';
-  message: string;
-  retry_after_seconds: number;
-} {
-  const retryAfterLabel = retryAfter === 1 ? '1 second' : `${retryAfter} seconds`;
-  return {
-    error: 'rate_limited',
-    message: `${message} Please retry in ${retryAfterLabel}.`,
-    retry_after_seconds: retryAfter,
-  };
 }
 
 export const keyGenerator = (req: Request): string => {
@@ -127,39 +106,6 @@ const buildRateLimiter = (
       res.setHeader('RateLimit-Limit', (rateLimit?.limit ?? max).toString());
       res.setHeader('RateLimit-Remaining', '0');
       res.setHeader('RateLimit-Reset', retryAfter.toString());
-
-      if (options.logRejections) {
-        const authReq = req as AuthenticatedRequest;
-        const principal = authReq.codeApiPrincipal;
-        const identity = getExecutionIdentity(authReq);
-        const hasIdentity = Boolean(identity.canonicalUserId);
-        logger.warn('CodeAPI rate limit rejected', identity.agentRun
-          ? {
-            limiter: prefix,
-            path: (req.originalUrl || req.path).split('?')[0],
-            retryAfterSeconds: retryAfter,
-            limit: rateLimit?.limit ?? max,
-            windowMs,
-            principalSource: identity.principalSource,
-            ...agentRunLogFields(identity.storageNamespace, identity.agentRun),
-            credentialHash: hashLabel(principal?.credentialId),
-          }
-          : {
-            limiter: prefix,
-            path: req.originalUrl || req.path,
-            retryAfterSeconds: retryAfter,
-            limit: rateLimit?.limit ?? max,
-            windowMs,
-            principalSource: hasIdentity ? identity.principalSource : undefined,
-            tenantHash: hasIdentity ? hashLabel(identity.storageNamespace) : undefined,
-            userHash: hasIdentity ? hashLabel(identity.canonicalUserId) : undefined,
-            credentialHash: hashLabel(principal?.credentialId),
-          });
-      }
-
-      if (options.structuredBody) {
-        return res.status(429).json(rateLimitResponseBody(options.message, retryAfter));
-      }
       const retryAfterLabel = retryAfter === 1 ? '1 second' : `${retryAfter} seconds`;
       res.status(429).json({
         error: `${options.message} Please retry in ${retryAfterLabel}.`,
@@ -187,17 +133,6 @@ export const createRateLimiter = (
   lazyLimiter.getKey = (key: string) => getLimiter().getKey(key);
   return lazyLimiter;
 };
-
-export const executionLimiter = createRateLimiter(
-  'exec',
-  env.EXEC_LIMIT_WINDOW,
-  env.EXEC_MAX_REQUESTS,
-  {
-    message: 'Too many CodeAPI execution requests.',
-    structuredBody: true,
-    logRejections: true,
-  }
-);
 
 export const uploadLimiter = createRateLimiter(
   'upload',

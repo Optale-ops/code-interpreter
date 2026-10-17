@@ -120,6 +120,12 @@ export class FakeRedis {
   /** replay-state registers Lua helpers at import; the harness never runs them. */
   defineCommand(): void {}
 
+  /** Fair-share admit/release: route tests run on an idle engine, so every run
+   *  is admitted under its share (release returns the removed count). */
+  async eval(): Promise<number[]> {
+    return [1, 1, 8, 1, 0];
+  }
+
   /** Enough of the rate-limit-redis protocol for an always-allowing limiter. */
   async call(command: string, ...args: (string | number | Buffer)[]): Promise<unknown> {
     switch (command.toUpperCase()) {
@@ -183,8 +189,8 @@ export async function installRouteHarness(options: {
 }): Promise<RouteHarness> {
   const redis = new FakeRedis();
   const jobs: Array<Record<string, unknown>> = [];
-  const makeQueue = (name: string) => ({
-    name,
+  const runQueue = {
+    name: 'run',
     async add(_jobName: string, data: Record<string, unknown>, opts?: { jobId?: string }) {
       jobs.push(data);
       const payload = data.payload as { session_id?: string } | undefined;
@@ -196,14 +202,12 @@ export async function installRouteHarness(options: {
         },
       };
     },
-  });
+  };
   mock.module(options.queueModulePath, () => ({
     connection: redis,
-    pyQueue: makeQueue('python'),
-    otherQueue: makeQueue('other'),
-    pyQueueEvents: {},
-    otherQueueEvents: {},
-    queueNames: { python: 'python', other: 'other' },
+    runQueue,
+    runQueueEvents: {},
+    queueName: 'run',
   }));
 
   /* Everything this harness changes in process.env / env is restored on close

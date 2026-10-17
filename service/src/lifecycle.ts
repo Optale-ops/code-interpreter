@@ -1,6 +1,6 @@
 import type { Queue } from 'bullmq';
 import type { Express } from 'express';
-import { pyQueue, otherQueue, pyQueueEvents, otherQueueEvents, connection } from './queue';
+import { runQueue, runQueueEvents, connection } from './queue';
 import { validateStartupAuthConfig } from './auth/startup';
 import { env } from './config';
 import {
@@ -12,6 +12,7 @@ import {
 import logger from './logger';
 import { shutdownTelemetry } from './telemetry';
 import { configureExecutionProfileMetrics } from './metrics';
+import { assertWorkerCapacityAgrees, dropInstanceLeftovers, publishWorkerCapacity } from './fair-share';
 
 const { INSTANCE_ID } = env;
 let isShuttingDown = false;
@@ -96,11 +97,12 @@ export async function startupApiOnly(): Promise<void> {
    * the MINIO_* checkpoint creds) into API pods just to boot. The worker and
    * combined startups own that validation. */
   await validateLifecycleAuthConfig();
+  await assertWorkerCapacityAgrees();
+  await dropInstanceLeftovers();
   configureProfileMetrics();
 
   // Set up queue listeners for monitoring (optional, for observability)
-  setupQueueListeners(pyQueue, 'Python');
-  setupQueueListeners(otherQueue, 'Other');
+  setupQueueListeners(runQueue, 'Run');
 
   isStartingUp = false;
   logger.info('API service startup complete');
@@ -117,21 +119,16 @@ export async function startupWorkerOnly(): Promise<void> {
   validateSandboxBackendPolicy();
   configureProfileMetrics();
 
-  // Dynamically import workers to start them
-  const { pyWorker, otherWorker } = await import('./workers');
+  // Dynamically import the worker to start it
+  const { runWorker } = await import('./workers');
 
   registerWorkers();
+  await publishWorkerCapacity();
 
-  // Verify workers are running
+  // Verify the worker is running
   const checkWorkers = (): void => {
-    const isPyWorkerRunning = pyWorker.isRunning();
-    const isOtherWorkerRunning = otherWorker.isRunning();
-
-    if (!isPyWorkerRunning) {
-      throw new Error('Python worker is not running');
-    }
-    if (!isOtherWorkerRunning) {
-      throw new Error('Other worker is not running');
+    if (!runWorker.isRunning()) {
+      throw new Error('Run worker is not running');
     }
     logger.info('Workers health check passed');
   };
@@ -157,36 +154,28 @@ async function gracefulStartup(): Promise<void> {
   try {
     logger.info('Setting up queues...');
 
-    // Import workers (this starts them)
-    const { pyWorker, otherWorker } = await import('./workers');
+    // Import the worker (this starts it)
+    const { runWorker } = await import('./workers');
 
     registerWorkers();
+    await publishWorkerCapacity();
+    await dropInstanceLeftovers();
 
     // Set up queue event listeners
-    setupQueueListeners(pyQueue, 'Python');
-    setupQueueListeners(otherQueue, 'Other');
+    setupQueueListeners(runQueue, 'Run');
 
-    // Verify workers are running
+    // Verify the worker is running
     const checkWorkers = (): void => {
-      const isPyWorkerRunning = pyWorker.isRunning();
-      const isOtherWorkerRunning = otherWorker.isRunning();
-
-      if (!isPyWorkerRunning) {
-        throw new Error('Python worker is not running');
-      }
-      if (!isOtherWorkerRunning) {
-        throw new Error('Other worker is not running');
+      if (!runWorker.isRunning()) {
+        throw new Error('Run worker is not running');
       }
       logger.info('Workers health check passed');
     };
 
     checkWorkers();
 
-    // Resume queues (in case they were paused)
-    await Promise.all([
-      pyQueue.resume(),
-      otherQueue.resume()
-    ]);
+    // Resume the queue (in case it was paused)
+    await runQueue.resume();
 
     isStartingUp = false;
     logger.info('Service startup complete');
@@ -217,43 +206,30 @@ export async function gracefulShutdown(): Promise<void> {
 
   try {
     if (hasWorkers) {
-      // Worker shutdown: close workers gracefully
-      const { pyWorker, otherWorker } = await import('./workers');
+      // Worker shutdown: close the worker gracefully
+      const { runWorker } = await import('./workers');
 
-      // Pause workers and wait for active jobs to complete
-      // Note: We pause workers, NOT queues (queues are shared)
+      // Pause the worker and wait for active jobs to complete
+      // Note: We pause the worker, NOT the queue (the queue is shared)
       // pause(false) = wait for active jobs to finish before resolving (doNotWaitActive=false)
       // pause(true) = return immediately without waiting for active jobs
-      const pauseAndDrain = async (worker: typeof pyWorker, name: string): Promise<void> => {
-        logger.info(`Pausing ${name} worker and waiting for active jobs to drain...`);
-        try {
-          // doNotWaitActive=false means wait for active jobs to complete
-          await worker.pause(false);
-          logger.info(`${name} worker drained successfully`);
-        } catch (error) {
-          logger.warn(`${name} worker pause failed`, { error });
-        }
-      };
+      logger.info('Pausing Run worker and waiting for active jobs to drain...');
+      try {
+        // doNotWaitActive=false means wait for active jobs to complete
+        await runWorker.pause(false);
+        logger.info('Run worker drained successfully');
+      } catch (error) {
+        logger.warn('Run worker pause failed', { error });
+      }
 
-      await Promise.all([
-        pauseAndDrain(pyWorker, 'Python'),
-        pauseAndDrain(otherWorker, 'Other')
-      ]);
-
-      // Close workers
-      await Promise.all([
-        pyWorker.close(),
-        otherWorker.close()
-      ]);
+      await runWorker.close();
       logger.info('Workers closed');
     }
 
     // Close queue connections (both API and Worker need this)
     await Promise.all([
-      pyQueue.close(),
-      otherQueue.close(),
-      pyQueueEvents.close(),
-      otherQueueEvents.close()
+      runQueue.close(),
+      runQueueEvents.close()
     ]);
     logger.info('Queue connections closed');
 
@@ -296,7 +272,7 @@ export async function startServer(app: Express, callback?: () => Promise<void>):
     await gracefulStartup();
     app.listen(env.PORT, () => {
       logger.info(`[${INSTANCE_ID}] Server is running on port ${env.PORT}`);
-      logger.info(`[${INSTANCE_ID}] PYTHON_CONCURRENCY: ${env.PYTHON_CONCURRENCY} | OTHER_CONCURRENCY: ${env.OTHER_CONCURRENCY} | JOB_WINDOW: ${env.JOB_WINDOW}`);
+      logger.info(`[${INSTANCE_ID}] CODE_RUN_CAPACITY: ${env.CODE_RUN_CAPACITY} | JOB_WINDOW: ${env.JOB_WINDOW}`);
     });
 
     if (callback != null) {
@@ -335,7 +311,7 @@ export async function startWorkerServer(callback?: () => Promise<void>): Promise
   try {
     await startupWorkerOnly();
     logger.info(`[${INSTANCE_ID}] Worker Server started`);
-    logger.info(`[${INSTANCE_ID}] PYTHON_CONCURRENCY: ${env.PYTHON_CONCURRENCY} | OTHER_CONCURRENCY: ${env.OTHER_CONCURRENCY} | JOB_WINDOW: ${env.JOB_WINDOW}`);
+    logger.info(`[${INSTANCE_ID}] CODE_RUN_CAPACITY: ${env.CODE_RUN_CAPACITY} | JOB_WINDOW: ${env.JOB_WINDOW}`);
 
     if (callback != null) {
       await callback();

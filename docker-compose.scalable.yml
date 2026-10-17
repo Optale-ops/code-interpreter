@@ -145,7 +145,10 @@ services:
       - REDIS_PASSWORD=localdev
       - PORT=3112
       # Note: No SANDBOX_ENDPOINT - API doesn't talk to sandbox directly
-      # Note: No PYTHON_CONCURRENCY - API doesn't process jobs
+      # Fair share divides the worker pool: CODE_RUN_CAPACITY as on worker-sandbox,
+      # times its replica count.
+      - CODE_RUN_CAPACITY=2
+      - CODE_WORKER_REPLICAS=3
     depends_on:
       redis:
         condition: service_healthy
@@ -164,7 +167,7 @@ services:
   # =============================================================================
   # WORKER-SANDBOX PODS (Worker + MicroVM Sandbox as a unit)
   # Scale based on: Queue depth, job wait time
-  # Each pod runs its own microVM — PYTHON_CONCURRENCY is per-sandbox
+  # Each pod runs its own microVM — CODE_RUN_CAPACITY is per-sandbox
   # =============================================================================
   worker-sandbox:
     build:
@@ -185,8 +188,8 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=localdev
-      - PYTHON_CONCURRENCY=1
-      - OTHER_CONCURRENCY=8
+      # min(SANDBOX_MAX_CONCURRENT_JOBS, LAUNCHER_RAM_MIB / 512 MiB per run) / 2
+      - CODE_RUN_CAPACITY=2
       - JOB_WINDOW=1000
       - JOB_TIMEOUT=300000
       - WORKER_HEALTH_PORT=3113

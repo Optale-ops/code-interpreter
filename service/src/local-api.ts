@@ -13,7 +13,7 @@ import programmaticRouter from './service/programmatic-router';
 import { requestErrorLogger, requestNotFoundLogger } from './middleware/request-error-logger';
 import { executionProfileMiddleware } from './middleware/execution-profile';
 import { localAuth } from './auth/local';
-import { pyQueue, otherQueue, pyQueueEvents, otherQueueEvents, connection } from './queue';
+import { runQueue, runQueueEvents, connection } from './queue';
 import { setStartupComplete } from './lifecycle';
 // Workers are imported to ensure they're started with the process
 import './workers';
@@ -71,11 +71,8 @@ async function localStartup(): Promise<void> {
     // across all workers in a horizontally scaled deployment.
     // Stale jobs are handled by BullMQ's stalledInterval configuration.
 
-    // Resume queues (in case they were paused)
-    await Promise.all([
-      pyQueue.resume(),
-      otherQueue.resume()
-    ]);
+    // Resume the queue (in case it was paused)
+    await runQueue.resume();
 
     setStartupComplete();
     logger.info('Local startup complete');
@@ -91,10 +88,8 @@ async function localShutdown(): Promise<void> {
   logger.info('Shutting down local server...');
   try {
     await Promise.all([
-      pyQueue.close(),
-      otherQueue.close(),
-      pyQueueEvents.close(),
-      otherQueueEvents.close()
+      runQueue.close(),
+      runQueueEvents.close()
     ]);
     try {
       await shutdownTelemetry();
@@ -118,7 +113,7 @@ async function localShutdown(): Promise<void> {
 localStartup().then(() => {
   app.listen(env.PORT, () => {
     logger.info(`[LOCAL] Server running on port ${env.PORT}`);
-    logger.info(`[LOCAL] PYTHON_CONCURRENCY: ${env.PYTHON_CONCURRENCY} | OTHER_CONCURRENCY: ${env.OTHER_CONCURRENCY}`);
+    logger.info(`[LOCAL] CODE_RUN_CAPACITY: ${env.CODE_RUN_CAPACITY}`);
   });
 }).catch((error) => {
   logger.error('Failed to start local server:', error);

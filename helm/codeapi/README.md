@@ -60,11 +60,11 @@ cover all of them).
 
 **Execution profile.** By default this chart leaves
 `CODEAPI_EXECUTION_PROFILE` unset. Its bundled HTTP/stateless configuration is
-inferred as the AWS-free `default` profile and retains the existing
-`python-queue` / `other-queue` BullMQ names. Set `executionProfile: default`
+inferred as the AWS-free `default` profile and uses the `code-run-queue`
+BullMQ queue for every run. Set `executionProfile: default`
 explicitly when deploying it beside a stateful stack. A separate stateful
 Lambda MicroVM deployment must use `executionProfile: stateful`; it then
-consumes `stateful-python-queue` / `stateful-other-queue`, so both stacks may
+consumes `stateful-code-run-queue`, so both stacks may
 safely share Redis without consuming each other's jobs. Do not mix API and
 worker profile values within one deployment.
 

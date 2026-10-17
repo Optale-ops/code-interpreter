@@ -178,10 +178,8 @@ spec:
               value: {{ .Values.executionManifest.ttlSeconds | quote }}
             - name: EGRESS_GRANT_TTL_SECONDS
               value: {{ .Values.egressGrant.ttlSeconds | quote }}
-            - name: PYTHON_CONCURRENCY
-              value: {{ .Values.workerSandbox.config.pythonConcurrency | quote }}
-            - name: OTHER_CONCURRENCY
-              value: {{ .Values.workerSandbox.config.otherConcurrency | quote }}
+            - name: CODE_RUN_CAPACITY
+              value: {{ .Values.workerSandbox.config.codeRunCapacity | quote }}
             - name: JOB_WINDOW
               value: {{ .Values.workerSandbox.config.jobWindow | quote }}
             - name: JOB_TIMEOUT

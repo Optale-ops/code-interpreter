@@ -2,11 +2,10 @@ import axios from 'axios';
 import { nanoid } from 'nanoid';
 import { Router } from 'express';
 import type { Response } from 'express';
-import type { Queue, QueueEvents } from 'bullmq';
+import { admitRequestRun, type FairShareAdmission } from '../fair-share';
+import { runQueue, runQueueEvents, connection } from '../queue';
 import type * as t from '../types';
 import { checkServiceStartUp, checkServiceShutDown } from '../lifecycle';
-import { executionLimiter } from '../middleware/limits';
-import { pyQueue, pyQueueEvents, otherQueue, otherQueueEvents, connection } from '../queue';
 import { createProgrammaticPayload, extractPendingFromStdout } from '../preamble';
 import { findBashToolNameCollision } from '../preamble-bash';
 import type { LCTool } from '../preamble';
@@ -348,19 +347,6 @@ async function waitForExecutionState(
 // Replay mode helpers
 // ---------------------------------------------------------------------------
 
-interface QueueBinding {
-  queue: Queue<t.JobData, t.JobResult, Jobs.execute>;
-  events: QueueEvents;
-  language: 'python' | 'bash';
-}
-
-function pickQueue(language: 'python' | 'bash'): QueueBinding {
-  if (language === 'bash') {
-    return { queue: otherQueue, events: otherQueueEvents, language: 'bash' };
-  }
-  return { queue: pyQueue, events: pyQueueEvents, language: 'python' };
-}
-
 function buildReplayPayload(
   req: t.AuthenticatedRequest,
   state: ExecutionState,
@@ -398,6 +384,7 @@ async function runReplayIteration(
   state: ExecutionState,
   apiKeyId: string,
   userId: string | undefined,
+  priority: number,
 ): Promise<t.ExecuteResult> {
   const history = await loadToolHistory(state.execution_id);
   const rawPayload = buildReplayPayload(req, state, history);
@@ -429,8 +416,8 @@ async function runReplayIteration(
     });
   }
 
-  const { queue, events, language } = pickQueue(state.language ?? 'python');
-  const job = await queue.add(Jobs.execute, {
+  const language = state.language ?? 'python';
+  const job = await runQueue.add(Jobs.execute, {
     code: state.userCode ?? '',
     ...(state.agentRun ? {} : { userId }),
     payload: sandboxSecurity.payload,
@@ -450,10 +437,11 @@ async function runReplayIteration(
     removeOnComplete: { age: 60, count: 1 },
     removeOnFail: { age: 180, count: 1 },
     attempts: 1,
+    priority,
   });
   jobsSubmitted.inc({ language });
 
-  return job.waitUntilFinished(events, JOB_COMPLETION_WAIT_TIMEOUT_MS);
+  return job.waitUntilFinished(runQueueEvents, JOB_COMPLETION_WAIT_TIMEOUT_MS);
 }
 
 function isSandboxRunSuccess(result: t.ExecuteResult): boolean {
@@ -571,84 +559,92 @@ async function handleReplayInitial(
 
   const session_id = nanoid();
   const execution_id = nanoid();
-  const authContext = req.codeApiAuthContext;
-  const identity = getExecutionIdentity(req, userId);
-  const isPyPlot = language === 'python' && (
-    code.includes('import matplotlib') || code.includes('import seaborn')
-  );
-
-  await connection.set(`session:${session_id}`, sessionKey, 'EX', env.SESSION_CACHE_TTL);
-
-  const state = buildReplayExecutionState({
-    executionId: execution_id,
-    sessionId: session_id,
-    sessionKey,
-    userId,
-    apiKeyId,
-    authContext,
-    identity,
-    code,
-    tools: tools as LCTool[],
-    files: authorizedFiles.length > 0 ? authorizedFiles : undefined,
-    isPyPlot,
-    timeout,
-    language,
-  });
-  /** Replay mode persists the full request (`userCode` + `tools` + `files`)
-   * inside `ExecutionState` so continuations can re-enqueue without the
-   * client re-sending. A pathologically large but otherwise valid request
-   * can serialize past `MAX_EXECUTION_STATE_BYTES`; surface that as a
-   * deterministic 413 instead of letting the throw fall through to the
-   * top-level handler and become an opaque 500. */
+  const admission = await admitRequestRun(req, res, { slotId: session_id });
+  if (!admission) return;
+  /* From here on every exit frees the slot, a throw included; runAndRespond
+   * frees it as soon as the sandbox job settles (release is idempotent). */
   try {
-    await setExecutionState(state);
-  } catch (err) {
-    if (err instanceof ExecutionStateTooLargeError) {
-      logger.warn('Rejecting replay request: ExecutionState exceeds Redis cap', {
-        execution_id,
-        ...(identity.agentRun ? agentRunLogFields(identity.storageNamespace, identity.agentRun) : { userId }),
-        apiKeyId,
-        bytes: err.bytes,
-        cap: err.cap,
-      });
-      await connection.del(`session:${session_id}`).catch(() => {});
-      ptcReplayStateOversize.inc();
-      res.status(413).json({
-        error: `Request too large: serialized execution state is ${err.bytes} bytes (max ${err.cap}). Reduce the size of "code", "tools", or "files".`,
-      });
-      return;
-    }
-    throw err;
-  }
+    const authContext = req.codeApiAuthContext;
+    const identity = getExecutionIdentity(req, userId);
+    const isPyPlot = language === 'python' && (
+      code.includes('import matplotlib') || code.includes('import seaborn')
+    );
 
-  logger.info('Programmatic execution request received (replay)', identity.agentRun
-    ? {
-      ...agentRunLogFields(identity.storageNamespace, identity.agentRun),
-      apiKeyId,
-      session_id,
-      execution_id,
-      language,
-      toolCount: tools.length,
-      codeLength: code.length,
-      files: summarizeRequestedFiles(authorizedFiles),
-      sessionKey: sessionKeyForLog(sessionKey),
-      timeout,
-    }
-    : {
+    await connection.set(`session:${session_id}`, sessionKey, 'EX', env.SESSION_CACHE_TTL);
+
+    const state = buildReplayExecutionState({
+      executionId: execution_id,
+      sessionId: session_id,
+      sessionKey,
       userId,
       apiKeyId,
-      user: user_id,
-      session_id,
-      execution_id,
-      language,
-      toolCount: tools.length,
-      codeLength: code.length,
-      files: summarizeRequestedFiles(authorizedFiles),
-      sessionKey,
+      authContext,
+      identity,
+      code,
+      tools: tools as LCTool[],
+      files: authorizedFiles.length > 0 ? authorizedFiles : undefined,
+      isPyPlot,
       timeout,
+      language,
     });
+    /** Replay mode persists the full request (`userCode` + `tools` + `files`)
+     * inside `ExecutionState` so continuations can re-enqueue without the
+     * client re-sending. A pathologically large but otherwise valid request
+     * can serialize past `MAX_EXECUTION_STATE_BYTES`; surface that as a
+     * deterministic 413 instead of letting the throw fall through to the
+     * top-level handler and become an opaque 500. */
+    try {
+      await setExecutionState(state);
+    } catch (err) {
+      if (err instanceof ExecutionStateTooLargeError) {
+        logger.warn('Rejecting replay request: ExecutionState exceeds Redis cap', {
+          execution_id,
+          ...(identity.agentRun ? agentRunLogFields(identity.storageNamespace, identity.agentRun) : { userId }),
+          apiKeyId,
+          bytes: err.bytes,
+          cap: err.cap,
+        });
+        await connection.del(`session:${session_id}`).catch(() => {});
+        ptcReplayStateOversize.inc();
+        res.status(413).json({
+          error: `Request too large: serialized execution state is ${err.bytes} bytes (max ${err.cap}). Reduce the size of "code", "tools", or "files".`,
+        });
+        return;
+      }
+      throw err;
+    }
 
-  await runAndRespond(req, res, state, apiKeyId, userId);
+    logger.info('Programmatic execution request received (replay)', identity.agentRun
+      ? {
+        ...agentRunLogFields(identity.storageNamespace, identity.agentRun),
+        apiKeyId,
+        session_id,
+        execution_id,
+        language,
+        toolCount: tools.length,
+        codeLength: code.length,
+        files: summarizeRequestedFiles(authorizedFiles),
+        sessionKey: sessionKeyForLog(sessionKey),
+        timeout,
+      }
+      : {
+        userId,
+        apiKeyId,
+        user: user_id,
+        session_id,
+        execution_id,
+        language,
+        toolCount: tools.length,
+        codeLength: code.length,
+        files: summarizeRequestedFiles(authorizedFiles),
+        sessionKey,
+        timeout,
+      });
+
+    await runAndRespond(req, res, state, apiKeyId, userId, admission);
+  } finally {
+    void admission.release();
+  }
 }
 
 async function handleReplayContinuation(
@@ -850,7 +846,14 @@ async function handleReplayContinuation(
       });
     }
 
-    await runAndRespond(req, res, state, apiKeyId, userId);
+    /* A continuation belongs to a run already admitted: it is counted while
+     * its sandbox job runs but never refused mid-flow. */
+    const admission = await admitRequestRun(req, res, {
+      slotId: nanoid(),
+      force: true,
+    });
+    if (!admission) return;
+    await runAndRespond(req, res, state, apiKeyId, userId, admission);
   } finally {
     await releaseExecutionLock(decoded.execution_id, lockToken);
   }
@@ -862,6 +865,7 @@ async function runAndRespond(
   state: ExecutionState,
   apiKeyId: string,
   userId: string | undefined,
+  admission: FairShareAdmission,
 ): Promise<void> {
   /** Read disconnect state through `isDisconnected()` rather than a
    * direct boolean. The `req.on('close', ...)` handler flips the flag
@@ -877,7 +881,7 @@ async function runAndRespond(
 
   let result: t.ExecuteResult;
   try {
-    result = await runReplayIteration(req, state, apiKeyId, userId);
+    result = await runReplayIteration(req, state, apiKeyId, userId, admission.priority);
   } catch (err) {
     logger.error('Replay iteration failed', { execution_id: state.execution_id, err });
     await cleanupExecution(state.execution_id, 'replay');
@@ -890,6 +894,9 @@ async function runAndRespond(
       });
     }
     return;
+  } finally {
+    /* The sandbox job is over: free its slot whatever the client did. */
+    void admission.release();
   }
 
   if (isDisconnected()) {
@@ -1054,7 +1061,7 @@ async function runAndRespond(
 // Request entrypoint
 // ---------------------------------------------------------------------------
 
-router.post('/exec/programmatic', executionLimiter, async (req: t.AuthenticatedRequest, res) => {
+router.post('/exec/programmatic', async (req: t.AuthenticatedRequest, res) => {
   const principal = getPrincipalOrReject(req, res);
   if (!principal) return;
   const apiKeyId = getCredentialId(req);
@@ -1362,6 +1369,8 @@ async function handleBlocking(
     };
   await setExecutionState(executionState);
 
+  /* Held from admission until the job's settlement takes over the release. */
+  let admissionBeforeJob: FairShareAdmission | undefined;
   try {
     logger.info('Programmatic execution request received', identity.agentRun
       ? {
@@ -1453,7 +1462,24 @@ async function handleBlocking(
       payload: rawPayload,
     });
 
-    const job = await pyQueue.add(Jobs.execute, {
+    /* The blocking job outlives this response (it waits on tool calls across
+     * continuations), so its slot is released when the job settles or the
+     * client goes away, not when this response closes. */
+    const admission = await admitRequestRun(req, res, {
+      slotId: session_id,
+      releaseOnClose: false,
+      /* Its admission-to-release time includes the tool-call round trips. */
+      sampleDuration: false,
+    });
+    if (!admission) {
+      await cleanupExecution(execution_id, 'blocking');
+      return;
+    }
+    admissionBeforeJob = admission;
+    res.once('close', () => {
+      if (!res.writableFinished) void admission.release();
+    });
+    const job = await runQueue.add(Jobs.execute, {
       code,
       ...(identity.agentRun ? {} : { userId }),
       payload: sandboxSecurity.payload,
@@ -1474,6 +1500,7 @@ async function handleBlocking(
       removeOnFail: { age: 180, count: 1 },
       attempts: 1,
       jobId: session_id,
+      priority: admission.priority,
     });
     jobsSubmitted.inc({ language: 'python' });
 
@@ -1492,7 +1519,7 @@ async function handleBlocking(
       }
     });
 
-    job.waitUntilFinished(pyQueueEvents, JOB_COMPLETION_WAIT_TIMEOUT_MS)
+    job.waitUntilFinished(runQueueEvents, JOB_COMPLETION_WAIT_TIMEOUT_MS)
       .then(async (result) => {
         if (clientDisconnected) return;
         await setExecutionResult(execution_id, result);
@@ -1500,7 +1527,9 @@ async function handleBlocking(
       .catch(async (error) => {
         if (clientDisconnected) return;
         await setExecutionError(execution_id, error);
-      });
+      })
+      .finally(() => admission.release());
+    admissionBeforeJob = undefined;
 
     const state = await waitForExecutionState(execution_id, Math.min(timeout, MAX_POLL_TIME));
 
@@ -1532,6 +1561,7 @@ async function handleBlocking(
     });
   } catch (error) {
     logger.error(`[${INSTANCE_ID}] Session ID: ${session_id} | Execution ID: ${execution_id} | Error:`, error);
+    void admissionBeforeJob?.release();
     await cleanupExecution(execution_id, 'blocking');
     return res.status(500).json({ error: 'Internal server error' });
   }

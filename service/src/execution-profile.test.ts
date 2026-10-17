@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   checkExecutionProfileExpectation,
-  queueNamesForExecutionProfile,
+  queueNameForExecutionProfile,
   resolveExecutionProfile,
   resolveExecutionProfileSource,
   validateQueuedExecutionProfile,
@@ -35,25 +35,16 @@ describe('execution profile resolution', () => {
 });
 
 describe('execution profile queue isolation', () => {
-  test('keeps the legacy queue names for the default profile', () => {
-    expect(queueNamesForExecutionProfile('default', 'explicit')).toEqual({
-      python: 'python-queue',
-      other: 'other-queue',
-    });
+  test('runs the default profile on the default run queue', () => {
+    expect(queueNameForExecutionProfile('default', 'explicit')).toBe('code-run-queue');
   });
 
-  test('keeps inferred stateful deployments on legacy queues during binary rollout', () => {
-    expect(queueNamesForExecutionProfile('stateful', 'inferred')).toEqual({
-      python: 'python-queue',
-      other: 'other-queue',
-    });
+  test('keeps inferred stateful deployments on the default run queue during binary rollout', () => {
+    expect(queueNameForExecutionProfile('stateful', 'inferred')).toBe('code-run-queue');
   });
 
-  test('uses separate queues only for an explicit stateful deployment', () => {
-    expect(queueNamesForExecutionProfile('stateful', 'explicit')).toEqual({
-      python: 'stateful-python-queue',
-      other: 'stateful-other-queue',
-    });
+  test('uses a separate run queue only for an explicit stateful deployment', () => {
+    expect(queueNameForExecutionProfile('stateful', 'explicit')).toBe('stateful-code-run-queue');
   });
 });
 

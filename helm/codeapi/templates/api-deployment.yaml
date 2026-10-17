@@ -69,6 +69,16 @@ spec:
                   key: codeapi-internal-service-token
             - name: EGRESS_GRANT_TTL_SECONDS
               value: {{ .Values.egressGrant.ttlSeconds | quote }}
+            # Fair share divides the pool the service workers run; the API
+            # refuses to start when CODE_RUN_CAPACITY differs from the workers'.
+            {{- $serviceWorkerReplicas := .Values.workerSandbox.replicaCount }}
+            {{- if ne .Values.workerSandbox.serviceWorker.replicaCount nil }}
+            {{- $serviceWorkerReplicas = .Values.workerSandbox.serviceWorker.replicaCount }}
+            {{- end }}
+            - name: CODE_RUN_CAPACITY
+              value: {{ .Values.workerSandbox.config.codeRunCapacity | quote }}
+            - name: CODE_WORKER_REPLICAS
+              value: {{ $serviceWorkerReplicas | quote }}
             # Server config
             - name: SERVICE_PORT
               value: {{ .Values.api.service.port | quote }}

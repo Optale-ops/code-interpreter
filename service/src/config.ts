@@ -290,16 +290,21 @@ export const env = {
   EGRESS_LEDGER_TTL_GRACE_SECONDS: Number(process.env.CODEAPI_EGRESS_LEDGER_TTL_GRACE_SECONDS) || 300,
   EGRESS_GRANT_SECRET: process.env.CODEAPI_EGRESS_GRANT_SECRET ?? '',
   EGRESS_GRANT_TTL_SECONDS: resolveEgressGrantTtlSeconds(process.env.EGRESS_GRANT_TTL_SECONDS, defaultJobTimeoutMs),
-  PYTHON_CONCURRENCY: Number(process.env.PYTHON_CONCURRENCY) || 1,
-  OTHER_CONCURRENCY: Number(process.env.OTHER_CONCURRENCY) || 8,
+  /** Code runs one service worker processes at once, of any language: its
+   * share of the run pool, sized to its sandbox. Sizing rule: half of the
+   * smaller of the runner's slots (SANDBOX_MAX_CONCURRENT_JOBS) and the runs
+   * the VM's memory holds (LAUNCHER_RAM_MIB / per-run memory limit); the other
+   * half is headroom for the guest kernel and the runner. The default 12 fits
+   * the 24-slot, 12 GiB microVM at 512 MiB per run. */
+  CODE_RUN_CAPACITY: Math.max(1, Math.floor(Number(process.env.CODE_RUN_CAPACITY) || 12)),
   JOB_WINDOW: Number(process.env.JOB_WINDOW) || 1000,
   MAX_UPLOAD_CHECKS: Number(process.env.MAX_UPLOAD_CHECKS) || 14,
   MAX_UPLOAD_WAIT: Number(process.env.MAX_UPLOAD_WAIT) || 500,
   MAX_FILE_SIZE: defaultMaxFileSize,
   JOB_TIMEOUT: defaultJobTimeoutMs, // 5 minutes (increased for complex matplotlib rendering)
-  // Execution Rate Limits
-  EXEC_LIMIT_WINDOW: Number(process.env.RATE_LIMIT_WINDOW) || 30 * 1000, // 30 seconds
-  EXEC_MAX_REQUESTS: Number(process.env.MAX_REQUESTS) || 20, // execution requests per window
+  /** Service workers draining the run queue. Fair share divides the pool,
+   * CODE_RUN_CAPACITY times this count, between companies. */
+  CODE_WORKER_REPLICAS: Math.max(1, Math.floor(Number(process.env.CODE_WORKER_REPLICAS) || 1)),
   // Upload Rate Limits
   UPLOAD_LIMIT_WINDOW: Number(process.env.UPLOAD_LIMIT_WINDOW) || 5 * 60 * 1000, // 5 minutes
   UPLOAD_MAX_REQUESTS: Number(process.env.UPLOAD_MAX_REQUESTS) || 30, // 30 uploads per 5 minutes

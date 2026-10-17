@@ -8,10 +8,10 @@ import { pipeline } from 'stream/promises';
 import type * as t from '../types';
 import { checkServiceStartUp, checkServiceShutDown } from '../lifecycle';
 import { sessionAuth } from '../middleware/auth';
-import { executionLimiter, uploadLimiter, downloadLimiter, fetchLimiter } from '../middleware/limits';
+import { uploadLimiter, downloadLimiter, fetchLimiter } from '../middleware/limits';
 import { internalServiceHeaders } from '../internal-service-auth';
 import { resolveSessionKey, resolveUploadSessionKey, resolveOutputBucketSessionKey, SessionKeyResolutionError, parseUploadSessionKeyInput, type SessionKeyInput } from '../session-key';
-import { pyQueue, otherQueue, pyQueueEvents, otherQueueEvents, queueNames, connection } from '../queue';
+import { runQueue, runQueueEvents, queueName, connection } from '../queue';
 import { sleep, getAxiosErrorDetails, publicExecutionFailure } from '../utils';
 import { env, jobCompletionWaitTimeoutMs, planLimits, resolveLanguage } from '../config';
 import { createPayload } from '../payload';
@@ -36,6 +36,7 @@ import { FileRefAuthorizationError, authorizeRequestedFiles } from './file-autho
 import { createUploadSessionRegistrar } from './upload-session';
 import { createForwardQueue, forwardUploadToFileServer } from './upload-forward';
 import { prepareSandboxJobSecurity } from '../sandbox-egress';
+import { admitRequestRun, type FairShareAdmission } from '../fair-share';
 import logger from '../logger';
 
 const { INSTANCE_ID } = env;
@@ -169,7 +170,7 @@ function sendSessionKeyResolutionError(
 
 const router = Router();
 
-router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) => {
+router.post('/exec', async (req: t.AuthenticatedRequest, res) => {
   const principal = getPrincipalOrReject(req, res);
   if (!principal) return;
   const apiKeyId = getCredentialId(req);
@@ -255,9 +256,14 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
    * sandbox invocation." */
   const session_id = nanoid();
   const execution_id = nanoid();
-  await connection.set(`session:${session_id}`, sessionKey, 'EX', env.SESSION_CACHE_TTL);
+  let admission: FairShareAdmission | null = null;
 
   try {
+    admission = await admitRequestRun(req, res, { slotId: session_id });
+    if (!admission) return;
+    const { priority } = admission;
+    await connection.set(`session:${session_id}`, sessionKey, 'EX', env.SESSION_CACHE_TTL);
+
     if (!isSyntheticRequest) {
       logger.info('Request received', agentRun
         ? {
@@ -294,10 +300,6 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
       payload: rawPayload,
     });
 
-    const queue = language === Languages.py ? pyQueue : otherQueue;
-    const queueEvents = language === Languages.py ? pyQueueEvents : otherQueueEvents;
-    const queueName = language === Languages.py ? queueNames.python : queueNames.other;
-
     const job = await withSpan('codeapi.job.enqueue', {
       'messaging.system': 'bullmq',
       'messaging.destination.name': queueName,
@@ -305,7 +307,7 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
       'codeapi.execution_profile': env.EXECUTION_PROFILE,
     }, () => {
       const traceCarrier = captureTraceCarrier();
-      return queue.add(Jobs.execute, {
+      return runQueue.add(Jobs.execute, {
         code,
         ...(agentRun ? {} : { userId }),
         payload: sandboxSecurity.payload,
@@ -333,6 +335,7 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
           count: 1,
         },
         attempts: 1,
+        priority,
         jobId: session_id,
       });
     }, 'PRODUCER');
@@ -352,7 +355,7 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
       'messaging.destination.name': queueName,
       'codeapi.language': language,
       'codeapi.execution_profile': env.EXECUTION_PROFILE,
-    }, () => job.waitUntilFinished(queueEvents, JOB_COMPLETION_WAIT_TIMEOUT_MS), 'CONSUMER');
+    }, () => job.waitUntilFinished(runQueueEvents, JOB_COMPLETION_WAIT_TIMEOUT_MS), 'CONSUMER');
 
     if (!isSyntheticRequest) {
       logger.info('Execution completed', { session_id, user_id });
@@ -365,6 +368,10 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
       return res.status(publicFailure.status).json(publicFailure.body);
     }
     return res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    /* The run is over (or never started): free its slot even if the client
+     * already left and no response event fires. */
+    void admission?.release();
   }
 });
 

@@ -9,7 +9,7 @@ import {
 
 afterEach(() => {
   registerBullmqQueueMetricsCollector(undefined);
-  bullmqQueueJobs.set({ queue: 'other-queue', state: 'waiting' }, 0);
+  bullmqQueueJobs.set({ queue: 'code-run-queue', state: 'waiting' }, 0);
   executionProfileInfo.reset();
 });
 
@@ -32,11 +32,11 @@ test('metricsResponse collects BullMQ queue gauges on scrape', async () => {
   let calls = 0;
   registerBullmqQueueMetricsCollector(() => {
     calls += 1;
-    bullmqQueueJobs.set({ queue: 'other-queue', state: 'waiting' }, 42);
+    bullmqQueueJobs.set({ queue: 'code-run-queue', state: 'waiting' }, 42);
   });
 
   const { body } = await metricsResponse();
 
   expect(calls).toBe(1);
-  expect(body).toContain('codeapi_bullmq_queue_jobs{queue="other-queue",state="waiting"} 42');
+  expect(body).toContain('codeapi_bullmq_queue_jobs{queue="code-run-queue",state="waiting"} 42');
 });

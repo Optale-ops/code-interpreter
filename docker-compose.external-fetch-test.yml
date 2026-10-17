@@ -206,8 +206,7 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: '6379'
       REDIS_PASSWORD: localdev
-      PYTHON_CONCURRENCY: '1'
-      OTHER_CONCURRENCY: '4'
+      CODE_RUN_CAPACITY: '2'
       WORKER_HEALTH_PORT: '3113'
     depends_on:
       redis:
@@ -238,6 +237,7 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: '6379'
       REDIS_PASSWORD: localdev
+      CODE_RUN_CAPACITY: '2'
       PTC_MODE: replay
     volumes:
       - ./tests/external-fetch-policy.json:/run/codeapi/external-fetch-policy.json:ro

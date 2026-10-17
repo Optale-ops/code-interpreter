@@ -57,6 +57,8 @@ interface LibreChatJwtClaims {
   run_id?: unknown;
   /** agent_run deletion-only tokens: the one object they may delete. */
   file_delete?: unknown;
+  /** Fair-share weight: the tenant's code-capable Agents (at least 1). */
+  code_agents?: unknown;
 }
 
 interface PublicKeyEntry {
@@ -609,6 +611,21 @@ function assertTokenWindow(
   }
 }
 
+/** Upper bound on a fair-share weight; a larger value is a malformed claim. */
+const MAX_CODE_AGENTS = 10_000;
+
+/** `code_agents`: optional whole number in [1, MAX_CODE_AGENTS]; anything else is refused. */
+function parseCodeAgentsClaim(value: unknown): { codeAgents?: number } {
+  if (value === undefined) return {};
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > MAX_CODE_AGENTS) {
+    throw new CodeApiJwtAuthError(
+      'malformed_claims',
+      `code_agents must be a whole number from 1 to ${MAX_CODE_AGENTS}`,
+    );
+  }
+  return { codeAgents: value };
+}
+
 function validateClaims(
     claims: LibreChatJwtClaims,
     config: VerificationConfig,
@@ -630,6 +647,7 @@ function validateClaims(
         'auth_context_hash',
     );
     const networkPolicyBinding = validatedNetworkPolicyBinding(claims);
+  const codeAgents = parseCodeAgentsClaim(claims.code_agents);
 
   assertTokenWindow(claims, config, { issuer, jti, iat, nbf, exp });
   /* A deletion-only claim belongs to agent_run tokens alone (C3). A personal
@@ -662,6 +680,7 @@ function validateClaims(
     authContextHash,
     planId,
         ...networkPolicyBinding,
+    ...codeAgents,
   };
 }
 
@@ -719,6 +738,7 @@ function validateAgentRunClaims(
   }
   const authContextHash = assertString(claims.auth_context_hash, 'auth_context_hash');
   const networkPolicyBinding = validatedNetworkPolicyBinding(claims);
+  const codeAgents = parseCodeAgentsClaim(claims.code_agents);
   const fileDelete = parseFileDeleteClaim(claims.file_delete);
 
   assertTokenWindow(claims, config, { issuer, jti, iat, nbf, exp });
@@ -734,6 +754,7 @@ function validateAgentRunClaims(
       ...(fileDelete ? { fileDelete } : {}),
     },
     ...networkPolicyBinding,
+    ...codeAgents,
   };
 }
 

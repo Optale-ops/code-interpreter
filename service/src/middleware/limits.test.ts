@@ -10,7 +10,6 @@ import type { AuthenticatedRequest } from '../types';
 import {
   createRateLimiter,
   keyGenerator,
-  rateLimitResponseBody,
   setRateLimitRedisForTests,
 } from './limits';
 
@@ -99,9 +98,8 @@ async function startRateLimitedApp(max: number, windowMs: number): Promise<strin
     });
     next();
   });
-  app.post('/v1/exec', createRateLimiter('test-exec', windowMs, max, {
-    message: 'Too many CodeAPI execution requests.',
-    structuredBody: true,
+  app.post('/v1/upload', createRateLimiter('test-upload', windowMs, max, {
+    message: 'Too many file uploads.',
   }), (_req, res) => res.status(200).json({ ok: true }));
 
   const server = app.listen(0, '127.0.0.1');
@@ -111,8 +109,8 @@ async function startRateLimitedApp(max: number, windowMs: number): Promise<strin
   return `http://127.0.0.1:${address.port}`;
 }
 
-function postExec(url: string, headers: Record<string, string> = {}): Promise<Response> {
-  return fetch(`${url}/v1/exec`, {
+function postLimited(url: string, headers: Record<string, string> = {}): Promise<Response> {
+  return fetch(`${url}/v1/upload`, {
     method: 'POST',
     headers,
   });
@@ -165,39 +163,38 @@ describe('keyGenerator', () => {
   });
 });
 
-describe('execution rate limiting', () => {
+describe('per-person rate limiting', () => {
   test('allows requests up to the configured limit and rejects the next request with retry guidance', async () => {
     const url = await startRateLimitedApp(2, 30_000);
 
-    expect((await postExec(url)).status).toBe(200);
-    expect((await postExec(url)).status).toBe(200);
-    const rejected = await postExec(url);
-    const body = await rejected.json() as ReturnType<typeof rateLimitResponseBody>;
+    expect((await postLimited(url)).status).toBe(200);
+    expect((await postLimited(url)).status).toBe(200);
+    const rejected = await postLimited(url);
+    const body = await rejected.json() as { error: string };
 
     expect(rejected.status).toBe(429);
     expect(rejected.headers.get('ratelimit-limit')).toBe('2');
     expect(rejected.headers.get('ratelimit-remaining')).toBe('0');
     expect(Number(rejected.headers.get('retry-after'))).toBeGreaterThan(0);
-    expect(body.error).toBe('rate_limited');
-    expect(body.retry_after_seconds).toBeGreaterThan(0);
+    expect(body.error).toMatch(/^Too many file uploads\. Please retry in \d+ seconds?\.$/);
   });
 
   test('does not count one user against another user window', async () => {
     const url = await startRateLimitedApp(1, 30_000);
 
-    expect((await postExec(url, { 'x-user-id': 'user-a' })).status).toBe(200);
-    expect((await postExec(url, { 'x-user-id': 'user-a' })).status).toBe(429);
-    expect((await postExec(url, { 'x-user-id': 'user-b' })).status).toBe(200);
+    expect((await postLimited(url, { 'x-user-id': 'user-a' })).status).toBe(200);
+    expect((await postLimited(url, { 'x-user-id': 'user-a' })).status).toBe(429);
+    expect((await postLimited(url, { 'x-user-id': 'user-b' })).status).toBe(200);
   });
 
   test('counts the same user across auth sources in one window', async () => {
     const url = await startRateLimitedApp(1, 30_000);
 
-    expect((await postExec(url, {
+    expect((await postLimited(url, {
       'x-user-id': 'user-a',
       'x-principal-source': 'librechat_jwt',
     })).status).toBe(200);
-    expect((await postExec(url, {
+    expect((await postLimited(url, {
       'x-user-id': 'user-a',
       'x-principal-source': 'openid_reuse',
       'x-credential-id': 'key-1',
@@ -207,11 +204,11 @@ describe('execution rate limiting', () => {
   test('keeps concurrent rate-limit decisions isolated per user', async () => {
     const url = await startRateLimitedApp(1, 30_000);
 
-    expect((await postExec(url, { 'x-user-id': 'user-a' })).status).toBe(200);
+    expect((await postLimited(url, { 'x-user-id': 'user-a' })).status).toBe(200);
 
     const [limitedUser, otherUser] = await Promise.all([
-      postExec(url, { 'x-user-id': 'user-a' }),
-      postExec(url, { 'x-user-id': 'user-b' }),
+      postLimited(url, { 'x-user-id': 'user-a' }),
+      postLimited(url, { 'x-user-id': 'user-b' }),
     ]);
 
     expect(limitedUser.status).toBe(429);
@@ -221,9 +218,9 @@ describe('execution rate limiting', () => {
   test('allows the same user again after the window resets', async () => {
     const url = await startRateLimitedApp(1, 50);
 
-    expect((await postExec(url)).status).toBe(200);
-    expect((await postExec(url)).status).toBe(429);
+    expect((await postLimited(url)).status).toBe(200);
+    expect((await postLimited(url)).status).toBe(429);
     await new Promise(resolve => setTimeout(resolve, 125));
-    expect((await postExec(url)).status).toBe(200);
+    expect((await postLimited(url)).status).toBe(200);
   });
 });
