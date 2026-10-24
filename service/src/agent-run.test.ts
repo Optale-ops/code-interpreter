@@ -21,6 +21,8 @@ import { CodeApiJwtAuthError, verifyLibreChatJwt } from './auth/librechat-jwt';
 import { applyPrincipal } from './auth/principal';
 import {
   OWNER_BINDING_HEADER,
+  OWNER_BINDING_PATTERN,
+  sessionOwnerBindingValue,
   agentRunSessionKey,
   ownerBindingFromHeader,
   ownerBindingValue,
@@ -136,7 +138,7 @@ function uploadedRef(result: { body: unknown }): { sid: string; fid: string } {
 /** The new file server's owner-checked delete, applied to the stub's objects. */
 const newFileServerOwnerDelete = (req: { headers: Record<string, string | string[] | undefined> }, key: string) => {
   const expected = req.headers['x-codeapi-owner-expect'];
-  if (typeof expected !== 'string' || !/^agent_run\.[0-9a-f]{64}$/.test(expected)) return { status: 400, body: { error: 'Expected owner is required' } };
+  if (typeof expected !== 'string' || !OWNER_BINDING_PATTERN.test(expected)) return { status: 400, body: { error: 'Expected owner is required' } };
   if (!harness.objects.has(key)) return { status: 200, body: { outcome: 'absent' } };
   const stored = bindings.get(key);
   if (!stored || stored !== expected) return { status: 403, body: { error: 'Owner binding does not match' } };
@@ -163,6 +165,10 @@ beforeAll(async () => {
     const owner = ownerBindingFromHeader(headers[OWNER_BINDING_HEADER.toLowerCase()], sid, fid);
     if (!owner.ok) return { status: 400, body: { error: owner.error } };
     if (owner.binding) bindings.set(`${sid}/${fid}`, owner.binding);
+    else {
+      const sessionKey = harness.redis.entries.get(`session:${sid}`)?.value;
+      if (sessionKey?.includes(':user:')) bindings.set(`${sid}/${fid}`, sessionOwnerBindingValue(sessionKey));
+    }
     return undefined;
   });
   harness.setOwnerDeleteHandler(newFileServerOwnerDelete);
@@ -175,6 +181,34 @@ afterAll(async () => {
 
 beforeEach(() => {
   delete process.env.CODEAPI_TENANT_ISOLATION_STRICT;
+});
+
+describe('durable user deletion', () => {
+  test('expired user session keeps bytes private and lets only the owner delete', async () => {
+    const { sid, fid } = uploadedRef(await agentUpload({ kind: 'user', id: USER }, userToken()));
+    expect(harness.objects.get(`${sid}/${fid}`)?.bytes.toString()).toBe('agent input');
+    await harness.redis.del(`session:${sid}`);
+    const path = `/v1/files/${sid}/${fid}?kind=user&id=${USER}`;
+    for (const token of [userToken({ sub: 'other-user' }), userToken({ tenant_id: OTHER_TENANT })]) {
+      expect((await call(harness.baseUrl, token, 'DELETE', path)).status).toBe(403);
+      expect(harness.objects.has(`${sid}/${fid}`)).toBe(true);
+    }
+    expect((await call(harness.baseUrl, userToken(), 'GET', `/v1/download/${sid}/${fid}?kind=user&id=${USER}`)).status).toBe(403);
+    expect((await call(harness.baseUrl, userToken(), 'DELETE', path)).status).toBe(200);
+    expect(harness.objects.has(`${sid}/${fid}`)).toBe(false);
+    expect((await call(harness.baseUrl, userToken(), 'DELETE', path)).status).toBe(404);
+  });
+
+  test('unbound old objects and conflicting live sessions cannot use the fallback', async () => {
+    const { sid, fid } = uploadedRef(await agentUpload({ kind: 'user', id: USER }, userToken()));
+    const path = `/v1/files/${sid}/${fid}?kind=user&id=${USER}`;
+    await harness.redis.set(`session:${sid}`, `${OTHER_TENANT}:user:${USER}`);
+    expect((await call(harness.baseUrl, userToken(), 'DELETE', path)).status).toBe(403);
+    await harness.redis.del(`session:${sid}`);
+    bindings.delete(`${sid}/${fid}`);
+    expect((await call(harness.baseUrl, userToken(), 'DELETE', path)).status).toBe(403);
+    expect(harness.objects.has(`${sid}/${fid}`)).toBe(true);
+  });
 });
 
 describe('agent_run claim grammar', () => {

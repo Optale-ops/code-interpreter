@@ -7,7 +7,7 @@ import { resolveSessionKey, parseUploadSessionKeyInput, SessionKeyResolutionErro
 import { LibreChatJwtAuthProvider, CodeApiJwtAuthError } from '../auth/librechat-jwt';
 import { applyPrincipal, type AgentRunPrincipal, type CodeApiPrincipal } from '../auth/principal';
 import { applyLocalPrincipal } from '../auth/local';
-import { agentRunLogFields, ownerBindingValue, sessionKeyForLog } from '../agent-run';
+import { agentRunLogFields, ownerBindingValue, sessionOwnerBindingValue, sessionKeyForLog } from '../agent-run';
 import { internalServiceAuthEnabled } from '../internal-service-auth';
 import { AuthProviderConfigError, getAuthProviderMode } from '../auth/provider';
 import {
@@ -311,14 +311,15 @@ export const sessionAuth = async (req: AuthenticatedRequest, res: Response, next
   }
   const cachedSessionKey = await connection.get(`session:${session_id}`);
   if (cachedSessionKey !== sessionKey) {
-    /* The session cache expires after SESSION_CACHE_TTL. A deletion-only
-     * agent_run token may then still delete, but only against the durable
-     * owner binding stored with the bytes: the file server removes the object
-     * only if that binding names this tenant, Agent and run. A present but
-     * different cache entry is a refusal. */
-    if (cachedSessionKey === null && agentRunPrincipal?.agentRun.fileDelete && req.method === 'DELETE') {
+    /* An expired cache can be replaced only by the object's durable binding.
+     * A present but different cache entry still refuses the request. Shared
+     * resource identities never authorize this user-private fallback. */
+    const userDelete = !agentRunPrincipal && sessionKeyInput.kind === 'user' && internalServiceAuthEnabled();
+    if (cachedSessionKey === null && req.method === 'DELETE' && (agentRunPrincipal?.agentRun.fileDelete || userDelete)) {
       req.sessionKey = sessionKey;
-      req.ownerBindingExpectation = ownerBindingValue(agentRunPrincipal.tenantId, agentRunPrincipal.agentRun);
+      req.ownerBindingExpectation = agentRunPrincipal
+        ? ownerBindingValue(agentRunPrincipal.tenantId, agentRunPrincipal.agentRun)
+        : sessionOwnerBindingValue(sessionKey);
       logger.info('Session cache absent; deleting against the durable owner binding', authLogMeta(req));
       next();
       return;

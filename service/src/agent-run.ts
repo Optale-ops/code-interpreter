@@ -64,7 +64,7 @@ export const OWNER_BINDING_HEADER = 'X-CodeAPI-Owner-Binding';
 /** Internal api → file_server header: delete only if the stored binding equals this. */
 export const OWNER_EXPECT_HEADER = 'X-CodeAPI-Owner-Expect';
 /** Shape of a stored binding (see `ownerBindingValue`). */
-export const OWNER_BINDING_PATTERN = /^agent_run\.[0-9a-f]{64}$/;
+export const OWNER_BINDING_PATTERN = /^(?:agent_run|session)\.[0-9a-f]{64}$/;
 /**
  * Last path segment of the file server's owner-checked delete operation,
  * `POST /sessions/:sid/objects/:fid/owner-delete`. File servers that predate
@@ -86,6 +86,11 @@ export function ownerBindingValue(tenantId: string, subject: AgentRunSubject): s
     .update(JSON.stringify([AGENT_RUN_PRINCIPAL_SOURCE, tenantId, subject.agentId, subject.runId]))
     .digest('hex');
   return `agent_run.${digest}`;
+}
+
+/** Bind bytes to the server-derived session namespace, never a caller-supplied id. */
+export function sessionOwnerBindingValue(sessionKey: string): string {
+  return `session.${createHash('sha256').update(sessionKey).digest('hex')}`;
 }
 
 function ownerBindingKey(): Buffer | undefined {
