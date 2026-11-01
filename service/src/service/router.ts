@@ -1028,10 +1028,9 @@ router.delete('/files/:session_id/:fileId', fetchLimiter, sessionAuth, async (re
   } catch (error) {
     const errorDetails = getAxiosErrorDetails(error);
     logger.error(`[${INSTANCE_ID}] Error deleting file - Session ID: ${session_id} | File ID: ${fileId}:`, errorDetails);
-    /* Cache-present agent_run deletes keep the plain route; their outcomes are
-     * explicit: not-found only when the scoped bytes are absent, anything
-     * else is a failure, never success. */
-    if (req.codeApiAuthContext?.agentRun && axios.isAxiosError(error) && error.response?.status === 404) {
+    /* A missing scoped object is already deleted for both personal and
+     * agent-run callers. Other storage failures remain failures. */
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
       return res.status(404).json({ error: 'File not found' });
     }
     return res.status(500).json({

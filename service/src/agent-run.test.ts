@@ -247,6 +247,17 @@ describe('agent_run claim grammar', () => {
     expect(principal.agentRun).toBeUndefined();
     expect(principal.userId).toBe(AGENT);
   });
+
+  test('personal file deletion returns 404 when the backing object is already absent', async () => {
+    const token = userToken();
+    const { sid, fid } = uploadedRef(await uploadForm(
+      harness.baseUrl, token, { kind: 'user', id: USER },
+      [{ name: 'delete-retry.txt', content: 'delete retry' }],
+    ));
+    const target = `/v1/files/${sid}/${fid}?kind=user&id=${USER}`;
+    expect((await call(harness.baseUrl, token, 'DELETE', target)).status).toBe(200);
+    expect((await call(harness.baseUrl, token, 'DELETE', target)).status).toBe(404);
+  });
 });
 
 describe('agent_run identity consumers (C5)', () => {
