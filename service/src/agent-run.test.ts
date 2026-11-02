@@ -7,6 +7,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'crypto';
 import { join } from 'path';
+import { createServer } from 'http';
 import {
   call,
   installRouteHarness,
@@ -256,7 +257,40 @@ describe('agent_run claim grammar', () => {
     ));
     const target = `/v1/files/${sid}/${fid}?kind=user&id=${USER}`;
     expect((await call(harness.baseUrl, token, 'DELETE', target)).status).toBe(200);
+    harness.logs.length = 0;
     expect((await call(harness.baseUrl, token, 'DELETE', target)).status).toBe(404);
+    expect(harness.logs.filter(log => log.level === 'error')).toEqual([]);
+    expect(harness.logs.some(log => log.level === 'debug' && /already deleted/.test(log.message))).toBe(true);
+  });
+
+  test('a backing storage 500 still logs the full deletion error', async () => {
+    const token = userToken();
+    const { sid, fid } = uploadedRef(await uploadForm(
+      harness.baseUrl, token, { kind: 'user', id: USER },
+      [{ name: 'delete-error.txt', content: 'private content must not be logged' }],
+    ));
+    const upstream = createServer((_req, res) => {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'private backing failure body' }));
+    });
+    await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve));
+    const saved = env.FILE_SERVER_URL;
+    const address = upstream.address();
+    if (!address || typeof address === 'string') throw new Error('Expected a TCP address');
+    env.FILE_SERVER_URL = `http://127.0.0.1:${address.port}`;
+    harness.logs.length = 0;
+    try {
+      expect((await call(harness.baseUrl, token, 'DELETE', `/v1/files/${sid}/${fid}?kind=user&id=${USER}`)).status).toBe(500);
+      const errors = harness.logs.filter(log => log.level === 'error');
+      expect(errors.length).toBeGreaterThan(0);
+      const logged = JSON.stringify(errors);
+      expect(logged).toContain('stack');
+      expect(logged).not.toContain('private backing failure body');
+      expect(logged).not.toContain('private content must not be logged');
+    } finally {
+      env.FILE_SERVER_URL = saved;
+      await new Promise<void>((resolve, reject) => upstream.close(error => error ? reject(error) : resolve()));
+    }
   });
 });
 
