@@ -1026,6 +1026,12 @@ router.delete('/files/:session_id/:fileId', fetchLimiter, sessionAuth, async (re
     logger.info(`[${INSTANCE_ID}] File deleted: Session ID: ${session_id} | File ID: ${fileId}`);
     return res.status(200).json(response.data);
   } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      logger.debug(`[${INSTANCE_ID}] File already deleted`, {
+        requestId: req.header('x-request-id') || req.header('x-correlation-id'),
+      });
+      return res.status(404).json({ error: 'File not found' });
+    }
     // Keep the original diagnostic, never Axios config, response bodies or credentials.
     logger.error(`[${INSTANCE_ID}] Error deleting file - Session ID: ${session_id} | File ID: ${fileId}:`, {
       name: error instanceof Error ? error.name : 'UnknownError',
@@ -1034,11 +1040,6 @@ router.delete('/files/:session_id/:fileId', fetchLimiter, sessionAuth, async (re
       ...(axios.isAxiosError(error) ? { code: error.code, status: error.response?.status } : {}),
       requestId: req.header('x-request-id') || req.header('x-correlation-id'),
     });
-    /* A missing scoped object is already deleted for both personal and
-     * agent-run callers. Other storage failures remain failures. */
-    if (axios.isAxiosError(error) && error.response?.status === 404) {
-      return res.status(404).json({ error: 'File not found' });
-    }
     return res.status(500).json({
       error: 'Error deleting file',
     });
