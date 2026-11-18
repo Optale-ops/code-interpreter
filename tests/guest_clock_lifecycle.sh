@@ -124,6 +124,16 @@ if [[ "${TEST_SYNC_FAIL:-false}" == "true" ]]; then
     exit 1
 fi
 
+# Sync monitor: report the leap status the test chose (chronyc -c tracking).
+if [[ " $* " == *" tracking "* ]]; then
+    leap="Normal"
+    if [[ -n "${TEST_LEAP_FILE:-}" && -e "$TEST_LEAP_FILE" ]]; then
+        leap="$(cat "$TEST_LEAP_FILE")"
+    fi
+    printf '50484330,PHC0,1,1763469000.000000000,0.000000001,0.000000001,0.000000001,0.000,0.000,0.000,0.000000001,0.000000001,1.0,%s\n' "$leap"
+    exit 0
+fi
+
 if [[ -n "${TEST_SYNC_STARTED_FILE:-}" ]]; then
     touch "$TEST_SYNC_STARTED_FILE"
 fi
@@ -182,7 +192,7 @@ GUEST_ROOT="$TEST_DIR/root_mode"
 create_guest_root "$GUEST_ROOT"
 MODE_FILE="$TEST_DIR/dir_mode"
 invoke_guest "$GUEST_ROOT" bash -c 'ls -ld "$1/run/codeapi-clock" | cut -c1-10 > "$2"' -- "$GUEST_ROOT" "$MODE_FILE"
-[[ "$(cat "$MODE_FILE")" == "drwx------" ]]
+[[ "$(cat "$MODE_FILE")" == "drwx--x--x" ]]
 [[ ! -e "$GUEST_ROOT/run/codeapi-clock" ]]
 
 # 4. Gating: API is never started before trusted clock synchronization is ready
@@ -439,10 +449,55 @@ grep -qx 'refclock PHC /dev/ptp1 poll 0 dpoll -2' "$CONF_COPY"
 grep -qx 'makestep 0.1 1' "$CONF_COPY"
 grep -qx 'port 0' "$CONF_COPY"
 grep -qx 'cmdport 0' "$CONF_COPY"
-grep -qx "bindcmdaddress $GUEST_ROOT/run/codeapi-clock/chronyd.sock" "$CONF_COPY"
+grep -qx "bindcmdaddress $GUEST_ROOT/run/codeapi-clock/chrony/chronyd.sock" "$CONF_COPY"
 if grep -Eq '^(server|pool|peer|allow) ' "$CONF_COPY"; then
     echo "guest chrony configuration has a network time source or server" >&2
     exit 1
 fi
+
+# 15. Losing synchronization while the API runs (PTP source stops) stops the
+# API and returns non-zero, so the runner restarts instead of drifting.
+GUEST_ROOT="$TEST_DIR/root_sync_lost"
+create_guest_root "$GUEST_ROOT"
+LEAP_FILE="$TEST_DIR/leap_sync_lost"
+API_PID_FILE="$TEST_DIR/api_sync_lost.pid"
+API_READY="$TEST_DIR/api_ready_sync_lost"
+GUEST_CLOCK_CHECK_INTERVAL_SECONDS=0.1 GUEST_CLOCK_MAX_UNSYNCED_CHECKS=3 \
+TEST_LEAP_FILE="$LEAP_FILE" \
+invoke_guest "$GUEST_ROOT" bash -c 'echo $$ > "$1"; touch "$2"; while true; do sleep 0.05; done' -- "$API_PID_FILE" "$API_READY" 2>"$TEST_DIR/sync_lost.err" &
+sup_pid=$!
+while [[ ! -e "$API_READY" ]]; do
+    kill -0 "$sup_pid" 2>/dev/null || { echo "supervisor died before the API started" >&2; exit 1; }
+    sleep 0.05
+done
+api_pid="$(cat "$API_PID_FILE")"
+# Synchronized: the API keeps running across several checks.
+sleep 0.5
+kill -0 "$sup_pid"
+kill -0 "$api_pid"
+printf 'Not synchronised\n' > "$LEAP_FILE"
+set +e
+wait "$sup_pid"
+sup_rc=$?
+set -e
+[[ "$sup_rc" -ne 0 ]]
+if kill -0 "$api_pid" 2>/dev/null; then
+    echo "API process was left alive after the clock lost synchronization" >&2
+    exit 1
+fi
+grep -q 'lost synchronization' "$TEST_DIR/sync_lost.err"
+[[ ! -e "$GUEST_ROOT/run/codeapi-clock" ]]
+
+# 16. Run exactly as the launcher does: the script is the executable and gets
+# no arguments. Given any argument (libkrun appends launcher argv), it refuses
+# before starting a clock daemon instead of nesting a second copy.
+CHRONYD_PID_FILE="$TEST_DIR/chronyd_direct_args.pid"
+set +e
+TEST_CHRONYD_PID_FILE="$CHRONYD_PID_FILE" "$ROOT/api/src/guest-clock.sh" /sandbox_api/guest-clock.sh 2>"$TEST_DIR/direct_args.err"
+rc=$?
+set -e
+[[ "$rc" -eq 2 ]]
+[[ ! -e "$CHRONYD_PID_FILE" ]]
+grep -q 'takes no arguments' "$TEST_DIR/direct_args.err"
 
 printf 'guest clock lifecycle checks passed\n'
