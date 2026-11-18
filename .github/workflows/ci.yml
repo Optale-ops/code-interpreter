@@ -37,6 +37,9 @@ jobs:
       - name: Sandbox-runner liveness checks
         run: tests/sandbox_runner_healthcheck.sh
 
+      - name: KVM guest clock lifecycle
+        run: bash tests/guest_clock_lifecycle.sh
+
       - name: Validate sandbox Dockerfiles
         run: |
           docker buildx build --check -f api/Dockerfile .

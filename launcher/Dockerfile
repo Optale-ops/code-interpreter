@@ -48,6 +48,7 @@ RUN apt-get update && \
     bsdextrautils \
     locales \
     procps \
+    chrony \
     iptables \
     socat \
     libnl-route-3-200 \
@@ -92,7 +93,9 @@ RUN rm -f /usr/bin/nsenter /usr/bin/unshare /usr/bin/chroot /usr/sbin/chroot \
     2>/dev/null || true
 
 COPY api/src/entrypoint.sh ./entrypoint.sh
-RUN chmod +x ./entrypoint.sh
+COPY api/src/guest-clock.sh ./guest-clock.sh
+RUN chmod +x ./entrypoint.sh ./guest-clock.sh \
+    && mkdir -m 0700 -p /run/codeapi-clock
 
 # ============================================================================
 # Stage 2: Build the launcher binary on Fedora (libkrun is packaged there)

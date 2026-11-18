@@ -80,6 +80,7 @@ RUN apt-get update && \
     bsdextrautils \
     locales \
     procps \
+    chrony \
     iptables \
     iproute2 \
     bc \
@@ -151,6 +152,8 @@ RUN chmod 0444 \
 COPY docker/optale-agent /usr/local/bin/optale-agent
 RUN chmod 0555 /usr/local/bin/optale-agent
 RUN mkdir -p /run/codeapi && touch /run/codeapi/egress-grant && chmod 0000 /run/codeapi/egress-grant
+# Mountpoint for the KVM guest clock daemon's private tmpfs (guest-clock.sh).
+RUN mkdir -m 0700 /run/codeapi-clock
 
 RUN bun run build
 
@@ -175,7 +178,8 @@ RUN rm -f /usr/bin/nsenter /usr/bin/unshare /usr/bin/chroot /usr/sbin/chroot \
     2>/dev/null || true
 
 COPY api/src/entrypoint.sh ./entrypoint.sh
-RUN chmod +x ./entrypoint.sh
+COPY api/src/guest-clock.sh ./guest-clock.sh
+RUN chmod +x ./entrypoint.sh ./guest-clock.sh
 
 # Real-boundary test target: run the built API and NsJail directly while
 # retaining the same baked runtimes. Production launcher targets are unchanged.

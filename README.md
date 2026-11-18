@@ -75,6 +75,24 @@ Two modes are supported:
 - **NsJail mode** (`kvmEnabled: false`): Direct NsJail sandboxing with Linux namespaces and cgroups
 - **MicroVM mode** (`kvmEnabled: true`): libkrun microVM with its own kernel, NsJail runs inside the guest
 
+### KVM guest time
+
+A libkrun guest reads the host clock once at boot and then runs on its own
+counter, so it drifts by the host's NTP frequency correction. Signed execution
+manifests carry the host's issue time and the guest accepts them within 30
+seconds, so a drifted guest rejects fresh manifests as `not_yet_valid`.
+
+The guest command (`api/src/guest-clock.sh`, the launcher's default
+`LAUNCHER_EXEC`) runs chrony against the guest's `KVM virtual PTP` clock,
+which reads the host clock through the hypervisor. It waits for the first
+synchronization before starting the sandbox API and supervises both: if the
+clock daemon exits, the API stops and the runner restarts. Only the first
+update steps the clock; later corrections slew it. There is no network NTP
+source and no change to host capabilities, user-job clock restrictions or the
+manifest tolerance. The host must run KVM with a TSC clocksource so the guest
+gets the PTP clock; without it the guest refuses to start. Direct NsJail and
+Lambda startup do not run the clock daemon.
+
 ## Security disclaimer
 
 This service exists to run arbitrary, untrusted code — treat every
