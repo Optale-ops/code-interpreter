@@ -115,6 +115,7 @@ RUN apt-install \
     bsdextrautils \
     locales \
     procps \
+    chrony \
     iptables \
     bc \
     jq \
@@ -149,7 +150,9 @@ RUN bun install --frozen-lockfile --production
 COPY --from=sandbox-builder /app/.build ./.build
 COPY api/config ./config
 COPY api/src/entrypoint.sh ./entrypoint.sh
-RUN chmod +x ./entrypoint.sh
+COPY api/src/guest-clock.sh ./guest-clock.sh
+RUN chmod +x ./entrypoint.sh ./guest-clock.sh \
+    && mkdir -m 0700 -p /run/codeapi-clock
 
 RUN mkdir -p /pkgs /tmp/sandbox
 

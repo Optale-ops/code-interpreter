@@ -493,7 +493,10 @@ fn main() {
     let root_device = non_empty_env("LAUNCHER_ROOT_DEVICE").unwrap_or_else(|| "/dev/vda".into());
     let root_fstype = non_empty_env("LAUNCHER_ROOT_FSTYPE").unwrap_or_else(|| "ext4".into());
     let root_options = non_empty_env("LAUNCHER_ROOT_OPTIONS").unwrap_or_else(|| "ro".into());
-    let exec_path = env::var("LAUNCHER_EXEC").unwrap_or_else(|_| "/sandbox_api/entrypoint.sh".into());
+    // guest-clock.sh keeps the guest wall clock synchronized with the host
+    // (KVM virtual PTP + chrony), then runs /sandbox_api/entrypoint.sh. An
+    // empty LAUNCHER_EXEC (compose passes it through unset) keeps the default.
+    let exec_path = non_empty_env("LAUNCHER_EXEC").unwrap_or_else(|| "/sandbox_api/guest-clock.sh".into());
     let log_level: u32 = env::var("LAUNCHER_LOG_LEVEL")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -533,7 +536,9 @@ fn main() {
         .collect();
     let env_ptrs = null_term(&env_strs);
 
-    let argv_strs: Vec<CString> = vec![cstr(&exec_path)];
+    // libkrun's init appends these to exec_path as $1..., so the guest command
+    // gets no arguments; argv[0] is set from exec_path by init itself.
+    let argv_strs: Vec<CString> = Vec::new();
     let argv_ptrs = null_term(&argv_strs);
 
     let rlimit_strs: Vec<CString> = vec![guest_nofile_rlimit(nofile_target)];

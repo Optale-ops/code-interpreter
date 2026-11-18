@@ -166,6 +166,14 @@ workerSandbox:
     ramMib: 2048
     logLevel: 3
     filterVsockEnotconn: true
+    # Guest command. Empty keeps the image default, /sandbox_api/guest-clock.sh,
+    # which keeps the guest clock synchronized with the host through the KVM
+    # virtual PTP clock and refuses to boot without it (the node must run KVM on
+    # a TSC clocksource), so the runner restarts until it can. Fallback for
+    # such nodes: /sandbox_api/entrypoint.sh boots without clock sync; the guest
+    # then drifts by the node's NTP correction and must be restarted before it
+    # falls 30 s behind, or signed manifests fail as not_yet_valid.
+    guestCommand: ""
 
   # Resource limits (higher because it runs code + microVM)
   resources:

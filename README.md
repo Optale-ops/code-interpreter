@@ -75,6 +75,33 @@ Two modes are supported:
 - **NsJail mode** (`kvmEnabled: false`): Direct NsJail sandboxing with Linux namespaces and cgroups
 - **MicroVM mode** (`kvmEnabled: true`): libkrun microVM with its own kernel, NsJail runs inside the guest
 
+### KVM guest time
+
+A libkrun guest reads the host clock once at boot and then runs on its own
+counter, so it drifts by the host's NTP frequency correction. Signed execution
+manifests carry the host's issue time and the guest accepts them within 30
+seconds, so a drifted guest rejects fresh manifests as `not_yet_valid`.
+
+The guest command (`api/src/guest-clock.sh`, the launcher's default
+`LAUNCHER_EXEC`) runs chrony, as `_chrony` with its seccomp filter, against the
+guest's `KVM virtual PTP` clock, which reads the host clock through the
+hypervisor. It waits for the first synchronization before starting the sandbox
+API, then supervises the clock: if chronyd exits, or reports the clock
+unsynchronized for 60 seconds (for example when the PTP source stops), the API
+stops and the runner restarts. Only the first update steps the clock; later
+corrections slew it. There is no network NTP source and no change to host
+capabilities, user-job clock restrictions or the manifest tolerance. Direct
+NsJail and Lambda startup do not run the clock daemon.
+
+The host must run KVM on a TSC clocksource
+(`/sys/devices/system/clocksource/clocksource0/current_clocksource`) for the
+guest to get the PTP clock. Without it the guest refuses to start and the
+runner restarts in a loop, logging `guest has no 'KVM virtual PTP' clock`.
+Fallback for such hosts: set `LAUNCHER_EXEC=/sandbox_api/entrypoint.sh`
+(compose) or `workerSandbox.launcher.guestCommand` (Helm) to boot without clock
+sync. The guest then drifts by the host's NTP correction and must be restarted
+before it falls 30 seconds behind.
+
 ## Security disclaimer
 
 This service exists to run arbitrary, untrusted code — treat every

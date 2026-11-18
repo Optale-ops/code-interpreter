@@ -171,6 +171,8 @@ services:
             - LAUNCHER_VCPUS=2
             - LAUNCHER_RAM_MIB=2048
             - LAUNCHER_LOG_LEVEL=3
+            # Empty keeps the image's guest command, guest-clock.sh (README: KVM guest time).
+            - LAUNCHER_EXEC=${LAUNCHER_EXEC:-}
             - SANDBOX_ALLOWED_LOCAL_NETWORK_PORT=3190
             - SANDBOX_FORWARD_TARGET=egress_gateway:3190
             - SANDBOX_REQUIRE_EGRESS_MANIFEST=${SANDBOX_REQUIRE_EGRESS_MANIFEST:-true}
